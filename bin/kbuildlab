@@ -177,7 +177,7 @@ cmd_config() {
     local -a frags=()
     [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
     if [[ $preset -eq 1 ]]; then
-        frags=("${KBL_REPO}/presets/common.config" "${KBL_REPO}/presets/arch/${arch}.config" "${frags[@]:-}")
+        frags=("${KBL_REPO}/presets/common.config" "${KBL_REPO}/presets/arch/${arch}.config" "${frags[@]+"${frags[@]}"}")
     fi
 
     if [[ ! -f "$src/.config" ]]; then
@@ -217,7 +217,7 @@ cmd_build() {
     jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
     say "building     $(basename "$tree") ($arch, -j$jobs)"
     _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
-        -j"$jobs" "${mkargs[@]:-}" || die "build failed"
+        -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
     [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
     say "vmlinux      $src/vmlinux"
 }

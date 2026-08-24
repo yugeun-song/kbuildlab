@@ -51,12 +51,11 @@ while IFS='=' read -r k v; do
     v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
     [[ -n "${!k:-}" ]] || export "$k=$v"
 done < <(sed -n 's/^[[:space:]]*\(GDBTOOLS_[A-Z0-9_]*\)=\(.*\)/\1=\2/p' "$tree/tree.conf")
-export GDBTOOLS_KERNEL_ROOT="$tree/kernel"
 export GDBTOOLS_AUTO=1
 
 ARGS+=("$vmlinux" -ex "target remote :${PORT}")
 [[ -n "$tool" ]] && ARGS=(-q -iex "set pagination off" -ex "source $tool" "$vmlinux" -ex "target remote :${PORT}")
-ARGS+=("${PASS[@]:-}")
+ARGS+=("${PASS[@]+"${PASS[@]}"}")
 
 say "attaching    $gdb -> :$PORT"
 [[ -n "$tool" ]] && say "gdbtools     $tool" || say "gdbtools     not installed (plain gdb; pre-MMU symbols will not resolve)"

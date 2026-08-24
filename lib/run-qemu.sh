@@ -56,7 +56,7 @@ if [[ "$arch" == "x86_64" && "$KVM" != 0 && -r /dev/kvm && -w /dev/kvm ]]; then
 fi
 CMD+=(-gdb "tcp::${PORT}")
 [[ $RUN -eq 1 ]] || CMD+=(-S)
-CMD+=("${EXTRA[@]:-}")
+CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
 say "guest        $(basename "$tree") ($arch) on :$PORT"
 [[ $RUN -eq 1 ]] || say "frozen       attach with: kbuildlab attach $(basename "$tree")"
