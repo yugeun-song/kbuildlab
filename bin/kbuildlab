@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# kbuildlab -- build a Linux kernel in a container, boot it in QEMU, debug it.
+#
+# One entry point.  Every subcommand resolves the tree the same way and
+# validates what it was handed before doing anything.
+set -uo pipefail
+
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
+# shellcheck source=/dev/null
+source "${KBL_REPO}/lib/common.sh"
+
+KBL_DEFAULT_VERSION="v6.12"
+KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
+STABLE_URL="${KBL_STABLE_URL:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git}"
+MAINLINE_URL="${KBL_MAINLINE_URL:-https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git}"
+
+usage() {
+    cat <<USAGE
+kbuildlab -- containerised Linux kernel build, boot and debug
+
+  kbuildlab init [--workspace DIR]          record where trees live
+  kbuildlab init NAME --arch ARCH [--version V]
+                                            create a tree (default $KBL_DEFAULT_VERSION)
+  kbuildlab image                           build the container image
+  kbuildlab sync   [TREE]                   fetch, and fast-forward to the newest
+                                            patch level of the tracked version
+  kbuildlab config [TREE] [--preset]        apply the debuggability preset
+  kbuildlab build  [TREE] [-- MAKE ARGS]    build in the container
+  kbuildlab update [TREE]                   sync + rebuild + reindex, keeping .config
+  kbuildlab tags   [TREE]                   refresh ctags and cscope
+  kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
+  kbuildlab attach [TREE]                   attach gdb to a running guest
+  kbuildlab trees                           what is in the workspace
+  kbuildlab doctor                          check the host has what is needed
+
+ARCH is one of: arm64, riscv64, x86_64.
+USAGE
+}
+
+# ---------------------------------------------------------------- doctor
+cmd_doctor() {
+    local rc=0
+    echo "kbuildlab doctor"
+    say "repo         ${KBL_REPO}"
+    if c="$(kbl_container 2>/dev/null)"; then say "container    $c"; else
+        say "container    MISSING (docker, podman or nerdctl)"; rc=1; fi
+    for a in x86_64 arm64 riscv64; do
+        local q g
+        q="$(kbl_qemu "$a" 2>/dev/null)" || { say "qemu $a    MISSING"; rc=1; continue; }
+        g="$(kbl_gdb  "$a" 2>/dev/null)" || { say "gdb  $a    MISSING"; rc=1; continue; }
+        printf '  %-12s %s + %s\n' "$a" "$q" "$g"
+    done
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then say "kvm          usable (x86 guests can use it)"
+    else say "kvm          not accessible -- x86 guests fall back to TCG"; fi
+    if w="$(kbl_workspace 2>/dev/null)"; then
+        say "workspace    $w"
+        local t; t="$(kbl_trees | tr '\n' ' ')"
+        say "trees        ${t:-(none)}"
+    else
+        say "workspace    not recorded -- kbuildlab init --workspace DIR"
+    fi
+    [[ $rc -eq 0 ]] || echo "kbuildlab: something above is missing; install it and re-run" >&2
+    return $rc
+}
+
+# ---------------------------------------------------------------- init
+cmd_init() {
+    local name="" arch="" version="$KBL_DEFAULT_VERSION" ws=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace) ws="${2:?--workspace needs a directory}"; shift 2 ;;
+            --arch)      arch="${2:?--arch needs a value}"; shift 2 ;;
+            --version)   version="${2:?--version needs a value}"; shift 2 ;;
+            -*) die "init: unknown option '$1'" ;;
+            *)  name="$1"; shift ;;
+        esac
+    done
+
+    if [[ -n "$ws" ]]; then
+        mkdir -p "$ws" || die "cannot create $ws"
+        ws="$(cd -P "$ws" && pwd)"
+        mkdir -p "$KBL_CONFIG_HOME"
+        printf '%s\n' "$ws" > "$KBL_CONFIG_HOME/workspace"
+        say "workspace    $ws"
+        [[ -z "$name" ]] && return 0
+    fi
+
+    [[ -n "$name" ]] || die "init: name a tree, or pass --workspace DIR"
+    [[ -n "$arch" ]] || die "init: --arch is required (arm64, riscv64, x86_64)"
+    case "$arch" in arm64|riscv64|x86_64) ;; *) die "init: unknown arch '$arch'" ;; esac
+
+    local root; root="$(kbl_workspace)/$name"
+    [[ -e "$root" ]] && die "init: $root already exists"
+    mkdir -p "$root"
+    local tpl="${KBL_REPO}/templates/tree.conf.${arch}"
+    [[ -r "$tpl" ]] || die "init: no QEMU template for $arch"
+    { sed -e "s/@ARCH@/$arch/" -e "s/@VERSION@/$version/" -e "s/@NAME@/$name/" \
+          "${KBL_REPO}/templates/tree.conf.in"
+      cat "$tpl"
+    } > "$root/tree.conf"
+    say "created      $root"
+    say "next         kbuildlab sync $name"
+}
+
+# ---------------------------------------------------------------- image
+cmd_image() {
+    local c; c="$(kbl_container)"
+    "$c" build -t "$KBL_IMAGE" -f "${KBL_REPO}/containers/Containerfile" \
+        "${KBL_REPO}/containers" || die "image build failed"
+    say "built        $KBL_IMAGE"
+}
+
+# ---------------------------------------------------------------- helpers
+_in_container() {   # _in_container WORKDIR CMD...
+    local c ws wd; c="$(kbl_container)"; ws="$(kbl_workspace)"; wd="$1"; shift
+    "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1 \
+        || die "container image $KBL_IMAGE is missing. Build it: kbuildlab image"
+    "$c" run --rm -v "${ws}:${ws}" -w "$wd" "$KBL_IMAGE" "$@"
+}
+
+_cross() {
+    case "$1" in
+        arm64|aarch64) echo "aarch64-linux-gnu-" ;;
+        riscv64)       echo "riscv64-linux-gnu-" ;;
+        x86_64)        echo "" ;;
+    esac
+}
+_karch() { case "$1" in arm64|aarch64) echo arm64 ;; riscv64) echo riscv ;; x86_64) echo x86_64 ;; esac; }
+
+# ---------------------------------------------------------------- sync
+cmd_sync() {
+    local tree; tree="$(kbl_tree "${1:-}")" || exit 1
+    local ver url src
+    ver="$(kbl_tree_get "$tree" VERSION)"
+    [[ -n "$ver" ]] || die "$tree/tree.conf states no VERSION"
+    case "$(kbl_tree_get "$tree" UPSTREAM)" in
+        mainline) url="$MAINLINE_URL" ;;
+        *)        url="$STABLE_URL" ;;
+    esac
+    src="$tree/kernel"
+
+    if [[ ! -d "$src/.git" ]]; then
+        say "cloning      $ver from $url"
+        git clone --depth 1 --branch "$ver" "$url" "$src" \
+            || die "clone failed: is '$ver' a real tag or branch?"
+        return 0
+    fi
+
+    say "fetching     $ver"
+    git -C "$src" fetch --depth 1 origin "$ver" || die "fetch failed"
+    # A tag never moves, so fetching one is a no-op; a stable BRANCH does move,
+    # and that is the follow-up-patch case this command exists for.
+    if git -C "$src" rev-parse --verify --quiet "refs/tags/$ver" >/dev/null; then
+        say "pinned       $ver is a tag; nothing to advance"
+    else
+        local before after
+        before="$(git -C "$src" rev-parse HEAD)"
+        git -C "$src" merge --ff-only FETCH_HEAD || die "not a fast-forward -- the tree has local commits"
+        after="$(git -C "$src" rev-parse HEAD)"
+        if [[ "$before" == "$after" ]]; then say "up to date   $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"
+        else say "advanced     $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"; fi
+    fi
+}
+
+# ---------------------------------------------------------------- config
+cmd_config() {
+    local tree preset=0
+    local -a rest=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in --preset) preset=1; shift ;; *) rest+=("$1"); shift ;; esac
+    done
+    tree="$(kbl_tree "${rest[0]:-}")" || exit 1
+    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$tree/kernel"
+    [[ -d "$src" ]] || die "no kernel source in $tree -- run: kbuildlab sync"
+
+    local -a frags=()
+    [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
+    if [[ $preset -eq 1 ]]; then
+        frags=("${KBL_REPO}/presets/common.config" "${KBL_REPO}/presets/arch/${arch}.config" "${frags[@]:-}")
+    fi
+
+    if [[ ! -f "$src/.config" ]]; then
+        say "defconfig    $karch"
+        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" defconfig \
+            || die "defconfig failed"
+    else
+        say "keeping      the existing .config"
+    fi
+
+    if [[ ${#frags[@]} -gt 0 && -n "${frags[0]:-}" ]]; then
+        say "merging      ${#frags[@]} fragment(s)"
+        _in_container "$src" ./scripts/kconfig/merge_config.sh -m .config "${frags[@]}" \
+            || die "merge_config failed"
+        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" olddefconfig \
+            || die "olddefconfig failed"
+        # The whole point: read it back.  A fragment line whose depends-on was
+        # unmet is dropped in silence, and the build then succeeds without it.
+        "${KBL_REPO}/presets/verify.sh" "$src/.config" "${frags[@]}" \
+            || die "the .config does not match what was asked for (above)"
+    fi
+}
+
+# ---------------------------------------------------------------- build
+cmd_build() {
+    local tree
+    local -a mkargs=()
+    local -a rest=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--" ]]; then shift; mkargs=("$@"); break; fi
+        rest+=("$1"); shift
+    done
+    tree="$(kbl_tree "${rest[0]:-}")" || exit 1
+    local arch karch src jobs
+    arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$tree/kernel"
+    [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(basename "$tree") --preset"
+    jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
+    say "building     $(basename "$tree") ($arch, -j$jobs)"
+    _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
+        -j"$jobs" "${mkargs[@]:-}" || die "build failed"
+    [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
+    say "vmlinux      $src/vmlinux"
+}
+
+# ---------------------------------------------------------------- tags
+cmd_tags() {
+    local tree; tree="$(kbl_tree "${1:-}")" || exit 1
+    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$tree/kernel"
+    [[ -d "$src" ]] || die "no kernel source in $tree"
+    # The kernel's own targets, so the index covers the arch that was built and
+    # not all twenty-odd of them.
+    say "indexing     ctags + cscope for $karch"
+    _in_container "$src" make ARCH="$karch" tags cscope \
+        || die "tags/cscope failed"
+    _in_container "$src" sh -c 'ls -la tags cscope.out 2>/dev/null || true'
+}
+
+# ---------------------------------------------------------------- update
+cmd_update() {
+    local tree; tree="$(kbl_tree "${1:-}")" || exit 1
+    local name; name="$(basename "$tree")"
+    say "updating     $name"
+    cmd_sync "$name"
+    # No --preset: an update preserves the .config that is there.  olddefconfig
+    # answers whatever new symbols the newer source introduced, using their
+    # defaults, and leaves every existing answer alone.
+    cmd_config "$name"
+    cmd_build "$name"
+    cmd_tags "$name"
+}
+
+# ---------------------------------------------------------------- run / attach
+cmd_run()    { exec "${KBL_REPO}/lib/run-qemu.sh" "$@"; }
+cmd_attach() { exec "${KBL_REPO}/lib/run-gdb.sh" "$@"; }
+
+# ---------------------------------------------------------------- dispatch
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    init)   cmd_init "$@" ;;
+    image)  cmd_image "$@" ;;
+    sync)   cmd_sync "$@" ;;
+    config) cmd_config "$@" ;;
+    build)  cmd_build "$@" ;;
+    tags)   cmd_tags "$@" ;;
+    update) cmd_update "$@" ;;
+    run)    cmd_run "$@" ;;
+    attach) cmd_attach "$@" ;;
+    trees)  kbl_trees ;;
+    doctor) cmd_doctor ;;
+    help|-h|--help) usage ;;
+    *) echo "kbuildlab: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
+esac

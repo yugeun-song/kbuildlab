@@ -1,0 +1,6 @@
+QEMU_BIN=qemu-system-aarch64
+MACHINE=virt
+CPU=cortex-a72
+CONSOLE=ttyAMA0
+KERNEL_IMAGE_REL=arch/arm64/boot/Image
+GDB_PORT=1235

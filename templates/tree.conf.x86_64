@@ -1,0 +1,6 @@
+QEMU_BIN=qemu-system-x86_64
+MACHINE=pc
+CPU=host
+CONSOLE=ttyS0
+KERNEL_IMAGE_REL=arch/x86/boot/bzImage
+GDB_PORT=1234

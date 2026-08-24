@@ -1,0 +1,26 @@
+# What this tree is.  Read by every kbuildlab command; never inferred from the
+# directory name, so renaming the directory cannot change what gets built.
+NAME=@NAME@
+ARCH=@ARCH@
+
+# The tag or branch to track.  A tag is pinned and `kbuildlab sync` will say so.
+# A stable branch such as linux-6.12.y moves as patches land, which is what
+# makes `kbuildlab update` meaningful.
+VERSION=@VERSION@
+UPSTREAM=stable          # stable | mainline
+
+# QEMU.  Filled in by the arch template; edit freely.
+
+# The kernel image base is deliberately NOT stated here.
+#
+# On riscv64 it cannot be: arch/riscv/mm/init.c reads `kernel_map.phys_addr =
+# (uintptr_t)(&_start)` PC-relatively before the MMU is on, and vmlinux.lds.S
+# links at a virtual address, so no physical base exists in the image to read.
+# The only guarantee is alignment -- 2MB for rv64, enforced by a BUG_ON in
+# mm/init.c -- and 0x80200000 is a loader convention, not a property of the
+# kernel.  arm64 and x86_64 are more predictable but not more principled.
+#
+# So the debugger measures it.  If you need to pin it for a target that cannot
+# be introspected, add GDBTOOLS_ENTRY_PA here and say where the number came
+# from; a number whose provenance is "it worked last time" is how a session ends
+# up calibrated to the wrong address with nothing reporting it.

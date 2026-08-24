@@ -1,0 +1,50 @@
+# Build environment for kernels and root filesystems.
+#
+# Plain OCI syntax, no builder extensions, so docker, podman, buildah and
+# nerdctl all read this file unchanged.  Dockerfile beside it is a symlink for
+# tools that look for that name first.
+#
+# The reason this exists: a rolling-release host moves its toolchain whenever it
+# feels like it, and buildroot in particular breaks on new gcc long before the
+# kernel does.  Pinning the build environment to a stable base decouples "what
+# my laptop has today" from "what this kernel was built with".
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+# buildroot refuses to configure as root without this; the container IS root.
+ENV FORCE_UNSAFE_CONFIGURE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates build-essential gcc-multilib g++-multilib \
+        git make binutils bc rsync patch wget curl cpio unzip file \
+        tar gzip bzip2 xz-utils \
+        libncurses-dev libssl-dev libelf-dev libcap-dev \
+        flex bison kmod gawk texinfo pkg-config cmake \
+        autoconf automake libtool gettext \
+        perl python3 python-is-python3 locales sed bash findutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# dwarves supplies pahole, which is what turns DWARF into BTF.  Without it
+# CONFIG_DEBUG_INFO_BTF fails the build rather than quietly skipping, which is
+# the behaviour we want -- the preset asks for BTF on purpose.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        dwarves clang llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cross toolchains for the two non-native targets.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+        gcc-riscv64-linux-gnu g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Source indexers, so `kbuildlab tags` runs in the same environment as the build
+# and indexes exactly what was compiled.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        universal-ctags cscope \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

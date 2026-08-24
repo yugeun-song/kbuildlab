@@ -1,0 +1,6 @@
+QEMU_BIN=qemu-system-riscv64
+MACHINE=virt
+CPU=rv64
+CONSOLE=ttyS0
+KERNEL_IMAGE_REL=arch/riscv/boot/Image
+GDB_PORT=1236
