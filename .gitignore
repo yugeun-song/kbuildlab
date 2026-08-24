@@ -1,0 +1,19 @@
+# Kernel trees and build output live in a WORKSPACE, never in this repository.
+# They are tens of gigabytes, they are not ours to version, and a built vmlinux
+# records absolute paths in DW_AT_comp_dir -- moving one silently breaks source
+# lookup without breaking the build.
+/workspace/
+*.img
+*.ext4
+*.qcow2
+vmlinux
+System.map
+tags
+cscope.*
+
+__pycache__/
+*.py[cod]
+*.log
+.gdb_history
+/.vscode/
+/.claude/
