@@ -1,0 +1,29 @@
+# Legacy build image for old kernels (v4.6, 2016) that Ubuntu 24.04's gcc-13
+# cannot compile. Debian 9 "stretch" (gcc-6.3) matches the era; its archived
+# packages come from Debian's own official archive.debian.org (not Ubuntu
+# old-releases, whose xenial indexes 404). Only arm64 is built here (v4.6's sole
+# target), so only the aarch64 cross toolchain is installed.
+FROM debian:stretch
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# stretch is archived: point apt at Debian's official archive and stop it
+# rejecting the necessarily-old Release files.
+RUN printf '%s\n' \
+      'deb http://archive.debian.org/debian stretch main' \
+      'deb http://archive.debian.org/debian-security stretch/updates main' \
+      > /etc/apt/sources.list \
+ && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99no-check-valid \
+ && printf 'Acquire::AllowInsecureRepositories "true";\n' >> /etc/apt/apt.conf.d/99no-check-valid
+
+RUN apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \
+        ca-certificates build-essential \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+        git make bc bison flex \
+        libssl-dev libelf-dev libncurses5-dev \
+        kmod cpio rsync wget curl file gawk perl \
+        exuberant-ctags cscope global \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

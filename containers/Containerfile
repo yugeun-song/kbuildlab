@@ -37,10 +37,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc-riscv64-linux-gnu g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
-# Source indexers, so `kbuildlab tags` runs in the same environment as the build
-# and indexes exactly what was compiled.
+# Source indexers for `kbuildlab tags`, in the same env as the build. GNU GLOBAL
+# (gtags) is the symbolic index (kernel has a `make gtags` target); with clangd
+# off, ctags+cscope+gtags are the navigation layer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        universal-ctags cscope \
+        universal-ctags cscope global \
+    && rm -rf /var/lib/apt/lists/*
+
+# Mainline riscv dynamic ftrace needs -fmin-function-alignment (gcc-14+); gcc-13
+# drops FUNCTION_TRACER on riscv with the compressed ISA. Make riscv default to
+# gcc-14 so config detection and the build agree. x86_64/arm64 stay on gcc-13.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-14-riscv64-linux-gnu g++-14-riscv64-linux-gnu \
+    && ln -sf riscv64-linux-gnu-gcc-14 /usr/bin/riscv64-linux-gnu-gcc \
+    && ln -sf riscv64-linux-gnu-g++-14 /usr/bin/riscv64-linux-gnu-g++ \
     && rm -rf /var/lib/apt/lists/*
 
 RUN locale-gen en_US.UTF-8
