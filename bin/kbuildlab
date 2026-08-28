@@ -30,11 +30,18 @@ kbuildlab -- containerised Linux kernel build, boot and debug
   kbuildlab update [TREE]                   sync + rebuild + reindex, keeping .config
   kbuildlab tags   [TREE]                   refresh ctags and cscope
   kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
+                                            (attaches the tree's INITRD rootfs;
+                                             --run to boot now, --no-initrd for none)
   kbuildlab attach [TREE]                   attach gdb to a running guest
+                                            (defaults to stopping at head.S _text;
+                                             --no-bootbreak to attach raw)
   kbuildlab trees                           what is in the workspace
   kbuildlab doctor                          check the host has what is needed
 
 ARCH is one of: arm64, riscv64, x86_64.
+TREE is a tree's name, its directory, or the kernel source root inside it
+(recognised by content, so the source directory may be named anything); omitted,
+it is the tree the current directory belongs to.
 USAGE
 }
 
@@ -99,16 +106,27 @@ cmd_init() {
           "${KBL_REPO}/templates/tree.conf.in"
       cat "$tpl"
     } > "$root/tree.conf"
+    # nvim-dap reads a tree's machine facts from qemu.conf; kbuildlab's name for
+    # it is tree.conf. Symlink so both read one source, no drift.
+    ln -sfn tree.conf "$root/qemu.conf"
     say "created      $root"
     say "next         kbuildlab sync $name"
 }
 
 # ---------------------------------------------------------------- image
+# image        -> default Ubuntu-24.04 image ($KBL_IMAGE)
+# image legacy -> gcc-6 image for old kernels like v4.6 ($KBL_LEGACY_IMAGE)
 cmd_image() {
-    local c; c="$(kbl_container)"
-    "$c" build -t "$KBL_IMAGE" -f "${KBL_REPO}/containers/Containerfile" \
-        "${KBL_REPO}/containers" || die "image build failed"
-    say "built        $KBL_IMAGE"
+    local c file tag
+    c="$(kbl_container)"
+    case "${1:-}" in
+        ""|default|latest) file="${KBL_REPO}/containers/Containerfile";        tag="$KBL_IMAGE" ;;
+        legacy)            file="${KBL_REPO}/containers/Containerfile.legacy";  tag="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}" ;;
+        *) die "image: unknown variant '$1' (known: legacy)" ;;
+    esac
+    [[ -r "$file" ]] || die "image: no Containerfile at $file"
+    "$c" build -t "$tag" -f "$file" "${KBL_REPO}/containers" || die "image build failed"
+    say "built        $tag"
 }
 
 # ---------------------------------------------------------------- helpers
@@ -116,7 +134,25 @@ _in_container() {   # _in_container WORKDIR CMD...
     local c ws wd; c="$(kbl_container)"; ws="$(kbl_workspace)"; wd="$1"; shift
     "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1 \
         || die "container image $KBL_IMAGE is missing. Build it: kbuildlab image"
-    "$c" run --rm -v "${ws}:${ws}" -w "$wd" "$KBL_IMAGE" "$@"
+    # Run as the host user so build artifacts aren't root-owned; HOME to a
+    # writable path (mapped uid has no passwd entry). KBL_DOCKER_USER="" opts out
+    # (e.g. rootless podman, which maps ownership itself).
+    local -a _idopt=()
+    if [[ -z "${KBL_DOCKER_USER+x}" ]]; then
+        _idopt=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+    elif [[ -n "${KBL_DOCKER_USER}" ]]; then
+        _idopt=(--user "${KBL_DOCKER_USER}" -e HOME=/tmp)
+    fi
+    # config --preset feeds $KBL_REPO preset paths to in-container commands, but
+    # only the workspace is mounted; a repo outside it (sibling dir) is invisible
+    # in the guest and merge_config fails. Mount it read-only unless covered.
+    local -a _repomnt=()
+    case "${KBL_REPO}/" in
+        "${ws}"/*) : ;;
+        *) _repomnt=(-v "${KBL_REPO}:${KBL_REPO}:ro") ;;
+    esac
+    "$c" run --rm "${_idopt[@]+"${_idopt[@]}"}" "${_repomnt[@]+"${_repomnt[@]}"}" \
+        -v "${ws}:${ws}" -w "$wd" "$KBL_IMAGE" "$@"
 }
 
 _cross() {
@@ -138,17 +174,32 @@ cmd_sync() {
         mainline) url="$MAINLINE_URL" ;;
         *)        url="$STABLE_URL" ;;
     esac
-    src="$tree/kernel"
+    src="$(kbl_tree_src "$tree")"
 
     if [[ ! -d "$src/.git" ]]; then
         say "cloning      $ver from $url"
-        git clone --depth 1 --branch "$ver" "$url" "$src" \
-            || die "clone failed: is '$ver' a real tag or branch?"
+        # KBL_FULL_HISTORY: full clone (keeps git log/blame/diffs); borrow a local
+        # KBL_MIRROR to skip re-downloading, then dissociate. Else depth-1.
+        if [[ -n "${KBL_FULL_HISTORY:-}" ]]; then
+            local -a _refopt=()
+            [[ -n "${KBL_MIRROR:-}" && -d "$KBL_MIRROR" ]] && _refopt=(--reference-if-able "$KBL_MIRROR" --dissociate)
+            git clone "${_refopt[@]+"${_refopt[@]}"}" --branch "$ver" "$url" "$src" \
+                || die "clone failed: is '$ver' a real tag or branch?"
+        else
+            git clone --depth 1 --branch "$ver" "$url" "$src" \
+                || die "clone failed: is '$ver' a real tag or branch?"
+        fi
         return 0
     fi
 
     say "fetching     $ver"
-    git -C "$src" fetch --depth 1 origin "$ver" || die "fetch failed"
+    # depth-1 onto a full clone would shallow-truncate its history; keep depth-1
+    # only when the repo is already shallow.
+    if [[ "$(git -C "$src" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+        git -C "$src" fetch --depth 1 origin "$ver" || die "fetch failed"
+    else
+        git -C "$src" fetch --tags origin "$ver" || die "fetch failed"
+    fi
     # A tag never moves, so fetching one is a no-op; a stable BRANCH does move,
     # and that is the follow-up-patch case this command exists for.
     if git -C "$src" rev-parse --verify --quiet "refs/tags/$ver" >/dev/null; then
@@ -171,13 +222,21 @@ cmd_config() {
         case "$1" in --preset) preset=1; shift ;; *) rest+=("$1"); shift ;; esac
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
-    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$tree/kernel"
+    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -d "$src" ]] || die "no kernel source in $tree -- run: kbuildlab sync"
 
     local -a frags=()
     [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
     if [[ $preset -eq 1 ]]; then
-        frags=("${KBL_REPO}/presets/common.config" "${KBL_REPO}/presets/arch/${arch}.config" "${frags[@]+"${frags[@]}"}")
+        # A mainline tree may need an arch preset that differs from the stable one
+        # (e.g. riscv dropped compile-time PREEMPT_NONE and reworked ftrace). Use
+        # presets/arch/<arch>-mainline.config when it exists and UPSTREAM=mainline.
+        local archpreset="${KBL_REPO}/presets/arch/${arch}.config"
+        if [[ "$(kbl_tree_get "$tree" UPSTREAM)" == "mainline" \
+              && -f "${KBL_REPO}/presets/arch/${arch}-mainline.config" ]]; then
+            archpreset="${KBL_REPO}/presets/arch/${arch}-mainline.config"
+        fi
+        frags=("${KBL_REPO}/presets/common.config" "$archpreset" "${frags[@]+"${frags[@]}"}")
     fi
 
     if [[ ! -f "$src/.config" ]]; then
@@ -212,7 +271,7 @@ cmd_build() {
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch karch src jobs
-    arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$tree/kernel"
+    arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(basename "$tree") --preset"
     jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
     say "building     $(basename "$tree") ($arch, -j$jobs)"
@@ -225,14 +284,21 @@ cmd_build() {
 # ---------------------------------------------------------------- tags
 cmd_tags() {
     local tree; tree="$(kbl_tree "${1:-}")" || exit 1
-    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$tree/kernel"
+    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -d "$src" ]] || die "no kernel source in $tree"
-    # The kernel's own targets, so the index covers the arch that was built and
-    # not all twenty-odd of them.
+    # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
+    # optional -- not every image ships `global`, so absent is a warn, not fatal.
     say "indexing     ctags + cscope for $karch"
     _in_container "$src" make ARCH="$karch" tags cscope \
         || die "tags/cscope failed"
-    _in_container "$src" sh -c 'ls -la tags cscope.out 2>/dev/null || true'
+    if _in_container "$src" sh -c 'command -v gtags >/dev/null 2>&1'; then
+        say "indexing     gtags (GNU GLOBAL) for $karch"
+        _in_container "$src" make ARCH="$karch" gtags \
+            || warn "gtags failed (ctags/cscope are still current)"
+    else
+        warn "gtags skipped: no 'global' in the build image (rebuild image to add it)"
+    fi
+    _in_container "$src" sh -c 'ls -la tags cscope.out GTAGS 2>/dev/null || true'
 }
 
 # ---------------------------------------------------------------- update

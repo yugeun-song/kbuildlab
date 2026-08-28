@@ -90,21 +90,55 @@ kbl_workspace() {
 # answers the same way.
 kbl_is_tree() { [[ -f "$1/tree.conf" ]]; }
 
+# A kernel source root, recognised by content and not by name: the clone may sit
+# in a directory called anything ('kernel', 'linux', 'dummy').  The top-level
+# kernel Makefile carries the VERSION/PATCHLEVEL/SUBLEVEL block, and a real tree
+# also has arch/ and a top-level Kbuild -- together an unambiguous fingerprint.
+kbl_is_ksrc() {
+    local d="$1"
+    [[ -d "$d/arch" && -f "$d/Kbuild" && -f "$d/Makefile" ]] || return 1
+    grep -qE '^[[:space:]]*VERSION[[:space:]]*=' "$d/Makefile" 2>/dev/null \
+        && grep -qE '^[[:space:]]*PATCHLEVEL[[:space:]]*=' "$d/Makefile" 2>/dev/null \
+        && grep -qE '^[[:space:]]*SUBLEVEL[[:space:]]*=' "$d/Makefile" 2>/dev/null
+}
+
+# Map any path the user might name -- a tree directory, or the kernel source root
+# inside one -- to the tree that owns it.  Prints the tree dir; empty on no match.
+_kbl_owning_tree() {
+    local d="$1" p
+    [[ -d "$d" ]] || return 1
+    d="$(cd -P "$d" && pwd)" || return 1
+    kbl_is_tree "$d" && { printf '%s\n' "$d"; return 0; }
+    if kbl_is_ksrc "$d"; then
+        p="$(cd -P "$d/.." && pwd)"
+        kbl_is_tree "$p" && { printf '%s\n' "$p"; return 0; }
+    fi
+    return 1
+}
+
 kbl_trees() {
     local ws d; ws="$(kbl_workspace)" || exit 1
     for d in "$ws"/*/; do kbl_is_tree "${d%/}" && basename "${d%/}"; done
 }
 
 kbl_tree() {
-    local want="${1:-}" ws d n
+    local want="${1:-}" ws d n t
     ws="$(kbl_workspace)" || exit 1
     if [[ -n "$want" ]]; then
-        [[ "$want" == /* ]] && d="$want" || d="$ws/$want"
-        kbl_is_tree "$d" || die "'$want' is not a tree (no tree.conf in $d)
+        # A path (absolute, or relative with a slash) is tried as given and
+        # relative to CWD; a bare name is a tree under the workspace.  Either the
+        # tree directory or the kernel source root inside it may be named.
+        local -a cand=()
+        if   [[ "$want" == /* ]];  then cand=("$want")
+        elif [[ "$want" == */* ]]; then cand=("$PWD/$want" "$ws/$want")
+        else                            cand=("$ws/$want"); fi
+        for d in "${cand[@]}"; do
+            t="$(_kbl_owning_tree "$d")" && { printf '%s\n' "$t"; return 0; }
+        done
+        die "'$want' is not a tree or a kernel source (no tree.conf, no kernel Makefile)
        have: $(kbl_trees | tr '\n' ' ')"
-        (cd -P "$d" && pwd); return 0
     fi
-    kbl_is_tree "$PWD" && { pwd; return 0; }
+    t="$(_kbl_owning_tree "$PWD")" && { printf '%s\n' "$t"; return 0; }
     mapfile -t n < <(kbl_trees)
     case ${#n[@]} in
         0) die "no trees in $ws. Create one: kbuildlab init <name> --arch ARCH" ;;
@@ -129,6 +163,26 @@ kbl_tree_arch() {
     case "$a" in
         arm64|aarch64|riscv64|x86_64) printf '%s\n' "$a" ;;
         *) die "$1/tree.conf states ARCH=$a, which is not one of arm64, riscv64, x86_64" ;;
+    esac
+}
+
+# The kernel source directory inside a tree.  Named by SRC_DIR in tree.conf when
+# set; else the single kernel source root among the tree's immediate children;
+# else the historical default 'kernel' (also the clone target before any source
+# exists).  'kernel' is a default, never a requirement -- the clone may be named
+# anything and is still found by content.
+kbl_tree_src() {
+    local tree="$1" d n=0 found="" sd
+    sd="$(kbl_tree_get "$tree" SRC_DIR)"
+    [[ -n "$sd" ]] && { printf '%s\n' "$tree/$sd"; return 0; }
+    for d in "$tree"/*/; do
+        d="${d%/}"
+        kbl_is_ksrc "$d" && { found="$d"; n=$((n + 1)); }
+    done
+    case $n in
+        1) printf '%s\n' "$found" ;;
+        0) printf '%s\n' "$tree/kernel" ;;
+        *) die "$tree holds more than one kernel source; name one in tree.conf: SRC_DIR=<dir>" ;;
     esac
 }
 

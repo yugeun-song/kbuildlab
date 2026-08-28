@@ -9,6 +9,17 @@ ARCH=@ARCH@
 VERSION=@VERSION@
 UPSTREAM=stable          # stable | mainline
 
+# Where the kernel source lives inside this tree.  Left unset, kbuildlab finds
+# it by content (the single kernel source root among the children) and clones
+# into 'kernel'.  Set it only to disambiguate more than one source, or to clone
+# into a differently named directory: SRC_DIR=dummy
+
+# Root filesystem for `kbuildlab run`, handed to the kernel as an initramfs.  A
+# path, absolute or relative to this tree.  Without it the guest panics at
+# mount-root once continued, so set it to boot to a login shell (or pass
+# --no-initrd for early-boot debugging that never needs userspace):
+# INITRD=../rootfs/<arch>/images/rootfs.cpio.gz
+
 # QEMU.  Filled in by the arch template; edit freely.
 
 # The kernel image base is deliberately NOT stated here.
