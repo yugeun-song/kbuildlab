@@ -12,8 +12,21 @@ source "${KBL_REPO}/lib/common.sh"
 
 PORT=""; BOOTBREAK=1; STOP=""; STOP_AT=""
 declare -a REST=() PASS=()
+_usage() {
+    cat <<USAGE
+kbuildlab attach [TREE] [options] [-- GDB ARGS]
+  attach gdb to a running guest, stopped at head.S _text by default
+
+  --no-bootbreak|--raw   attach without running to _text (already-booted guest)
+  --stop WHERE           text (default) | firmware | start_kernel
+  --port|-p N            gdb port (default: the tree's GDB_PORT)
+  -- GDB ARGS            pass the rest straight to gdb
+  TREE is a name, directory, or kernel source root; omitted, the current tree.
+USAGE
+}
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -h|--help)            _usage; exit 0 ;;
         --port|-p)            PORT="${2:?--port needs a number}"; shift 2 ;;
         --no-bootbreak|--raw) BOOTBREAK=0; shift ;;   # attach raw (no run-to-_text)
         --bootbreak)          BOOTBREAK=1; shift ;;

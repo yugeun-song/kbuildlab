@@ -13,8 +13,27 @@ BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
 PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot)
 declare -a EXTRA=()
 declare -a REST=()
+_usage() {
+    cat <<USAGE
+kbuildlab run [TREE] [options] [-- QEMU ARGS]
+  boot a built tree under QEMU, frozen at reset for a debugger (--run to boot now)
+
+  --run              boot now instead of freezing at reset
+  --boot MODE        direct | uboot | uefi (default: the tree's BOOT)
+  --kaslr|--no-kaslr randomized vs deterministic base (default: --no-kaslr)
+  --kvm|--no-kvm     x86 only; default TCG for deterministic early-boot HW bp
+  --initrd PATH | --no-initrd    root fs image, or none (early-boot only)
+  --net|--no-net     user/virtio NIC with ssh forward, or none
+  --ssh-port N       host port forwarded to guest :22 (default 2222, auto-avoids)
+  --persist|--no-persist   attach the tree's writable disk (default: tree PERSIST)
+  --port|-g N        gdb port (default: the tree's GDB_PORT)
+  --mem|-m SIZE  --smp N  --bios PATH
+  TREE is a name, directory, or kernel source root; omitted, the current tree.
+USAGE
+}
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -h|--help)   _usage; exit 0 ;;
         --run)       RUN=1; shift ;;
         --port|-g)   PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
         --mem|-m)    MEM="${2:?}"; shift 2 ;;
