@@ -37,9 +37,53 @@ kbuildlab attach arm64-v6.12            # gdb, in another terminal
 
 `kbuildlab update <tree>` is the one for a tree you already have: it fetches,
 fast-forwards if the tracked version is a moving branch rather than a pinned
-tag, rebuilds with **the .config you already had**, and refreshes ctags and
-cscope. It never re-applies the preset, because your local answers to new
-Kconfig symbols are yours.
+tag, rebuilds with **the .config you already had**, and refreshes ctags,
+cscope and -- when the build image ships GNU GLOBAL -- gtags. It never
+re-applies the preset, because your local answers to new Kconfig symbols are
+yours.
+
+Every command takes `-h`/`--help`; `run` and `attach` carry the options worth
+knowing.
+
+```
+kbuildlab run [tree] [options] [-- QEMU ARGS]
+  --run                      boot now instead of freezing at the reset vector
+  --boot direct|uboot|uefi   boot path (default: the tree's BOOT, else direct)
+  --kaslr | --no-kaslr       randomized vs deterministic base (default --no-kaslr)
+  --kvm | --no-kvm           x86 only; TCG by default, for deterministic early-boot HW breakpoints
+  --initrd PATH | --no-initrd
+  --net | --no-net           user NIC with an ssh forward (default on); --ssh-port N
+  --persist | --no-persist   attach the tree's writable /persist disk
+  --port|-g N                gdb port (default: the tree's GDB_PORT); --mem|-m, --smp, --bios
+
+kbuildlab attach [tree] [options] [-- GDB ARGS]
+  --no-bootbreak|--raw       attach to an already-booted guest, no run-to-_text
+  --stop text|firmware|start_kernel   where to stop (default text = head.S _text)
+  --port|-p N                gdb port (default: the tree's GDB_PORT)
+```
+
+The gdb-port flag differs by command: `run` names it `-g` (QEMU's own spelling),
+`attach` names it `-p`.
+
+## The tree.conf
+
+`kbuildlab init NAME --arch ARCH` writes `<workspace>/NAME/tree.conf` from
+`templates/` -- the machine description every command reads, never inferred from
+the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
+`UPSTREAM`) and the facts `run` and `attach` consume: `QEMU_BIN`, `MACHINE`,
+`CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, and where they apply `BOOT`,
+`INITRD`, `PERSIST`, `CPU_PAGING` and the firmware paths (`UBOOT`,
+`OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`). `attach` also hands the debugger every
+`GDBTOOLS_*` line verbatim -- e.g. `GDBTOOLS_ENTRY_PA`, a kernel image base
+pinned for a target that cannot report it. A `qemu.conf` symlink points at the
+same file, which is what the editor's debug adapter reads.
+
+Per-machine settings live outside the repo. `kbuildlab init --workspace DIR`
+records the workspace path in `~/.config/kbuildlab/workspace`, which is never
+committed; `$KBL_WORKSPACE` overrides it. Everything else per machine is a
+`KBL_*` variable (`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`, `KBL_DOCKER_USER`,
+...), read from the environment -- keep them in an untracked file your shell
+sources, not in the tree.
 
 ## The debuggability preset
 
@@ -52,6 +96,10 @@ per-arch split fails on a specific class of option.
 | `common.config` | what all three architectures can set identically |
 | `arch/<arch>.config` | what looks shared but is not, plus each architecture's own |
 | `verify.sh` | reads the built `.config` back and fails on anything that did not survive |
+
+When a tree tracks `UPSTREAM=mainline`, `arch/<arch>-mainline.config` stands in
+for `arch/<arch>.config` where mainline has moved past the pinned release --
+riscv64 already ships one.
 
 Every line was checked against the 6.12 source. Promptless symbols are
 deliberately absent: `make olddefconfig` recomputes them from their selecters,
@@ -100,9 +148,12 @@ capability is present and idle, not that every diagnostic is armed.
 
 ### Architecture differences that are not preferences
 
-- **riscv64 has no hardware breakpoints.** `HAVE_HW_BREAKPOINT` is absent, so
-  gdb `watch` falls back to single-stepping the whole kernel and
-  `perf record -e mem:...` is refused.
+- **riscv64 has no *in-guest* hardware breakpoints.** `HAVE_HW_BREAKPOINT` is
+  absent, so the guest's own `perf record -e mem:...` is refused and an in-guest
+  ptrace watchpoint has no debug register to program. Debugging over the QEMU
+  gdbstub is a separate path and is unaffected -- QEMU enforces the watchpoint in
+  the emulator, so `watch` (and gdbtools' `kw`) from `kbuildlab attach` stop the
+  guest the instant the address is written, not by single-stepping.
 - **riscv64 ftrace and preemption are mutually exclusive.** `HAVE_FUNCTION_TRACER`
   is selected `if !XIP_KERNEL && !PREEMPTION`, so a preemptible riscv64 kernel
   has no ftrace at all — and Kconfig does not warn, it simply stops offering it.
@@ -117,8 +168,13 @@ Each arch fragment states these where you will read them.
 
 `containers/Containerfile` is plain OCI with no builder extensions, so **docker,
 podman, buildah and nerdctl all read it unchanged**. `Dockerfile` beside it is a
-symlink for tools that look for that name first. `kbuildlab` probes for a
-runtime in that order, or takes `$KBL_CONTAINER`.
+symlink for tools that look for that name first. `kbuildlab` picks a runtime in
+the order docker, podman, nerdctl -- buildah reads the `Containerfile` but cannot
+run a guest, so it is not auto-selected -- or takes `$KBL_CONTAINER`, which wins.
+
+`kbuildlab image` builds the default Ubuntu-24.04 image; `kbuildlab image legacy`
+builds a gcc-6 image (`containers/Containerfile.legacy`) for old kernels such as
+v4.6.
 
 ## Dependencies
 
