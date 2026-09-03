@@ -36,6 +36,10 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                                             (defaults to stopping at head.S _text;
                                              --no-bootbreak to attach raw)
   kbuildlab trees                           what is in the workspace
+  kbuildlab containers [status|clean]       what the container runtime holds for
+                                            kbuildlab, and whether it can collide
+                                            with the host (clean --images also
+                                            drops the built image)
   kbuildlab doctor                          check the host has what is needed
 
 ARCH is one of: arm64, riscv64, x86_64.
@@ -51,7 +55,7 @@ cmd_doctor() {
     echo "kbuildlab doctor"
     say "repo         ${KBL_REPO}"
     if c="$(kbl_container 2>/dev/null)"; then say "container    $c"; else
-        say "container    MISSING (docker, podman or nerdctl)"; rc=1; fi
+        say "container    MISSING (podman, docker or nerdctl)"; rc=1; fi
     for a in x86_64 arm64 riscv64; do
         local q g
         q="$(kbl_qemu "$a" 2>/dev/null)" || { say "qemu $a    MISSING"; rc=1; continue; }
@@ -106,8 +110,8 @@ cmd_init() {
           "${KBL_REPO}/templates/tree.conf.in"
       cat "$tpl"
     } > "$root/tree.conf"
-    # nvim-dap reads a tree's machine facts from qemu.conf; kbuildlab's name for
-    # it is tree.conf. Symlink so both read one source, no drift.
+    # tree.conf is the name; qemu.conf was the older one, and an editor adapter
+    # that still looks for it reads the same bytes rather than a stale copy.
     ln -sfn tree.conf "$root/qemu.conf"
     say "created      $root"
     say "next         kbuildlab sync $name"
@@ -131,15 +135,25 @@ cmd_image() {
 
 # ---------------------------------------------------------------- helpers
 _in_container() {   # _in_container WORKDIR CMD...
-    local c ws wd; c="$(kbl_container)"; ws="$(kbl_workspace)"; wd="$1"; shift
-    "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1 \
-        || die "container image $KBL_IMAGE is missing. Build it: kbuildlab image"
+    local c ws wd img; c="$(kbl_container)"; wd="$1"; shift
+    local _ws_raw; _ws_raw="$(kbl_workspace)" || exit 1
+    ws="$(kbl_assert_mountable "$_ws_raw")" || exit 1
+    # A tree that pins IMAGE= builds in that one; everything else in $KBL_IMAGE.
+    # The caller sets _KBL_ACTIVE_IMAGE because only a caller holding a tree can
+    # know which, and _in_container is also called with no tree in hand.
+    img="${_KBL_ACTIVE_IMAGE:-$KBL_IMAGE}"
+    "$c" image inspect "$img" >/dev/null 2>&1 \
+        || die "container image $img is missing. Build it: kbuildlab image"
     # Run as the host user so build artifacts aren't root-owned; HOME to a
-    # writable path (mapped uid has no passwd entry). KBL_DOCKER_USER="" opts out
-    # (e.g. rootless podman, which maps ownership itself).
+    # writable path (mapped uid has no passwd entry).  Rootless podman already maps
+    # the invoking user onto the container's root, so --user there would put the
+    # build on a subuid instead and the workspace would come back owned by nobody.
+    # KBL_DOCKER_USER states one explicitly; KBL_DOCKER_USER="" opts out entirely.
     local -a _idopt=()
     if [[ -z "${KBL_DOCKER_USER+x}" ]]; then
-        _idopt=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+        if [[ "$(basename "$c")" != podman || "$(id -u)" -eq 0 ]]; then
+            _idopt=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+        fi
     elif [[ -n "${KBL_DOCKER_USER}" ]]; then
         _idopt=(--user "${KBL_DOCKER_USER}" -e HOME=/tmp)
     fi
@@ -152,7 +166,7 @@ _in_container() {   # _in_container WORKDIR CMD...
         *) _repomnt=(-v "${KBL_REPO}:${KBL_REPO}:ro") ;;
     esac
     "$c" run --rm "${_idopt[@]+"${_idopt[@]}"}" "${_repomnt[@]+"${_repomnt[@]}"}" \
-        -v "${ws}:${ws}" -w "$wd" "$KBL_IMAGE" "$@"
+        -v "${ws}:${ws}" -w "$wd" "$img" "$@"
 }
 
 _cross() {
@@ -163,6 +177,57 @@ _cross() {
     esac
 }
 _karch() { case "$1" in arm64|aarch64) echo arm64 ;; riscv64) echo riscv ;; x86_64) echo x86_64 ;; esac; }
+
+# Which image, and which compiler inside it, a tree builds with.
+#
+# Two optional tree.conf keys: IMAGE names the container image, GCC names the
+# compiler version within it.  They exist because "the newest toolchain" is not
+# one answer across seven kernels.  gcc-10 turned -fno-common on by default and
+# a pre-5.6 kernel does not link under it; mainline tracks compilers a stable
+# series was never tested against.  So the ceiling belongs to the tree, and a
+# tree that has a reason to pin one says so where the rest of its build is
+# described rather than in an environment variable someone has to remember.
+#
+# Unset means the image default -- the unversioned gcc/g++ the image symlinks.
+_tree_image() { local v; v="$(kbl_tree_get "$1" IMAGE)"; printf '%s\n' "${v:-$KBL_IMAGE}"; }
+_tree_gcc()   { kbl_tree_get "$1" GCC; }
+
+# The make arguments that select it, one per line, or nothing when the tree
+# names no version.  Only the compiler is versioned: CROSS_COMPILE still
+# supplies ld/as/objcopy, which the distribution ships in one version per
+# target.  HOSTCC moves with CC so the host tools that parse the kernel's own
+# output (fixdep, modpost, the BTF pass) are not a generation apart from it.
+#
+# HOSTCC_FLAGS is appended to HOSTCC rather than set as HOSTCFLAGS, because
+# overriding HOSTCFLAGS on the command line replaces the kernel's own list
+# (-O2, -std=, the warning set) instead of adding to it, and a host tool built
+# without those is a second difference nobody asked for.  It exists for one
+# real case: a kernel older than 5.6 has tentative definitions its host tools
+# cannot link under gcc-10's -fno-common default, and `-fcommon` there raises
+# the whole tree by several compiler generations while leaving the kernel's own
+# code generation untouched -- which is the property that makes it acceptable.
+# KCFLAGS is the kernel's own append-to-KBUILD_CFLAGS variable, so a value here
+# lands after everything the tree's Makefile set and wins where the two conflict.
+# That is the point: it is how a flag the kernel hard-codes gets undone without
+# editing the kernel.  Keep it to flags that change only debug information --
+# gcc guarantees those do not change code generation -- because anything that
+# changes the objects belongs in the config, where the read-back check sees it.
+_cc_args() {   # _cc_args TREE ARCH
+    local g pre hf kf; g="$(_tree_gcc "$1")"
+    kf="$(kbl_tree_get "$1" KCFLAGS)"; hf="$(kbl_tree_get "$1" HOSTCC_FLAGS)"
+    # Each key stands on its own.  HOSTCC_FLAGS in particular must not need GCC= to
+    # take effect: a tree can want -fcommon on the image's own compiler without
+    # naming a version, and a flag that is read, accepted and then dropped is worse
+    # than one that is refused.
+    if [[ -n "$g" ]]; then
+        pre="$(_cross "$2")"
+        printf '%s\n' "CC=${pre}gcc-${g}" "HOSTCC=gcc-${g}${hf:+ $hf}" "HOSTCXX=g++-${g}"
+    elif [[ -n "$hf" ]]; then
+        printf '%s\n' "HOSTCC=gcc $hf"
+    fi
+    [[ -n "$kf" ]] && printf '%s\n' "KCFLAGS=$kf"
+    return 0
+}
 
 # ---------------------------------------------------------------- sync
 cmd_sync() {
@@ -224,6 +289,8 @@ cmd_config() {
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -d "$src" ]] || die "no kernel source in $tree -- run: kbuildlab sync"
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
 
     local -a frags=()
     [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
@@ -241,7 +308,8 @@ cmd_config() {
 
     if [[ ! -f "$src/.config" ]]; then
         say "defconfig    $karch"
-        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" defconfig \
+        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
+            "${cc[@]+"${cc[@]}"}" defconfig \
             || die "defconfig failed"
     else
         say "keeping      the existing .config"
@@ -251,7 +319,8 @@ cmd_config() {
         say "merging      ${#frags[@]} fragment(s)"
         _in_container "$src" ./scripts/kconfig/merge_config.sh -m .config "${frags[@]}" \
             || die "merge_config failed"
-        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" olddefconfig \
+        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
+            "${cc[@]+"${cc[@]}"}" olddefconfig \
             || die "olddefconfig failed"
         # The whole point: read it back.  A fragment line whose depends-on was
         # unmet is dropped in silence, and the build then succeeds without it.
@@ -274,9 +343,11 @@ cmd_build() {
     arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(basename "$tree") --preset"
     jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
-    say "building     $(basename "$tree") ($arch, -j$jobs)"
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
+    say "building     $(basename "$tree") ($arch, -j$jobs${cc[0]+, ${cc[0]#CC=}})"
     _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
-        -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
+        "${cc[@]+"${cc[@]}"}" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
     [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
     say "vmlinux      $src/vmlinux"
 }
@@ -286,6 +357,7 @@ cmd_tags() {
     local tree; tree="$(kbl_tree "${1:-}")" || exit 1
     local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -d "$src" ]] || die "no kernel source in $tree"
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
     # optional -- not every image ships `global`, so absent is a warn, not fatal.
     say "indexing     ctags + cscope for $karch"
@@ -319,6 +391,280 @@ cmd_update() {
 cmd_run()    { exec "${KBL_REPO}/lib/run-qemu.sh" "$@"; }
 cmd_attach() { exec "${KBL_REPO}/lib/run-gdb.sh" "$@"; }
 
+# ---------------------------------------------------------------- containers
+# What the container runtime holds for kbuildlab on this host, and whether any of
+# it can collide with the system package manager, the host toolchain, or the
+# environment a build runs in.  `status` only reports.  `clean` removes, and by
+# default only what kbuildlab itself created: the runtime is shared with whatever
+# else this machine runs, so a blanket prune is never the right answer here.
+
+# Variables that would steer a kernel build if they reached the container.  The
+# image sets none of them, so any of these seen INSIDE means the runtime is passing
+# the host environment through and a build would depend on the shell it started from.
+_KBL_BUILD_ENV=(CC CXX CPP LD AR NM OBJCOPY OBJDUMP HOSTCC HOSTCXX
+                CFLAGS CXXFLAGS CPPFLAGS LDFLAGS KCFLAGS KBUILD_CFLAGS
+                MAKEFLAGS ARCH CROSS_COMPILE LD_LIBRARY_PATH LD_PRELOAD
+                PKG_CONFIG_PATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH
+                SOURCE_DATE_EPOCH CCACHE_DIR)
+
+# Every image this workspace can use: the two defaults, plus whatever a tree
+# names for itself.  status and clean both read this, so a tree that pins its
+# own image is not invisible to either.
+_kbl_image_tags() {
+    { printf '%s\n' "$KBL_IMAGE" "${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
+      local t tr
+      for t in $(kbl_trees 2>/dev/null); do
+          tr="$(kbl_tree "$t" 2>/dev/null)" || continue
+          _tree_image "$tr"
+      done
+    } | awk 'NF && !seen[$0]++'
+}
+
+# A gcc banner reduced to what actually identifies the toolchain: the vendor string
+# in parentheses and the version after it.  The program name is dropped on purpose --
+# a cross compiler is named aarch64-linux-gnu-gcc but is the same toolchain as gcc,
+# while the host's "gcc (GCC) 15.1.0" and the image's "gcc (Ubuntu 13.3.0-...) 13.3.0"
+# share the name and are the two that must never mix in one build tree.
+_cc_fingerprint() { sed -n 's/.*(\(.*\)) *\([0-9][0-9.]*\).*/\1 \2/p' <<<"${1:-}" | head -1; }
+
+_containers_status() {
+    local c rc=0; c="$(kbl_container)" || return 1
+    echo "kbuildlab containers"
+    say "runtime      $c $("$c" --version 2>/dev/null | head -1)"
+    if [[ "$(basename "$c")" == podman ]]; then
+        say "mode         rootless=$("$c" info --format '{{.Host.Security.Rootless}}' 2>/dev/null) store=$("$c" info --format '{{.Store.GraphRoot}}' 2>/dev/null)"
+    fi
+    # A daemon is a process, not a unit: report what is actually running rather than
+    # what systemd would start, so this works the same for a rootless runtime.
+    local d; d="$(pgrep -a -x dockerd 2>/dev/null | head -1)"
+    say "daemon       ${d:-none running (nothing to start or stop)}"
+
+    local tag id sz
+    while read -r tag; do
+        if id="$("$c" image inspect "$tag" --format '{{.Id}}' 2>/dev/null)"; then
+            sz="$("$c" image inspect "$tag" --format '{{.Size}}' 2>/dev/null)"
+            id="${id#sha256:}"                  # docker prefixes the digest, podman does not
+            printf '  %-12s %s  %s  %s MiB\n' "image" "$tag" "${id:0:12}" "$(( ${sz:-0} / 1048576 ))"
+        else
+            printf '  %-12s %s  (not built)\n' "image" "$tag"
+        fi
+    done < <(_kbl_image_tags)
+
+    local n=0
+    while read -r tag; do
+        [[ -n "$tag" ]] || continue
+        n=$(( n + $("$c" ps -aq --filter "ancestor=$tag" 2>/dev/null | wc -l) ))
+    done < <(_kbl_image_tags)
+    say "containers   $n from kbuildlab images (kbuildlab runs with --rm, so this is normally 0)"
+    say "untagged     $("$c" images -q -f dangling=true 2>/dev/null | wc -l) image(s) on this host, from any project"
+
+    # Does the host environment reach a build?  Ask the container, do not assume.
+    local leaked="" v
+    if "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1; then
+        local inside; inside="$("$c" run --rm "$KBL_IMAGE" env 2>/dev/null)"
+        for v in "${_KBL_BUILD_ENV[@]}"; do
+            grep -q "^${v}=" <<<"$inside" && leaked="$leaked $v"
+        done
+        say "env          ${leaked:-clean -- no build-steering host variable reaches the container}"
+        [[ -n "$leaked" ]] && rc=1
+        # Ubuntu in the container, Arch on the host: the same tree built by both mixes
+        # objects from two compilers.  Compare what each tree records against the one
+        # that would build it now.
+        # One run for every compiler the image offers, keyed by the same CROSS_COMPILE
+        # prefix kbuildlab passes to make.  Comparing a cross-built tree against the
+        # image's NATIVE gcc compares two different compilers and answers nothing --
+        # an image is free to carry a different version per target, and this one did
+        # until the Containerfile pinned them together.
+        local banners a pre rec t cfg
+        banners="$("$c" run --rm "$KBL_IMAGE" sh -c '
+            for p in "" aarch64-linux-gnu- riscv64-linux-gnu-; do
+                printf "%s|%s\n" "$p" "$(${p}gcc --version 2>/dev/null | head -1)"
+            done' 2>/dev/null)"
+        # Only the default tag is built from containers/Containerfile, so only there
+        # does comparing against its pin mean anything; a $KBL_IMAGE pointing
+        # somewhere else is simply not checked rather than checked against the wrong
+        # file.
+        # The image carries several compilers on purpose, so the newest package
+        # named in the Containerfile is not what an unpinned build uses.  What it
+        # uses is whatever /usr/bin/gcc points at, and the ln that makes it point
+        # there is the one line worth comparing against.
+        local pinned=""
+        [[ "$KBL_IMAGE" == "kbuildlab:latest" ]] && pinned="$(sed -n \
+            's#.*ln -sf gcc-\([0-9][0-9]*\) /usr/bin/gcc.*#\1#p' \
+            "${KBL_REPO}/containers/Containerfile" 2>/dev/null | head -1)"
+        for a in x86_64 arm64 riscv64; do
+            pre="$(_cross "$a")"
+            local ban maj; ban="$(grep -m1 "^${pre}|" <<<"$banners" | cut -d'|' -f2-)"
+            printf '  %-12s %-8s %s\n' "compiler" "$a" "$ban"
+            # The Containerfile can move ahead of the image built from it, and nothing
+            # else would say so.  The version comes from the fingerprint rather than
+            # the last field: a banner can end in a datestamp ("gcc (GCC) 16.2.1 20260810").
+            maj="$(_cc_fingerprint "$ban")"; maj="${maj##* }"; maj="${maj%%.*}"
+            if [[ -n "$pinned" && -n "$maj" && "$maj" != "$pinned" ]]; then
+                printf '  %-12s %s has gcc %s but containers/Containerfile pins gcc-%s -- rebuild with `kbuildlab image`\n' \
+                    "STALE" "$a" "$maj" "$pinned"; rc=1
+            fi
+        done
+    else
+        say "env          not checked -- $KBL_IMAGE is not built (kbuildlab image)"
+    fi
+
+    # This is asked of the images the TREES name, so it is asked whether or not
+    # $KBL_IMAGE itself is built: a tree pinned to another image is exactly the
+    # case where the default one being absent says nothing about that tree.
+    # What each tree recorded, against what would build it now.  A tree names
+    # its own image and compiler version, so this is a per-tree question and
+    # not a per-architecture one: asking $KBL_IMAGE's native gcc about a tree
+    # that pins another image compares two unrelated compilers and reports a
+    # mismatch that means nothing.  Probe once per distinct image, with every
+    # compiler the trees on it ask for.
+    local tr timg tprog probe line
+    declare -A _progs=() _treeimg=() _treeprog=()
+    for t in $(kbl_trees 2>/dev/null); do
+        tr="$(kbl_tree "$t" 2>/dev/null)" || continue
+        timg="$(_tree_image "$tr")"
+        tprog="$(_cross "$(kbl_tree_arch "$tr" 2>/dev/null)")gcc"
+        local g; g="$(_tree_gcc "$tr")"; [[ -n "$g" ]] && tprog="${tprog}-${g}"
+        _treeimg["$t"]="$timg"; _treeprog["$t"]="$tprog"
+        case " ${_progs[$timg]:-} " in *" $tprog "*) : ;; *) _progs["$timg"]="${_progs[$timg]:-} $tprog" ;; esac
+    done
+    declare -A _seen=()
+    for timg in "${!_progs[@]}"; do
+        "$c" image inspect "$timg" >/dev/null 2>&1 || {
+            printf '  %-12s %s is named by a tree but is not built (kbuildlab image)\n' "MISSING" "$timg"; rc=1; continue; }
+        probe="$("$c" run --rm "$timg" sh -c '
+            for p in '"${_progs[$timg]}"'; do printf "%s|%s\n" "$p" "$($p --version 2>/dev/null | head -1)"; done' 2>/dev/null)"
+        while IFS= read -r line; do _seen["$timg|${line%%|*}"]="${line#*|}"; done <<<"$probe"
+    done
+    for t in $(kbl_trees 2>/dev/null); do
+        cfg="$(kbl_tree_src "$(kbl_tree "$t")" 2>/dev/null)/.config"
+        [[ -r "$cfg" ]] || continue
+        rec="$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\(.*\)"$/\1/p' "$cfg" | head -1)"
+        # Whether the named compiler EXISTS is a separate question from whether
+        # this tree can be compared against it, and it has an answer for every
+        # tree.  Ask it before the comparison bails out, or a tree too old to
+        # compare is also a tree whose GCC= is never checked at all.
+        if [[ -z "${_seen["${_treeimg[$t]}|${_treeprog[$t]}"]:-}" ]]; then
+            printf '  %-12s %s asks for %s in %s, which is not there\n' \
+                "NO CC" "$t" "${_treeprog[$t]}" "${_treeimg[$t]}"; rc=1; continue
+        fi
+        if [[ -z "$rec" ]]; then
+            # CC_VERSION_TEXT arrived in 4.19.  An older tree records no
+            # compiler anywhere in its .config, so this check has nothing to
+            # compare and cannot be made to work by trying harder.  Saying
+            # so beats skipping in silence, which is the failure this whole
+            # command exists to prevent: an unchecked thing that reads as a
+            # checked one.
+            printf '  %-12s %-18s no CONFIG_CC_VERSION_TEXT (pre-4.19) -- mixed objects cannot be detected here; mrproper before changing GCC=\n' \
+                "unchecked" "$t"
+            continue
+        fi
+        local now; now="${_seen["${_treeimg[$t]}|${_treeprog[$t]}"]:-}"
+        if [[ -z "$now" ]]; then
+            printf '  %-12s %s asks for %s in %s, which is not there\n' \
+                "NO CC" "$t" "${_treeprog[$t]}" "${_treeimg[$t]}"; rc=1; continue
+        fi
+        if [[ "$(_cc_fingerprint "$rec")" != "$(_cc_fingerprint "$now")" ]]; then
+            printf '  %-12s %s built by "%s", %s now has "%s" -- rebuilding mixes toolchains (make mrproper first)\n' \
+                "MIXED" "$t" "$rec" "${_treeimg[$t]}" "$now"; rc=1
+        else
+            printf '  %-12s %-18s %s  (%s)\n' "toolchain" "$t" "$now" "${_treeimg[$t]}"
+        fi
+    done
+
+    # Host-side collisions the package manager would notice.
+    local pn; pn="$(ls /etc/containers/*.pacnew 2>/dev/null | tr '\n' ' ')"
+    say "pacman       ${pn:+unmerged config: $pn}${pn:-no .pacnew under /etc/containers}"
+    [[ -n "$pn" ]] && rc=1
+    if [[ "$(basename "$c")" == podman ]]; then
+        # $USER is not guaranteed; a cron or systemd context has none.
+        local who="${USER:-$(id -un)}"
+        grep -q "^${who}:" /etc/subuid 2>/dev/null && grep -q "^${who}:" /etc/subgid 2>/dev/null \
+            && say "subid        ${who} has subuid and subgid ranges (rootless is set up)" \
+            || { say "subid        ${who} has NO subuid/subgid range -- rootless podman cannot map users"; rc=1; }
+    fi
+    local w root_owned
+    if w="$(kbl_workspace 2>/dev/null)"; then
+        # Run the same guard _in_container runs, rather than describing it.
+        if kbl_assert_mountable "$w" >/dev/null 2>&1; then
+            say "workspace    $w (mounted at the same path; the guard accepts it)"
+        else
+            say "workspace    $w -- REFUSED by the mount guard; a build here would not start"; rc=1
+        fi
+        root_owned="$(find "$w" -maxdepth 4 -user root -print -quit 2>/dev/null)"
+        [[ -n "$root_owned" ]] && { say "ROOT-OWNED   $root_owned -- a rootful run left it; chown it back"; rc=1; }
+    fi
+    [[ $rc -eq 0 ]] || echo "kbuildlab: something above needs attention" >&2
+    return $rc
+}
+
+_containers_clean() {
+    local c drop_images=0 drop_dangling=0 a n=0 d=0 tag id
+    c="$(kbl_container)" || return 1
+    for a in "$@"; do
+        case "$a" in
+            --images)   drop_images=1 ;;
+            --dangling) drop_dangling=1 ;;
+            -h|--help)  echo "kbuildlab containers clean [--images] [--dangling]"; return 0 ;;
+            *) die "containers clean: unknown option '$a' (known: --images, --dangling)" ;;
+        esac
+    done
+    local busy=0
+    while read -r tag; do
+        [[ -n "$tag" ]] || continue
+        # Stopped only.  A container made from this image may still be someone's
+        # build running in another terminal, and `rm -f` would kill it; say it is
+        # there instead and leave it alone.
+        while read -r id; do
+            [[ -n "$id" ]] || continue
+            "$c" rm "$id" >/dev/null 2>&1 && n=$((n+1))
+        done < <("$c" ps -aq --filter "ancestor=$tag" --filter "status=exited" \
+                                --filter "status=created" 2>/dev/null)
+        busy=$(( busy + $("$c" ps -q --filter "ancestor=$tag" 2>/dev/null | wc -l) ))
+    done < <(_kbl_image_tags)
+    say "containers   removed $n stopped container(s) made from kbuildlab images"
+    [[ $busy -gt 0 ]] && say "running      $busy left alone -- stop them yourself if they are not wanted"
+    if [[ $drop_dangling -eq 1 ]]; then
+        # Untagged images belong to no project by name, so this cannot be narrowed to
+        # ours; it is opt-in for that reason and says what it took.
+        while read -r id; do
+            [[ -n "$id" ]] || continue
+            "$c" rmi "$id" >/dev/null 2>&1 && d=$((d+1))
+        done < <("$c" images -q -f dangling=true 2>/dev/null)
+        say "untagged     removed $d (every untagged image on this host, not only kbuildlab's)"
+    fi
+    if [[ $drop_images -eq 1 ]]; then
+        # _kbl_image_tags also lists whatever a tree names for itself, and a tree is
+        # free to name an image this tool did not build -- a distribution base image,
+        # someone else's.  Removing those is not cleaning up after kbuildlab, so only
+        # images whose name says kbuildlab built them are removed, and the rest are
+        # named so the difference is visible rather than assumed.
+        while read -r tag; do
+            [[ -n "$tag" ]] || continue
+            case "${tag##*/}" in
+                kbuildlab:*|kbuildlab-*:*)
+                    "$c" rmi "$tag" >/dev/null 2>&1 && say "image        removed $tag" ;;
+                *)  say "kept         $tag is named by a tree but was not built here" ;;
+            esac
+        done < <(_kbl_image_tags)
+        say "rebuild      kbuildlab image"
+    fi
+    if [[ $drop_dangling -eq 1 ]]; then
+        say "kept         every TAGGED image and every container this tool did not create"
+    else
+        say "kept         every image and container this tool did not create"
+    fi
+}
+
+cmd_containers() {
+    case "${1:-status}" in
+        status|"") shift || true; _containers_status "$@" ;;
+        clean)     shift;         _containers_clean  "$@" ;;
+        -h|--help) echo "kbuildlab containers [status|clean] -- see 'kbuildlab help'" ;;
+        *) die "containers: unknown subcommand '$1' (known: status, clean)" ;;
+    esac
+}
+
 # ---------------------------------------------------------------- dispatch
 cmd="${1:-help}"; shift || true
 case "$cmd" in
@@ -332,6 +678,7 @@ case "$cmd" in
     run)    cmd_run "$@" ;;
     attach) cmd_attach "$@" ;;
     trees)  kbl_trees ;;
+    containers) cmd_containers "$@" ;;
     doctor) cmd_doctor ;;
     help|-h|--help) usage ;;
     *) echo "kbuildlab: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;

@@ -1,29 +1,61 @@
-# Legacy build image for old kernels (v4.6, 2016) that Ubuntu 24.04's gcc-13
-# cannot compile. Debian 9 "stretch" (gcc-6.3) matches the era; its archived
-# packages come from Debian's own official archive.debian.org (not Ubuntu
-# old-releases, whose xenial indexes 404). Only arm64 is built here (v4.6's sole
-# target), so only the aarch64 cross toolchain is installed.
-FROM debian:stretch
+# Build image for kernels too old for the main image's compilers.
+#
+# As it turns out, no tree here needs it.  v4.6 (2016, arm64) was the candidate,
+# and the reason it does not need one is narrower than "old kernel, old
+# compiler": gcc-10 turned -fno-common on by default, and a kernel from before
+# 5.6 has tentative definitions that then collide at link time -- but only in its
+# HOST tools, so -fcommon on the host compiler alone carries it to gcc-16 without
+# touching a single kernel object.  The ceiling was a property of the compiler's
+# defaults, not of the kernel's age, which is why it had to be found by building
+# with each one rather than assumed from a date.
+#
+# This image is kept for the two cases that survive that: it is where the
+# unaided ceiling (gcc-9) was measured, and it is the answer for anyone who
+# would rather build a 2016 kernel with an era-appropriate compiler than with a
+# 2026 one plus a flag.  Point a tree at it with IMAGE= and GCC=.
+#
+# 24.04 is the base because it carries that whole range -- gcc-9 through gcc-13,
+# with the aarch64 cross compilers to match -- so the ladder can be walked
+# inside one image.  A tree names its rung with GCC= in tree.conf.
+#
+# Containerfile.legacy-gcc6 beside this file is the previous answer: Debian 9
+# stretch, gcc-6.3, era-matched.  It is kept because it is the fallback if a
+# newer compiler turns out not to work, not because it is preferred -- a newer
+# gcc emits DWARF5 where gcc-6 emits DWARF4, and v4.6 has no Kconfig choice for
+# debug-info format, so on that tree the compiler IS the debug-info setting.
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# stretch is archived: point apt at Debian's official archive and stop it
-# rejecting the necessarily-old Release files.
-RUN printf '%s\n' \
-      'deb http://archive.debian.org/debian stretch main' \
-      'deb http://archive.debian.org/debian-security stretch/updates main' \
-      > /etc/apt/sources.list \
- && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99no-check-valid \
- && printf 'Acquire::AllowInsecureRepositories "true";\n' >> /etc/apt/apt.conf.d/99no-check-valid
-
-RUN apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates build-essential \
-        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-        git make bc bison flex \
-        libssl-dev libelf-dev libncurses5-dev \
-        kmod cpio rsync wget curl file gawk perl \
-        exuberant-ctags cscope global \
+        git make binutils bc rsync patch wget curl cpio unzip file \
+        tar gzip bzip2 xz-utils \
+        libncurses-dev libssl-dev libelf-dev \
+        flex bison kmod gawk perl python3 python-is-python3 locales sed bash findutils \
     && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        universal-ctags cscope global \
+    && rm -rf /var/lib/apt/lists/*
+
+# The ladder: aarch64 cross compilers 9 through 13, plus the native ones the
+# kernel's host tools are built with.  binutils is the distribution's own
+# (2.42) for all of them; if a rung fails to assemble rather than to compile,
+# that is the binutils, and Containerfile.legacy-gcc6 is where to go.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-9  g++-9  gcc-9-aarch64-linux-gnu  g++-9-aarch64-linux-gnu \
+        gcc-10 g++-10 gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu \
+        gcc-11 g++-11 gcc-11-aarch64-linux-gnu g++-11-aarch64-linux-gnu \
+        gcc-12 g++-12 gcc-12-aarch64-linux-gnu g++-12-aarch64-linux-gnu \
+        gcc-13 g++-13 gcc-13-aarch64-linux-gnu g++-13-aarch64-linux-gnu \
+        binutils-aarch64-linux-gnu \
+    && ln -sf aarch64-linux-gnu-gcc-9 /usr/bin/aarch64-linux-gnu-gcc \
+    && ln -sf aarch64-linux-gnu-g++-9 /usr/bin/aarch64-linux-gnu-g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 WORKDIR /workspace
 CMD ["/bin/bash"]

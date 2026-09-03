@@ -20,6 +20,28 @@ UPSTREAM=stable          # stable | mainline
 # --no-initrd for early-boot debugging that never needs userspace):
 # INITRD=../rootfs/<arch>/images/rootfs.cpio.gz
 
+# Toolchain.  Both optional.  IMAGE names the container image this tree builds
+# in, GCC the compiler version inside it; unset means the default image and its
+# own unversioned gcc.  They exist because the newest compiler is not one answer
+# across kernels of different ages -- gcc-10 turned -fno-common on by default and
+# a pre-5.6 kernel does not link under it -- so a tree with a reason to pin one
+# says so here, where the rest of its build is described.  Find the value by
+# building, not by assuming; `kbuildlab containers` reports a tree whose objects
+# came from a different compiler than the one named here.
+# IMAGE=kbuildlab-legacy:latest
+# GCC=13
+# HOSTCC_FLAGS is appended to HOSTCC and reaches the host tools only, never the
+# kernel's own objects.  One real use: -fcommon, which lets a pre-5.6 kernel's
+# host tools link under gcc-10 and later.
+# HOSTCC_FLAGS=-fcommon
+#
+# KCFLAGS is appended after everything the kernel's own Makefile set, so it wins
+# where the two conflict -- the way to undo a flag the kernel hard-codes without
+# editing it.  Keep it to debug-information flags, which gcc guarantees do not
+# change code generation; anything that changes the objects belongs in the
+# config, where the read-back check can see it.
+# KCFLAGS=-fvar-tracking-assignments
+
 # QEMU.  Filled in by the arch template; edit freely.
 
 # The kernel image base is deliberately NOT stated here.

@@ -21,13 +21,45 @@ say()  { printf '  %s\n' "$*"; }
 # --- host prerequisites ------------------------------------------------------
 # Reported by name and never installed.  Changing a machine's packages or its
 # sysctls is not this tool's business; saying precisely what is absent is.
+# podman first, then docker.  Rootless podman needs no daemon at all, so a machine
+# that keeps dockerd off -- a laptop, say -- builds without starting a service or
+# asking for root.  $KBL_CONTAINER still wins over both when a machine wants one.
 kbl_container() {
     local c
-    for c in ${KBL_CONTAINER:-} docker podman nerdctl; do
+    for c in ${KBL_CONTAINER:-} podman docker nerdctl; do
         [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1 && { printf '%s\n' "$c"; return 0; }
     done
-    die "no container runtime found. Need one of: docker, podman, nerdctl
+    die "no container runtime found. Need one of: podman, docker, nerdctl
        (or set \$KBL_CONTAINER to the one you use)"
+}
+
+# The workspace is bind-mounted into the build container at the SAME path it has
+# here, so a workspace that resolved to a system directory would hand an Ubuntu
+# container write access to this host's package-managed files -- and the package
+# manager would then find them changed underneath it.  Refuse before mounting;
+# print the resolved path so the caller mounts exactly what was checked.
+#
+# The list is what a distribution actually owns, not everything outside $HOME:
+# /run is tmpfs and /run/media is where removable drives land, /var is mostly
+# state, so neither is banned wholesale -- only the package databases inside /var
+# are.  $KBL_ALLOW_SYSTEM_MOUNT=1 overrides the whole check for the case this
+# judgement gets wrong; it says what it is allowing.
+kbl_assert_mountable() {
+    local p sys
+    p="$(readlink -f "${1:-}" 2>/dev/null)"
+    [[ -n "$p" ]] || die "workspace '${1:-}' does not resolve to a path"
+    [[ "$p" != "/" ]] \
+        || die "workspace '${1:-}' resolves to the filesystem root; refusing to mount it into a container"
+    if [[ "${KBL_ALLOW_SYSTEM_MOUNT:-}" == 1 ]]; then
+        warn "mounting '$p' into a container because \$KBL_ALLOW_SYSTEM_MOUNT=1"
+        printf '%s\n' "$p"; return 0
+    fi
+    for sys in /usr /etc /boot /opt /bin /sbin /lib /lib64 /proc /sys /dev \
+               /var/lib/pacman /var/cache/pacman /var/lib/dpkg /var/lib/rpm /var/db; do
+        [[ "$p" == "$sys" || "$p" == "$sys"/* ]] \
+            && die "workspace '$p' is inside $sys, which the system owns; refusing to mount it into a container (set \$KBL_ALLOW_SYSTEM_MOUNT=1 if you mean it)"
+    done
+    printf '%s\n' "$p"
 }
 
 kbl_qemu() {

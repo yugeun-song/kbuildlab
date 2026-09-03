@@ -8,14 +8,14 @@
 # feels like it, and buildroot in particular breaks on new gcc long before the
 # kernel does.  Pinning the build environment to a stable base decouples "what
 # my laptop has today" from "what this kernel was built with".
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 # buildroot refuses to configure as root without this; the container IS root.
 ENV FORCE_UNSAFE_CONFIGURE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates build-essential gcc-multilib g++-multilib \
+        ca-certificates build-essential \
         git make binutils bc rsync patch wget curl cpio unzip file \
         tar gzip bzip2 xz-utils \
         libncurses-dev libssl-dev libelf-dev libcap-dev \
@@ -31,12 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dwarves clang llvm \
     && rm -rf /var/lib/apt/lists/*
 
-# Cross toolchains for the two non-native targets.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-        gcc-riscv64-linux-gnu g++-riscv64-linux-gnu binutils-riscv64-linux-gnu \
-    && rm -rf /var/lib/apt/lists/*
-
 # Source indexers for `kbuildlab tags`, in the same env as the build. GNU GLOBAL
 # (gtags) is the symbolic index (kernel has a `make gtags` target); with clangd
 # off, ctags+cscope+gtags are the navigation layer.
@@ -44,14 +38,48 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         universal-ctags cscope global \
     && rm -rf /var/lib/apt/lists/*
 
-# Mainline riscv dynamic ftrace needs -fmin-function-alignment (gcc-14+); gcc-13
-# drops FUNCTION_TRACER on riscv with the compressed ISA. Make riscv default to
-# gcc-14 so config detection and the build agree. x86_64/arm64 stay on gcc-13.
+# Three compiler generations for every target, not one.
+#
+# A tree names the one it builds with (GCC= in its tree.conf); the image carries
+# the range so raising or lowering a tree is a config edit, not an image rebuild.
+# That matters because "the newest compiler" is not one answer across seven
+# kernels: mainline tracks gcc head, an LTS stable series is validated against
+# what shipped with it, and a 2016 kernel predates all of them.
+#
+# 26.04 packages gcc 11 through 16; the three newest are installed here, which is
+# the range a kernel of any age in this workspace needs.  15 is the default and newest
+# RELEASE; 16 is a dated development snapshot (16-2026MMDD, no .0), so it is
+# installed and reachable but is not what /usr/bin/gcc points at.  A tree opting
+# into it is opting into a prerelease compiler, deliberately.
+#
+# 32-bit runtimes come along for each: arch/x86/boot builds -m32, and a
+# multilib package tracks its own compiler version, so pinning gcc without it
+# leaves `gcc -m32` reaching for another compiler's headers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-14 g++-14 gcc-14-multilib g++-14-multilib \
+        gcc-15 g++-15 gcc-15-multilib g++-15-multilib \
+        gcc-16 g++-16 gcc-16-multilib g++-16-multilib \
+        gcc-14-aarch64-linux-gnu g++-14-aarch64-linux-gnu \
+        gcc-15-aarch64-linux-gnu g++-15-aarch64-linux-gnu \
+        gcc-16-aarch64-linux-gnu g++-16-aarch64-linux-gnu \
         gcc-14-riscv64-linux-gnu g++-14-riscv64-linux-gnu \
-    && ln -sf riscv64-linux-gnu-gcc-14 /usr/bin/riscv64-linux-gnu-gcc \
-    && ln -sf riscv64-linux-gnu-g++-14 /usr/bin/riscv64-linux-gnu-g++ \
+        gcc-15-riscv64-linux-gnu g++-15-riscv64-linux-gnu \
+        gcc-16-riscv64-linux-gnu g++-16-riscv64-linux-gnu \
+        binutils-aarch64-linux-gnu binutils-riscv64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
+
+# The unversioned names resolve to 15 -- the newest release, and what a tree
+# that states no GCC= gets.  Every other version stays reachable by its own
+# name, which is how a tree pins one.
+#
+# The note at the top of this file is not idle: buildroot breaks on new
+# compilers well before the kernel does, so if a rootfs build fails here, point
+# it at an older one (HOSTCC=gcc-14) rather than moving the whole image back.
+RUN ln -sf gcc-15 /usr/bin/gcc && ln -sf g++-15 /usr/bin/g++ \
+    && ln -sf aarch64-linux-gnu-gcc-15 /usr/bin/aarch64-linux-gnu-gcc \
+    && ln -sf aarch64-linux-gnu-g++-15 /usr/bin/aarch64-linux-gnu-g++ \
+    && ln -sf riscv64-linux-gnu-gcc-15 /usr/bin/riscv64-linux-gnu-gcc \
+    && ln -sf riscv64-linux-gnu-g++-15 /usr/bin/riscv64-linux-gnu-g++
 
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
