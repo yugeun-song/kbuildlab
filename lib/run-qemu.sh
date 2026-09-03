@@ -170,6 +170,17 @@ append="console=$console"
 [[ $KASLR -eq 1 ]] || append="$append nokaslr"
 declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic)
 
+# An entropy source.  A headless guest has no keyboard, no disk seek noise and no
+# hardware RNG, so its CRNG is seeded by whatever the kernel can manufacture on its
+# own -- and only kernels from 5.4 can (try_to_generate_entropy, jitter entropy).
+# Older ones never initialise it, and the first process to call getrandom() blocks
+# for ever: on v4.6 that is ssh-keygen in the rootfs's S50sshd, which stops rcS
+# before init ever spawns a getty, so the guest boots to a blank console instead of
+# a login prompt.  virtio-rng-pci exists on every machine kbuildlab drives (checked
+# with `-device help` on all three qemu-system binaries) and costs nothing; the
+# guest still needs CONFIG_HW_RANDOM_VIRTIO to use it, which the preset now sets.
+CMD+=(-device virtio-rng-pci)
+
 # Prune stale per-run scratch (RAM disks + state files) whose guest is gone.
 for _f in /dev/shm/kbl-boot-*.img /dev/shm/kbl-vars-*.fd /dev/shm/kbl-run-*.env; do
     [[ -e "$_f" ]] || continue
@@ -199,14 +210,23 @@ case "$BOOT" in
         la="$(kbl_tree_get "$tree" UBOOT_LOADADDR)"; la="${la:-0x40200000}"
         ra="$(kbl_tree_get "$tree" UBOOT_RDADDR)";   ra="${ra:-0x48000000}"
         command -v mkimage >/dev/null 2>&1 || die "mkimage (uboot-tools) required for boot uboot"
+        command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
         printf 'KBL_LOADADDR=%s\n' "$la" >> "$_state"   # attach's HW-bp goes here
         shmdisk="/dev/shm/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
         # u-boot ignores QEMU -append, so this run's bootargs ride in boot.scr.
+        # The initrd is loaded, and named to booti, only when there is one: `-`
+        # in its place is how booti is told there is none.  Loading it anyway
+        # under --no-initrd would boot a root filesystem the caller asked not to
+        # have, and the flag would look like it did nothing.
         _bc="$(mktemp -p /dev/shm)"; _bs="$(mktemp -p /dev/shm)"
         { printf 'load virtio 0:1 %s /Image\n' "$la"
-          printf 'load virtio 0:1 %s /rootfs.cpio.gz\n' "$ra"
+          [[ -n "$INITRD" ]] && printf 'load virtio 0:1 %s /rootfs.cpio.gz\n' "$ra"
           printf "setenv bootargs '%s'\n" "$append"
-          printf 'booti %s %s:${filesize} ${fdtcontroladdr}\n' "$la" "$ra"
+          if [[ -n "$INITRD" ]]; then
+              printf 'booti %s %s:${filesize} ${fdtcontroladdr}\n' "$la" "$ra"
+          else
+              printf 'booti %s - ${fdtcontroladdr}\n' "$la"
+          fi
         } > "$_bc"
         # mkimage's arch name for riscv is "riscv", not the tree's "riscv64".
         _mka="$arch"; [[ "$arch" == riscv64 ]] && _mka="riscv"
@@ -214,6 +234,20 @@ case "$BOOT" in
             || die "mkimage failed to build boot.scr"
         mcopy -o -i "${shmdisk}@@1M" "$_bs" ::/boot.scr
         rm -f "$_bc" "$_bs"
+        # The boot disk carries the kernel and the initramfs as files, put there
+        # by firmware/build-bootdisk.sh on the day it ran.  Copy today's in over
+        # them.  What this writes to is the per-run /dev/shm copy, so the
+        # on-disk image is untouched -- and a kernel rebuilt since then cannot
+        # be shadowed by the one baked in.  That failure has no symptom: the
+        # guest boots either way, and only the version string says which.
+        mcopy -o -i "${shmdisk}@@1M" "$image" ::/Image \
+            || die "could not write $image into the boot-disk copy -- larger than the free space in $bd? rebuild it: firmware/build-bootdisk.sh"
+        if [[ -n "$INITRD" ]]; then
+            mcopy -o -i "${shmdisk}@@1M" "$INITRD" ::/rootfs.cpio.gz \
+                || die "could not write $INITRD into the boot-disk copy (see above)"
+        else
+            mdel -i "${shmdisk}@@1M" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
+        fi
         case "$arch" in x86_64) _blk="virtio-blk-pci" ;; *) _blk="virtio-blk-device" ;; esac
         # Firmware placement differs: on arm64 u-boot IS the -bios firmware; on
         # riscv the M-mode firmware is OpenSBI (QEMU's default -bios) and u-boot
@@ -240,12 +274,34 @@ case "$BOOT" in
         command -v mcopy >/dev/null 2>&1 || die "mtools (mcopy) required for boot uefi"
         shmdisk="/dev/shm/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
         shmvars="/dev/shm/kbl-vars-${PORT}.fd"; cp -f "$vars" "$shmvars"
-        # Rewrite grub.cfg with this run's bootargs (kaslr/console).
+        # Rewrite grub.cfg with this run's bootargs (kaslr/console).  The initrd
+        # line is written only when there is one: grub loads what the config
+        # names, so leaving it in under --no-initrd would boot a root filesystem
+        # the caller asked not to have, and the flag would look like it did
+        # nothing.
         _gc="$(mktemp -p /dev/shm)"
         { printf 'search --no-floppy --set=root --file /vmlinuz\n'
           printf 'linux /vmlinuz %s\n' "$append"
-          printf 'initrd /rootfs.cpio.gz\nboot\n'; } > "$_gc"
+          [[ -n "$INITRD" ]] && printf 'initrd /rootfs.cpio.gz\n'
+          printf 'boot\n'; } > "$_gc"
         mcopy -o -i "${shmdisk}@@1M" "$_gc" ::/grub.cfg; rm -f "$_gc"
+        # The ESP carries the kernel and the initramfs as files, and
+        # firmware/build-esp.sh put whatever was current the day it ran into
+        # them.  Copy today's in over them.  What this writes to is the per-run
+        # /dev/shm copy, so the on-disk ESP is untouched, and a kernel rebuilt
+        # since then cannot be shadowed by the one baked in -- a failure with no
+        # symptom, because the guest boots either way and only the version
+        # string says which.
+        mcopy -o -i "${shmdisk}@@1M" "$image" ::/vmlinuz \
+            || die "could not write $image into the ESP copy -- larger than the free space in $bd? rebuild it: firmware/build-esp.sh"
+        if [[ -n "$INITRD" ]]; then
+            mcopy -o -i "${shmdisk}@@1M" "$INITRD" ::/rootfs.cpio.gz \
+                || die "could not write $INITRD into the ESP copy (see above)"
+        else
+            # Nothing names it now, but an unreferenced file is still a file a
+            # future grub.cfg could pick up.  Best effort; absence is fine.
+            mdel -i "${shmdisk}@@1M" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
+        fi
         CMD+=(-drive "if=pflash,format=raw,readonly=on,file=${code}"
               -drive "if=pflash,format=raw,file=${shmvars}"
               -drive "if=none,file=${shmdisk},format=raw,id=hd0"
