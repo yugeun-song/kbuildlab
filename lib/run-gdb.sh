@@ -71,14 +71,16 @@ elif [[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/gdbtools/root" ]]; then
 fi
 
 # The machine description this tree states, handed over as-is.  Anything already
-# in the environment wins, so a one-off override still works.  GDBTOOLS_ENTRY_PA
-# is the exception: the tree states it for editor adapters that only read
-# tree.conf (they cannot see the per-run state file), but here the per-port state
-# file below is authoritative -- it knows this port's boot mode, so a direct-boot
-# port still reaches x86 decompressor recovery instead of a uefi image base.
+# in the environment wins, so a one-off override still works.  GDBTOOLS_ENTRY_PA is
+# the exception: the tree states the address its DEFAULT boot mode lands the kernel
+# at, and this port may be running another one, so it is held back here and applied
+# further down only if nothing better is recorded.  Both callers of gdbtools resolve
+# it the same way -- the nvim adapter reads the per-port state file too.
+_op_entry="${GDBTOOLS_ENTRY_PA:-}"   # an operator pin; it outranks everything below
+_tree_entry=""                       # what tree.conf states, applied only as a fallback
 while IFS='=' read -r k v; do
-    [[ "$k" == GDBTOOLS_ENTRY_PA ]] && continue
     v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
+    [[ "$k" == GDBTOOLS_ENTRY_PA ]] && { _tree_entry="$v"; continue; }
     [[ -n "${!k:-}" ]] || export "$k=$v"
 done < <(sed -n 's/^[[:space:]]*\(GDBTOOLS_[A-Z0-9_]*\)=\(.*\)/\1=\2/p' "$tree/tree.conf")
 export GDBTOOLS_AUTO=1
@@ -88,17 +90,20 @@ export GDBTOOLS_AUTO=1
 # address; point gdbtools' bootbreak HW breakpoint there. Parsed, never sourced.
 _st="/dev/shm/kbl-run-${PORT}.env"
 FWSYM=""   # firmware ELF symbols (u-boot) for the pre-kernel stages
+_bmode=""  # boot mode this port is actually running; empty when nothing recorded it
+_kaslr=""  # whether it was booted with KASLR on; only the run state knows
 if [[ -r "$_st" ]]; then
     _bmode="$(sed -n 's/^KBL_BOOT=//p' "$_st" | head -1)"
     _bla="$(sed -n 's/^KBL_LOADADDR=//p' "$_st" | head -1)"
+    _kaslr="$(sed -n 's/^KBL_KASLR=//p' "$_st" | head -1)"
     if [[ ( "$_bmode" == uboot || "$_bmode" == uefi ) && -n "$_bla" ]]; then
         # `_bla` is the image base -- where the firmware lands _text.  gdbtools shifts
         # it to the ELF entry (startup_64) itself when the two differ (newer x86), so
         # hand over the image base as-is and let the symbol offset be applied there,
-        # where the vmlinux is loaded.
-        [[ -n "${GDBTOOLS_ENTRY_PA:-}" ]]   || export GDBTOOLS_ENTRY_PA="$_bla"
-        [[ -n "${GDBTOOLS_BREAK_KIND:-}" ]] || export GDBTOOLS_BREAK_KIND=hw
+        # where the vmlinux is loaded.  x86 KASLR takes it away again below.
+        [[ -n "${GDBTOOLS_ENTRY_PA:-}" ]] || export GDBTOOLS_ENTRY_PA="$_bla"
         say "combo        $_bmode: kernel image base $_bla (firmware bootbreak via hw-bp)"
+        [[ -n "${GDBTOOLS_BREAK_KIND:-}" ]] || export GDBTOOLS_BREAK_KIND=hw
         # The u-boot ELF (u-boot.bin -> u-boot) symbolizes the firmware stages
         # (reset _start, pre-relocation). Kernel symbols come from vmlinux; their
         # address ranges do not overlap, so both resolve.
@@ -110,15 +115,84 @@ if [[ -r "$_st" ]]; then
     fi
 fi
 
+# Nothing recorded for this port, or a direct boot: the tree's own address is the
+# only evidence left.  It describes the tree's DEFAULT mode, so it holds only while
+# that is what is running -- the same rule the nvim adapter applies.
+if [[ -z "${GDBTOOLS_ENTRY_PA:-}" && -n "$_tree_entry" ]]; then
+    _sboot="$(kbl_tree_get "$tree" BOOT)"; [[ -z "$_sboot" ]] && _sboot=direct
+    [[ "${_bmode:-$_sboot}" == "$_sboot" ]] && export GDBTOOLS_ENTRY_PA="$_tree_entry"
+fi
+
+# With no run state -- a guest something else started -- score KASLR from the same
+# evidence discover.lua scores, in the same order, so the terminal and the editor
+# cannot reach opposite verdicts about one guest: the guest's own command line
+# first, the build's .config next, and anything still undecided counts as ON.  The
+# asymmetry is deliberate: a wrong "off" silently skips the base recovery and the
+# session breaks at an address the kernel never uses, while a wrong "on" only runs
+# a recovery that was not needed.
+#
+# pgrep, anchored to a qemu-system process: `ps -eo args | grep <pattern>` matches
+# the grep's OWN command line, so it never returns empty and every branch below it
+# would be dead code.  Measured on this host with no guest running.
+if [[ -z "$_kaslr" ]]; then
+    # Both spellings discover.lua accepts: `-gdb tcp::PORT`, `-gdb tcp:HOST:PORT`,
+    # and on 1234 the `-s` shorthand, which is what a hand-started guest usually
+    # carries.  Anchored so -smp/-serial/-snapshot cannot stand in for -s.
+    _pat="qemu-system.*-gdb tcp:[^[:space:]]*:${PORT}([^0-9]|\$)"
+    [[ "$PORT" == 1234 ]] && _pat="qemu-system.*(-gdb tcp:[^[:space:]]*:1234([^0-9]|\$)|-s([[:space:]]|\$))"
+    _qcmd="$(pgrep -af "$_pat" 2>/dev/null | head -1)"
+    # Only the -append VALUE decides, as discover.lua does, and read from /proc so
+    # argument boundaries survive: matching the whole command line would let a path
+    # like /srv/vm/nokaslr-disk.img answer a question it has nothing to do with.
+    _qpid="${_qcmd%%[[:space:]]*}"; _app=""
+    if [[ -n "$_qpid" && -r "/proc/$_qpid/cmdline" ]]; then
+        mapfile -d '' -t _argv < "/proc/$_qpid/cmdline" 2>/dev/null || _argv=()
+        for ((_i = 0; _i < ${#_argv[@]}; _i++)); do
+            [[ "${_argv[_i]}" == "-append" ]] && { _app="${_argv[_i+1]:-}"; break; }
+        done
+    fi
+    if   [[ " $_app " == *" nokaslr "* ]]; then _kaslr=0
+    elif [[ " $_app " == *" kaslr "*   ]]; then _kaslr=1
+    elif grep -qx '# CONFIG_RANDOMIZE_BASE is not set' "$src/.config" 2>/dev/null; then _kaslr=0
+    else _kaslr=1
+    fi
+fi
+
+# x86 randomizes the PHYSICAL base (arm64 and riscv randomize only the virtual one),
+# so every address derived above describes a boot that is not this one -- and stating
+# one SUPPRESSES the recovery, which gdbtools runs only while ENTRY_PA is unset.  Take
+# it back, whichever source produced it.  An operator pin is left alone: that is the
+# documented way to override the recovery.
+if [[ "$arch" == "x86_64" && "$_kaslr" == 1 && -z "$_op_entry" && -n "${GDBTOOLS_ENTRY_PA:-}" ]]; then
+    say "combo        KASLR on: base measured per run (the stated $GDBTOOLS_ENTRY_PA is a no-KASLR boot)"
+    unset GDBTOOLS_ENTRY_PA
+fi
+
 # x86 KASLR recovery reads the decompressor's vmlinux; hand its path over so
 # `kearly kaslr` works in terminal mode too (parity with the nvim-dap adapter).
 if [[ "$arch" == "x86_64" ]]; then
+    # The recovery is opt-in, and only this launcher knows how the guest was booted:
+    # a firmware chain passes the kernel command line itself, so it is not on QEMU's
+    # own command line to be read back.  Stated for every x86 attach, exactly as the
+    # editor's adapter does -- whether the decompressor's vmlinux happens to be on
+    # disk is a separate fact, carried separately below.
+    if [[ "${_kaslr:-}" == 1 ]]; then
+        [[ -z "${GDBTOOLS_X86_KASLR:-}" ]] && export GDBTOOLS_X86_KASLR=1
+    fi
     _decomp="$src/arch/x86/boot/compressed/vmlinux"
     if [[ -f "$_decomp" ]]; then
         [[ -z "${GDBTOOLS_X86_DECOMP_VMLINUX:-}" ]] && export GDBTOOLS_X86_DECOMP_VMLINUX="$_decomp"
-        # QEMU loads the bzImage decompressor at the fixed 1MB PA; gdbtools needs
-        # it to recover the KASLR-randomized main-kernel base.
-        [[ -z "${GDBTOOLS_X86_DECOMP_PA:-}" ]] && export GDBTOOLS_X86_DECOMP_PA=0x100000
+        # DECOMP_PA is the switch between gdbtools' two x86 recoveries, so state it
+        # only for the boot that has a decompressor at a fixed address: `-kernel`
+        # lands the bzImage at the 1MB PA the boot protocol fixes.  A firmware chain
+        # enters the EFI stub instead and never runs those stages, so setting it
+        # there sends the recovery down a walk that cannot fire.  The port's own run
+        # state answers; with none recorded, the tree's stated default does.
+        _dboot="${_bmode:-$(kbl_tree_get "$tree" BOOT)}"
+        [[ -z "$_dboot" ]] && _dboot=direct
+        if [[ "$_dboot" == direct ]]; then
+            [[ -z "${GDBTOOLS_X86_DECOMP_PA:-}" ]] && export GDBTOOLS_X86_DECOMP_PA=0x100000
+        fi
     fi
 fi
 
