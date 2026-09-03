@@ -74,9 +74,12 @@ the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
 `CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, and where they apply `BOOT`,
 `INITRD`, `PERSIST`, `CPU_PAGING` and the firmware paths (`UBOOT`,
 `OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`). `attach` also hands the debugger every
-`GDBTOOLS_*` line verbatim -- e.g. `GDBTOOLS_ENTRY_PA`, a kernel image base
-pinned for a target that cannot report it. A `qemu.conf` symlink points at the
-same file, which is what the editor's debug adapter reads.
+`GDBTOOLS_*` line verbatim, with one exception: `GDBTOOLS_ENTRY_PA` -- a kernel
+image base pinned for a target that cannot report it -- describes the mode the
+tree DEFAULTS to, so it is applied only when that is the mode this port is
+actually running, and x86 KASLR takes it back again because the base moves per
+run. A `qemu.conf` symlink points at the same file, for older editor configs
+that looked for that name; the debug adapter reads `tree.conf` itself.
 
 Per-machine settings live outside the repo. `kbuildlab init --workspace DIR`
 records the workspace path in `~/.config/kbuildlab/workspace`, which is never
@@ -169,12 +172,132 @@ Each arch fragment states these where you will read them.
 `containers/Containerfile` is plain OCI with no builder extensions, so **docker,
 podman, buildah and nerdctl all read it unchanged**. `Dockerfile` beside it is a
 symlink for tools that look for that name first. `kbuildlab` picks a runtime in
-the order docker, podman, nerdctl -- buildah reads the `Containerfile` but cannot
+the order podman, docker, nerdctl -- buildah reads the `Containerfile` but cannot
 run a guest, so it is not auto-selected -- or takes `$KBL_CONTAINER`, which wins.
+podman comes first because rootless podman needs no daemon: a machine that keeps
+dockerd off builds without starting a service or asking for root.
 
-`kbuildlab image` builds the default Ubuntu-24.04 image; `kbuildlab image legacy`
-builds a gcc-6 image (`containers/Containerfile.legacy`) for old kernels such as
-v4.6.
+`kbuildlab image` builds the default Ubuntu-26.04 image. `kbuildlab image legacy`
+builds an Ubuntu-24.04 image (`containers/Containerfile.legacy`) carrying gcc-9
+through gcc-13; **no tree here uses it**. It is kept for two reasons: it is where
+the unaided ceiling below was measured, and it is the answer for anyone who would
+rather build a 2016 kernel with an era-appropriate compiler than with a 2026 one
+plus a flag. `containers/Containerfile.legacy-gcc6` goes further back still --
+Debian 9, gcc-6.3 -- and is the same kind of fallback.
+
+Each image carries **several compiler generations, not one** -- 14, 15 and 16 in
+the default image, 9 through 13 in the legacy one, each with the aarch64 and
+riscv64 cross compilers to match. A tree names the one it builds with, in its own
+`tree.conf`:
+
+```
+IMAGE=kbuildlab-legacy:latest   # which image; unset means the default one
+GCC=16                          # which compiler in it; unset means the image's own gcc
+HOSTCC_FLAGS=-fcommon           # appended to HOSTCC only; usually unset
+KCFLAGS=-fvar-tracking-assignments   # appended after the kernel's own CFLAGS
+```
+
+The reason for the range is that *"the newest toolchain"* is not one answer across
+seven kernels. gcc-10 turned `-fno-common` on by default, and a kernel from before
+5.6 has tentative definitions that then collide at link -- v4.6 stops in its own
+host tools, `scripts/dtc`, on a duplicate `yylloc`. Mainline tracks compiler trunk;
+a stable series was validated against what shipped with it. So the ceiling belongs
+to the tree, is found by building rather than assumed, and is written where the
+rest of that tree's build is described instead of in an environment variable
+somebody has to remember. `kbuildlab build` reports which compiler it used.
+
+`HOSTCC_FLAGS` is the narrow escape hatch for exactly that `-fno-common` case: it
+is appended to `HOSTCC`, not set as `HOSTCFLAGS` (which would *replace* the
+kernel's own `-O2` and warning set rather than add to it), and it reaches the
+host tools only. That distinction is the whole reason it is acceptable, and it
+turns out to be worth a lot: **v4.6's ceiling is gcc-9 unaided and gcc-16 with
+`-fcommon` on the host compiler**, seven generations apart, with the kernel's own
+code generation identical either way. It also decides that tree's debug-info
+format, since v4.6 has no Kconfig choice for one and gcc-11 and later default to
+DWARF5. Use `HOSTCC_FLAGS` for that; a flag that changes the kernel's own objects
+belongs in the config, where the read-back check can see it.
+
+`KCFLAGS` is the kernel's own append-to-`KBUILD_CFLAGS` variable, so what is put
+there lands *after* everything the tree's Makefile set and wins where the two
+conflict. That is how a flag the kernel hard-codes gets undone without editing
+the kernel. v4.6 is the case that needs it: its `Makefile:719` adds
+`-fno-var-tracking-assignments` unconditionally, a 2013 decision about gcc build
+times, and variable-tracking assignments are most of what keeps an optimised
+local from printing as `<optimized out>`. Keep this to flags that change debug
+information only -- gcc guarantees those do not change code generation -- because
+a flag that changes the objects belongs in the config, where the read-back check
+can see it.
+
+Measured ceilings, one build per rung, newest first:
+
+| tree | builds with | limited by |
+|---|---|---|
+| `upstream-*` (7.3-rc1) | gcc-16 | nothing found |
+| `v6.12-*` | gcc-16 | nothing found |
+| `v4.6-arm64` | gcc-16 + `HOSTCC_FLAGS=-fcommon` | host tools only; gcc-9 unaided |
+
+gcc-16 is a development snapshot rather than a release. Every tree here names it
+explicitly, which is the point of the pin being per tree: moving one back is
+editing one line of its `tree.conf`, and `kbuildlab containers` then reports the
+tree as `MIXED` until it is rebuilt.
+
+The unversioned `gcc` in the default image is **15**, the newest release 26.04
+offers; **16** is installed but is a dated development snapshot
+(`16-2026MMDD`, no `.0`), so a tree opting into it is opting into a prerelease
+compiler deliberately. On the legacy image only the *cross* names are repointed --
+`aarch64-linux-gnu-gcc` is **9**, the highest rung v4.6 builds on unaided -- while
+the native `gcc` there stays 24.04's own **13**, which is what builds the host tools.
+
+Only the compiler is versioned. `CROSS_COMPILE` still supplies `ld`, `as` and
+`objcopy`, which the distribution ships in one version per target, and `HOSTCC`
+moves with `CC` so the host tools that parse the kernel's own output are not a
+generation apart from it.
+
+The note at the top of the `Containerfile` is not idle -- buildroot breaks on new
+compilers well before the kernel does -- so a failing rootfs build gets
+`HOSTCC=gcc-14` rather than the whole image moved back.
+
+`kbuildlab containers` reports what the runtime holds for kbuildlab and the four
+ways an Ubuntu container on a host with its own package manager can collide with
+it, each checked rather than assumed:
+
+- **The environment.** A build must not depend on the shell it was started from,
+  so the image is asked what it actually receives and the answer is compared
+  against the variables that would steer a kernel build (`CC`, `CFLAGS`,
+  `MAKEFLAGS`, `CROSS_COMPILE`, `LD_LIBRARY_PATH` and the rest). Both runtimes
+  start a container with a fresh environment, so the expected answer is *clean*;
+  this says so from the container's own `env`, not from the documentation.
+- **The toolchain.** The host compiles with its distribution's gcc and the image
+  with Ubuntu's, and one build tree cannot hold objects from both. Every tree's
+  recorded `CONFIG_CC_VERSION_TEXT` is compared against the compiler that would
+  build it *now* -- per tree, not per architecture, because a tree names its own
+  image and its own compiler version; asking the default image's native gcc about
+  a tree pinned to another one compares two unrelated compilers and reports a
+  mismatch that means nothing. A tree built by another compiler is reported as
+  `MIXED` and wants `make mrproper` before it is built here again; a tree naming a
+  compiler the image does not have is reported as `NO CC`, and one naming an image
+  that is not built as `MISSING`. A tree older than 4.19 records no
+  `CONFIG_CC_VERSION_TEXT` at all, so there is nothing to compare; it is reported
+  as `unchecked` rather than skipped, because an unchecked thing that reads as a
+  checked one is the failure this command exists to prevent.
+  The `Containerfile`'s own default is checked against the image too -- the `ln`
+  that makes `/usr/bin/gcc` point somewhere, not the newest package it installs,
+  since the image carries several on purpose. Editing it without rebuilding is
+  reported as `STALE`, because nothing else would say so.
+- **The mount.** The workspace is bind-mounted at the same path it has on the
+  host, so a workspace inside `/usr`, `/etc`, `/var` or any other system
+  directory is refused outright rather than handed to a container that could
+  write package-managed files underneath the package manager.
+- **The host's own config.** `/etc/containers` is checked for unmerged `.pacnew`
+  files, and rootless podman for the `subuid`/`subgid` ranges it needs. Files in
+  the workspace owned by root -- the mark of a rootful run -- are reported too.
+
+`kbuildlab containers clean` removes the containers made from kbuildlab's images
+and nothing else. `--images` also drops the images kbuildlab built. `--dangling`
+additionally removes untagged images, and says plainly that untagged images
+belong to no project by name, so that sweep is not limited to this one. Nothing
+here ever prunes the runtime wholesale: it is shared with whatever else the
+machine runs.
 
 ## Dependencies
 
