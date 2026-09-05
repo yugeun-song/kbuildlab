@@ -230,6 +230,279 @@ kbl_tree_src() {
     esac
 }
 
+# --- per-run state -----------------------------------------------------------
+# Where `run` records what it started and `attach` reads it back.  A path, not a
+# constant, because it is a contract with three other readers (the nvim adapter,
+# and both halves of this tool) and moving it must be one coordinated change.
+#
+# The default stays /dev/shm rather than $XDG_RUNTIME_DIR, and that is a
+# measured choice: /run/user/<uid> is 1.55 GB on this host while /dev/shm is
+# 7.6 GB, and a run copies an 88-139 MB boot image beside the state file.  A
+# dozen guests would fill XDG_RUNTIME_DIR, and the damage would land on the
+# user's other services rather than on this tool.  XDG_RUNTIME_DIR is also
+# removed at last logout, which would delete the state out from under a guest
+# started with nohup.
+kbl_statedir() {
+    local d="${KBL_STATE_DIR:-/dev/shm}"
+    [[ -d "$d" ]] || die "state directory does not exist: $d (set \$KBL_STATE_DIR)"
+    printf '%s\n' "$d"
+}
+
+# The gdb port a running qemu-system process carries, or nothing.  Read from
+# /proc, never from a state file: a process is the only first-hand evidence that
+# a guest is alive, and the state file can outlive it.
+#
+# Both spellings qemu accepts: `-gdb tcp::PORT`, `-gdb tcp:HOST:PORT`, and on
+# 1234 the `-s` shorthand.  argv is read NUL-separated so an argument boundary is
+# never guessed from spacing.
+kbl_qemu_gdb_port() {
+    local pid="$1" f="/proc/$1/cmdline"
+    [[ -r "$f" ]] || return 1
+    local -a argv=(); mapfile -d '' -t argv < "$f" 2>/dev/null || return 1
+    [[ ${#argv[@]} -gt 0 ]] || return 1
+    [[ "$(basename -- "${argv[0]}")" == qemu-system-* ]] || return 1
+    local i
+    for ((i = 0; i < ${#argv[@]}; i++)); do
+        case "${argv[i]}" in
+            -gdb) local v="${argv[i+1]:-}"
+                  [[ "$v" == tcp:* ]] && { printf '%s\n' "${v##*:}"; return 0; } ;;
+            -s)   printf '1234\n'; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# The ADDRESS a live qemu's gdbstub is bound to, from its own `-gdb tcp:HOST:PORT`.
+# Empty means it was spelled without a host, which binds every interface.
+kbl_qemu_gdb_bind() {
+    local v; v="$(kbl_qemu_arg "$1" -gdb 2>/dev/null)" || return 0
+    [[ "$v" == tcp:* ]] || return 0
+    v="${v#tcp:}"; printf '%s\n' "${v%:*}"
+}
+
+# One argv value by option name, for a live qemu (e.g. -machine, -smp).
+kbl_qemu_arg() {
+    local pid="$1" want="$2" f="/proc/$1/cmdline"
+    [[ -r "$f" ]] || return 1
+    local -a argv=(); mapfile -d '' -t argv < "$f" 2>/dev/null || return 1
+    local i
+    for ((i = 0; i < ${#argv[@]}; i++)); do
+        [[ "${argv[i]}" == "$want" ]] && { printf '%s\n' "${argv[i+1]:-}"; return 0; }
+    done
+    return 1
+}
+
+kbl_qemu_has_flag() {
+    local pid="$1" want="$2" f="/proc/$1/cmdline" a
+    [[ -r "$f" ]] || return 1
+    local -a argv=(); mapfile -d '' -t argv < "$f" 2>/dev/null || return 1
+    for a in "${argv[@]}"; do [[ "$a" == "$want" ]] && return 0; done
+    return 1
+}
+
+# /proc/PID/stat field 22 (starttime).  Together with the pid this is a key that
+# survives pid reuse, which "is that pid still alive?" alone does not.
+#
+# Parsed from after the LAST ') ' rather than by column number: comm sits in
+# parentheses and may contain BOTH spaces and parentheses, so a shortest-match
+# cut lands inside comm and shifts every field after it -- which this did, and
+# then returned 0 for the very key that exists to survive pid reuse.  qemu's
+# comm is truncated to 15 characters ("qemu-system-aar") and has none today, but
+# a rule that happens to work is not a rule.
+kbl_proc_starttime() {
+    local f="/proc/$1/stat" line rest
+    [[ -r "$f" ]] || return 1
+    read -r line < "$f" || return 1
+    rest="${line##*) }"                                   # ## = LAST ') ', not the first
+    printf '%s\n' "$(awk '{print $20}' <<<"$rest")"      # 22nd overall = 20th after comm
+}
+
+# Is a debugger already on this gdbstub?  Answered from /proc alone.
+#
+# NOT by connecting.  A bare TCP connect -- not one RSP byte sent -- PAUSES a
+# running guest: measured on qemu 11.1.1, QMP query-status goes from
+# running:true to status:paused and stays paused after the socket is closed.  A
+# probe that asks "is anyone attached?" would therefore stop the user's guest
+# and leave it stopped.  Nothing in this file may open that port.
+#
+# The evidence is an intersection.  Take the socket inodes qemu's own fds hold,
+# and the inodes of ESTABLISHED rows on this port in /proc/net/tcp{,6}: an inode
+# in both means qemu accepted that connection.  Ownership matters because the
+# gdbstub listens with a backlog and keeps listening after it accepts, so a
+# SECOND client completes its handshake and shows as ESTABLISHED while qemu does
+# not hold it -- it is queued, waiting for the first to leave.  Counting bare
+# ESTABLISHED rows reports that queued client as attached.
+#
+# Both address families are read: `-gdb tcp::N` binds 0.0.0.0 and [::], so a
+# client from ::1 appears only in /proc/net/tcp6.
+#
+# Prints one of: attached | attached +N waiting | waiting | - | unknown
+# `bind` is the address the stub is on ("" or a wildcard means any).  It matters:
+# the stub now binds 127.0.0.1 by default, so an ESTABLISHED socket whose LOCAL
+# port happens to be the same number on a different address has nothing to do
+# with it -- and counting it reported a waiting client on a guest nobody had
+# touched.
+# Is the run that claimed this port still setting it up?  pid AND start time,
+# because a pid alone is not an identity: a reused one would make a dead run's
+# claim look live for ever, and its 88-139 MB boot image would never be reclaimed.
+kbl_launcher_alive() {
+    local f="$1" lp ls now
+    [[ -r "$f" ]] || return 1
+    lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$f" | head -1)"
+    [[ -n "$lp" ]] || return 1
+    kill -0 "$lp" 2>/dev/null || return 1
+    ls="$(sed -n 's/^KBL_LAUNCHER_START=//p' "$f" | head -1)"
+    [[ -n "$ls" ]] || return 0                     # older record: pid is all there is
+    now="$(kbl_proc_starttime "$lp")" || return 0
+    [[ "$now" == "$ls" ]]
+}
+
+kbl_gdb_attached() {
+    local port="$1" pid="${2:-}" bind="${3:-}" hexport hexaddr=""
+    hexport="$(printf '%04X' "$port")"
+    case "$bind" in
+        ""|"0.0.0.0"|"::"|"[::]"|"*") hexaddr="" ;;                 # any address
+        "127.0.0.1"|"localhost")      hexaddr="0100007F" ;;         # LE, as /proc prints it
+        *) if [[ "$bind" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+               hexaddr="$(printf '%02X%02X%02X%02X' "${BASH_REMATCH[4]}" "${BASH_REMATCH[3]}" \
+                                                    "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}")"
+           fi ;;
+    esac
+    local -A own=()
+    if [[ -n "$pid" && -r "/proc/$pid/fd" ]]; then
+        local l t
+        for l in /proc/$pid/fd/*; do
+            t="$(readlink -- "$l" 2>/dev/null)" || continue
+            [[ "$t" == socket:\[*\] ]] || continue
+            t="${t#socket:[}"; t="${t%]}"
+            own["$t"]=1
+        done
+    elif [[ -n "$pid" ]]; then
+        printf 'unknown\n'; return 0      # another uid's process; do not guess
+    else
+        printf 'unknown\n'; return 0      # no owning qemu found for this port
+    fi
+    local mine=0 queued=0 f line local_a st ino rest
+    for f in /proc/net/tcp /proc/net/tcp6; do
+        [[ -r "$f" ]] || continue
+        while read -r _sl local_a _rem st rest; do
+            [[ "$st" == "01" ]] || continue                 # 01 = ESTABLISHED
+            [[ "${local_a##*:}" == "$hexport" ]] || continue
+            # tcp6 rows print an IPv4-mapped address as a 32-hex-digit value, so
+            # only compare when the widths match; a mismatch there is not evidence
+            # of anything and the row is kept rather than silently dropped.
+            if [[ -n "$hexaddr" && ${#local_a} -eq 13 && "${local_a%%:*}" != "$hexaddr" ]]; then
+                continue
+            fi
+            # inode is the 10th field overall, i.e. the 6th of what is left
+            # after sl/local/rem/st have been consumed above.
+            set -- $rest; ino="${6:-}"
+            [[ -n "$ino" ]] || continue
+            if [[ -n "${own[$ino]:-}" ]]; then mine=$((mine + 1)); else queued=$((queued + 1)); fi
+        done < <(tail -n +2 "$f")
+    done
+    if   [[ $mine -gt 0 && $queued -gt 0 ]]; then printf 'attached +%d waiting\n' "$queued"
+    elif [[ $mine -gt 0 ]];               then printf 'attached\n'
+    elif [[ $queued -gt 0 ]];             then printf 'waiting\n'
+    else                                       printf -- '-\n'; fi
+}
+
+# Every live guest that exposes a gdbstub, one record per line, fields separated
+# by \x1f (ASCII US):  port pid starttime frozen qbin statefile tree name boot kaslr ssh
+#
+# Not tab.  Tab is an IFS *whitespace* character, so `read` collapses a run of
+# them into one delimiter -- and a record with an empty middle field (a guest
+# with no ssh port, or one this tool did not start and so has no boot mode for)
+# would silently shift every field after it.  The symptom is a table that reads
+# plausibly with the wrong values in the wrong columns.  US is not whitespace,
+# and cannot occur in a path or a tree name.
+#
+# Liveness comes from /proc and only from /proc.  A state file is then joined to
+# a live row and used for the facts /proc cannot carry -- which tree this is, and
+# what the firmware chain was told -- but it never creates a row of its own, so a
+# file left behind by a dead guest cannot invent an instance.  A file whose
+# recorded pid+starttime disagrees with the process actually on that port
+# describes a previous run and is ignored rather than trusted.
+# A value that would not survive the line-oriented state file.  The record format
+# is one KEY=VALUE per line, so a newline inside a value ends the value early and
+# the reader takes the first line as the whole thing -- a tree path silently
+# truncated to its first line, which then matches nothing and leaves the operator
+# unable to attach to their own guest by any name.  Refused where it is written,
+# not discovered where it is read.
+kbl_state_safe() {   # kbl_state_safe VALUE WHAT
+    case "$2" in *$'\n'*|*$'\r'*)
+        die "$1 contains a newline, which the run-state file cannot carry: ${2//$'\n'/\\n}" ;;
+    esac
+}
+
+kbl_instances() {
+    local sd; sd="$(kbl_statedir)" || return 1
+    local d pid port start frozen qbin sf tree name boot kaslr ssh
+    for d in /proc/[0-9]*; do
+        pid="${d#/proc/}"
+        port="$(kbl_qemu_gdb_port "$pid")" || continue
+        start="$(kbl_proc_starttime "$pid")" || start=""
+        qbin="$(basename -- "$(head -c 4096 "/proc/$pid/cmdline" 2>/dev/null | tr '\0' '\n' | head -1)")"
+        kbl_qemu_has_flag "$pid" -S && frozen=1 || frozen=0
+        sf="$sd/kbl-run-${port}.env"
+        tree=""; name=""; boot=""; kaslr=""; ssh=""
+        if [[ -r "$sf" ]]; then
+            local spid sstart
+            spid="$(sed -n 's/^KBL_QEMU_PID=//p' "$sf" | head -1)"
+            sstart="$(sed -n 's/^KBL_QEMU_START=//p' "$sf" | head -1)"
+            # A file that names a different process is about a run that has ended.
+            if [[ -z "$spid" || ( "$spid" == "$pid" && ( -z "$sstart" || "$sstart" == "$start" ) ) ]]; then
+                tree="$(sed -n 's/^KBL_TREE=//p'     "$sf" | head -1)"
+                name="$(sed -n 's/^KBL_NAME=//p'     "$sf" | head -1)"
+                boot="$(sed -n 's/^KBL_BOOT=//p'     "$sf" | head -1)"
+                kaslr="$(sed -n 's/^KBL_KASLR=//p'   "$sf" | head -1)"
+                ssh="$(sed -n 's/^KBL_SSH_PORT=//p'  "$sf" | head -1)"
+            else
+                sf=""
+            fi
+        else
+            sf=""
+        fi
+        [[ -n "$name" ]] || name="$([[ -n "$tree" ]] && basename "$tree")"
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+            "$port" "$pid" "$start" "$frozen" "$qbin" "$sf" "$tree" "$name" \
+            "$boot" "$kaslr" "$ssh"
+    done | sort -t"$(printf '\x1f')" -k1,1n
+}
+
+# Remove per-run scratch whose guest is gone.  Two conditions, both required: no
+# live qemu carries that gdb port, AND nothing is listening on it.  The listen
+# check alone (what this used to be) leaves a file forever once an unrelated
+# process takes the port, and removes one that a guest is still using if the
+# listen check races.
+kbl_prune_state() {
+    local sd; sd="$(kbl_statedir)" || return 0
+    local -A live=()
+    local rec p
+    while IFS=$'\x1f' read -r p _; do [[ -n "$p" ]] && live["$p"]=1; done < <(kbl_instances)
+    local f fp
+    # All per-run scratch lives in the state directory, so the glob follows it
+    # too: half of it under $KBL_STATE_DIR and half hardcoded in /dev/shm meant a
+    # moved state directory left the 90-128 MB boot images unreclaimed for ever.
+    for f in "$sd"/kbl-run-*.env "$sd"/kbl-boot-*.img "$sd"/kbl-vars-*.fd; do
+        [[ -e "$f" ]] || continue
+        fp="${f##*-}"; fp="${fp%.env}"; fp="${fp%.img}"; fp="${fp%.fd}"
+        [[ "$fp" =~ ^[0-9]+$ ]] || continue
+        # Two owners, and only these two.  A live qemu carrying that gdb port, or
+        # a `run` that has claimed the port and not started qemu yet (its
+        # launcher pid is in the state file, and O_EXCL made that claim atomic).
+        #
+        # NOT "something is listening".  That was the old rule and it is the
+        # failure it was supposed to fix: one unrelated process taking the port
+        # number pinned a dead run's 88-139 MB boot image in tmpfs for ever, and
+        # left its state file for `attach` to read against a later guest.  Who is
+        # listening now says nothing about whose these files are.
+        [[ -n "${live[$fp]:-}" ]] && continue
+        kbl_launcher_alive "$sd/kbl-run-${fp}.env" && continue
+        rm -f "$f"
+    done
+}
+
 # --- scratch -----------------------------------------------------------------
 kbl_rundir() {
     local ws h base

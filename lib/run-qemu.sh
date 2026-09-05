@@ -93,16 +93,124 @@ console="$(kbl_tree_get "$tree" CONSOLE)"; [[ -n "$console" ]] || die "$tree/tre
 
 # Same guest can run more than once; give each a distinct gdb port. An explicit
 # --port must be honoured or refused; a tree default that is busy auto-advances.
-_busy() { [[ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]]; }
-if _busy "$PORT"; then
-    if [[ $PORT_SET -eq 1 ]]; then
-        die "port $PORT is in use (you asked for it explicitly); pick another with --port"
+# Is this port taken?  Two ways, and both are needed.
+#
+# Something LISTENING is the obvious one.  The other is a `run` that has CLAIMED
+# the port but not started qemu yet: setting a firmware chain up takes seconds
+# (mkimage, mcopy, a 90-128 MB copy), nothing listens for the whole of that
+# window, and a second run started inside it used to pick the same number --
+# after which the loser's cleanup deleted the winner's live boot disk and run
+# state.  The claim is a state file created with O_EXCL whose KBL_LAUNCHER_PID is
+# alive; a file left by a dead launcher is not a claim and does not block.
+_busy() {
+    [[ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]] && return 0
+    kbl_launcher_alive "$(kbl_statedir)/kbl-run-$1.env"
+}
+
+# Take the port, or fail because someone else already did.  noclobber makes the
+# create O_EXCL, so the winner is decided by the kernel and not by the gap
+# between a test and a write.
+#
+# A file left by a DEAD launcher is not a claim, and _busy() already says so --
+# but O_EXCL only sees that a file exists, so without this second step a crashed
+# run made its port permanently unusable: `--port N` was refused as "in use" with
+# nothing on it, and the default port silently shifted by one for ever.  The
+# retry is exactly one, and only after the owner has been shown to be gone.
+_claim_port() {
+    local port="$1" f lp; f="$(kbl_statedir)/kbl-run-${port}.env"
+    # The launcher's start time goes in beside its pid, for the same reason
+    # qemu's does: a pid on its own is not an identity, and a reused one would
+    # make a dead run's claim look live for ever.
+    _try() { ( set -o noclobber
+               printf 'KBL_SCHEMA=2\nKBL_GDB_PORT=%s\nKBL_LAUNCHER_PID=%s\nKBL_LAUNCHER_START=%s\nKBL_SETTING_UP=1\n' \
+                   "$port" "$$" "$(kbl_proc_starttime $$ || echo)" > "$f" ) 2>/dev/null; }
+    _try && return 0
+    lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$f" 2>/dev/null | head -1)"
+    [[ -n "$lp" ]] && kill -0 "$lp" 2>/dev/null && return 1      # a live owner
+    rm -f "$f" 2>/dev/null
+    _try
+}
+# Prune per-run scratch whose guest is gone.  The rule (a live qemu carries that
+# gdb port, AND something is listening on it) lives in common.sh so `attach`
+# applies exactly the same one -- a port that an unrelated process has taken must
+# not have its file reclaimed, and a port whose guest is alive must not either.
+kbl_prune_state
+
+# Choose AND claim in one loop.  Testing first and claiming later is the race
+# itself: between the two, another run can take the number.  So the claim is the
+# test -- if O_EXCL fails, that port is gone and the search moves on, which is
+# the behaviour a caller who did not name a port already expects.  An explicit
+# --port has nowhere to move to and is refused.
+_orig="$PORT"
+if [[ $PORT_SET -eq 1 ]]; then
+    if [[ -n "$(ss -ltnH "sport = :$PORT" 2>/dev/null)" ]]; then
+        die "port $PORT already has a listener (you asked for it explicitly); pick another with --port"
     fi
-    _orig="$PORT"; PORT=""
-    for _p in $(seq $((_orig + 1)) $((_orig + 128))); do _busy "$_p" || { PORT="$_p"; break; }; done
-    [[ -n "$PORT" ]] || die "no free gdb port near $_orig"
-    say "port         $_orig busy -> using $PORT (attach with --port $PORT)"
+    if ! _claim_port "$PORT"; then
+        _lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$(kbl_statedir)/kbl-run-${PORT}.env" 2>/dev/null | head -1)"
+        die "port $PORT is being set up by another run (launcher pid ${_lp:-?}); pick another with --port"
+    fi
+else
+    _claimed=0
+    for _p in "$PORT" $(seq $((_orig + 1)) $((_orig + 128))); do
+        _busy "$_p" && continue
+        _claim_port "$_p" || continue         # lost the race for this one; try the next
+        PORT="$_p"; _claimed=1; break
+    done
+    [[ $_claimed -eq 1 ]] || die "no free gdb port in $_orig..$((_orig + 128))"
+    [[ "$PORT" == "$_orig" ]] || \
+        say "port         $_orig busy -> using $PORT (attach with --port $PORT)"
 fi
+
+# The claim exists from here on, so the thing that releases it must exist from
+# here on too.  Every `die` between the claim and the launch -- an unbuildable
+# command line, a missing firmware file, a full tmpfs -- used to leave the claim
+# behind and make that port unusable until something pruned it.
+_state="$(kbl_statedir)/kbl-run-${PORT}.env"
+_loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
+shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""   # per-run scratch
+
+# Installed HERE, before anything below creates any of it.  The boot-disk copy is
+# 88-139 MB in tmpfs and every `die` between its creation and the launch used to
+# leave it there -- a failure path that fills /dev/shm and reports a build error
+# as the reason.  Empty variables expand to nothing, so this is safe to arm
+# before the files exist.
+_cleanup() {
+    # The guest goes down FIRST.  Its boot disk and OVMF variable store are among
+    # the files below, so removing them while qemu is still running leaves a guest
+    # whose block device has no backing file and whose run state no longer exists
+    # -- `attach` cannot even name it, and nothing on screen says what happened.
+    # `exec` made this case impossible by replacing this shell; running qemu as a
+    # child (which is what lets the state file carry its pid, and what makes the
+    # trap fire on a direct boot at all) brought the case with it.
+    if [[ -n "${_qpid:-}" ]] && kill -0 "$_qpid" 2>/dev/null; then
+        kill -TERM "$_qpid" 2>/dev/null
+        local _i
+        for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            kill -0 "$_qpid" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -0 "$_qpid" 2>/dev/null && kill -KILL "$_qpid" 2>/dev/null
+    fi
+    # Only what is still OURS.  If another run has taken this port since -- which
+    # it may, once our guest is gone -- its state file names a different launcher,
+    # and deleting it (and the boot disk it is about to use) is exactly the damage
+    # the claim above exists to prevent.
+    if [[ -n "${_state:-}" && -r "$_state" ]]; then
+        local _owner
+        _owner="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$_state" | head -1)"
+        [[ "$_owner" == "$$" ]] && rm -f "$_state"
+    fi
+    rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} \
+          ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"}
+}
+# HUP is here because closing the terminal a guest runs in is a real way for this
+# to end, and the one where an orphan is least likely to be noticed.  INT is
+# listed for completeness: a shell that starts this asynchronously sets SIGINT to
+# SIG_IGN in the child, and an ignored signal cannot be trapped, so that entry
+# takes effect only for a foreground run -- which is the case where Ctrl-C is
+# actually typed.
+trap _cleanup EXIT HUP INT TERM
 
 # Root filesystem, handed to the kernel as an initramfs.  Stated per tree with
 # INITRD= in tree.conf (a path, absolute or relative to the tree); overridden by
@@ -211,14 +319,15 @@ case "$BOOT" in
         ra="$(kbl_tree_get "$tree" UBOOT_RDADDR)";   ra="${ra:-0x48000000}"
         command -v mkimage >/dev/null 2>&1 || die "mkimage (uboot-tools) required for boot uboot"
         command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
-        printf 'KBL_LOADADDR=%s\n' "$la" >> "$_state"   # attach's HW-bp goes here
-        shmdisk="/dev/shm/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
+        _loadaddr="$la"                                 # attach's HW-bp goes here
+        _shm_room_for "$bd"
+        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
         # u-boot ignores QEMU -append, so this run's bootargs ride in boot.scr.
         # The initrd is loaded, and named to booti, only when there is one: `-`
         # in its place is how booti is told there is none.  Loading it anyway
         # under --no-initrd would boot a root filesystem the caller asked not to
         # have, and the flag would look like it did nothing.
-        _bc="$(mktemp -p /dev/shm)"; _bs="$(mktemp -p /dev/shm)"
+        _bc="$(mktemp -p "$(kbl_statedir)")"; _bs="$(mktemp -p "$(kbl_statedir)")"
         { printf 'load virtio 0:1 %s /Image\n' "$la"
           [[ -n "$INITRD" ]] && printf 'load virtio 0:1 %s /rootfs.cpio.gz\n' "$ra"
           printf "setenv bootargs '%s'\n" "$append"
@@ -233,7 +342,7 @@ case "$BOOT" in
         mkimage -A "$_mka" -O linux -T script -C none -d "$_bc" "$_bs" >/dev/null 2>&1 \
             || die "mkimage failed to build boot.scr"
         mcopy -o -i "${shmdisk}@@1M" "$_bs" ::/boot.scr
-        rm -f "$_bc" "$_bs"
+        rm -f "$_bc" "$_bs"; _bc=""; _bs=""
         # The boot disk carries the kernel and the initramfs as files, put there
         # by firmware/build-bootdisk.sh on the day it ran.  Copy today's in over
         # them.  What this writes to is the per-run /dev/shm copy, so the
@@ -270,21 +379,22 @@ case "$BOOT" in
         [[ "$bd" == /* ]] || bd="$tree/$bd"
         [[ -f "$bd" ]] || die "no ESP disk: $bd -- pre-build it (firmware/build-esp.sh)"
         la="$(kbl_tree_get "$tree" UEFI_ENTRY)"; la="${la:-0x1000000}"
-        printf 'KBL_LOADADDR=%s\n' "$la" >> "$_state"
+        _loadaddr="$la"
         command -v mcopy >/dev/null 2>&1 || die "mtools (mcopy) required for boot uefi"
-        shmdisk="/dev/shm/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
-        shmvars="/dev/shm/kbl-vars-${PORT}.fd"; cp -f "$vars" "$shmvars"
+        _shm_room_for "$bd"
+        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
+        shmvars="$(kbl_statedir)/kbl-vars-${PORT}.fd"; cp -f "$vars" "$shmvars"
         # Rewrite grub.cfg with this run's bootargs (kaslr/console).  The initrd
         # line is written only when there is one: grub loads what the config
         # names, so leaving it in under --no-initrd would boot a root filesystem
         # the caller asked not to have, and the flag would look like it did
         # nothing.
-        _gc="$(mktemp -p /dev/shm)"
+        _gc="$(mktemp -p "$(kbl_statedir)")"
         { printf 'search --no-floppy --set=root --file /vmlinuz\n'
           printf 'linux /vmlinuz %s\n' "$append"
           [[ -n "$INITRD" ]] && printf 'initrd /rootfs.cpio.gz\n'
           printf 'boot\n'; } > "$_gc"
-        mcopy -o -i "${shmdisk}@@1M" "$_gc" ::/grub.cfg; rm -f "$_gc"
+        mcopy -o -i "${shmdisk}@@1M" "$_gc" ::/grub.cfg; rm -f "$_gc"; _gc=""
         # The ESP carries the kernel and the initramfs as files, and
         # firmware/build-esp.sh put whatever was current the day it ran into
         # them.  Copy today's in over them.  What this writes to is the per-run
@@ -434,10 +544,35 @@ fi
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
 [[ $KASLR -eq 1 ]] && say "kaslr        on (randomized; 'kearly kaslr auto' calibrates the slide)" \
                    || say "kaslr        off (nokaslr, deterministic)"
-[[ $RUN -eq 1 ]] || say "frozen       attach with: kbuildlab attach $(basename "$tree")"
-if [[ -n "$shmdisk" ]]; then
-    trap 'rm -f "$shmdisk" "$shmvars" "$_state"' EXIT INT TERM
-    "${CMD[@]}"
-else
-    exec "${CMD[@]}"
-fi
+# Copy-pasteable: the name is quoted (it may contain spaces) and the port is
+# named whenever it is not the tree's default -- which is exactly when a second
+# guest of this tree exists and the bare name would land in the chooser.
+_atree="$(printf '%q' "$(basename "$tree")")"
+[[ "$PORT" == "$(kbl_tree_get "$tree" GDB_PORT)" ]] \
+    && _acmd="kbuildlab attach $_atree" \
+    || _acmd="kbuildlab attach $_atree --port $PORT"
+[[ $RUN -eq 1 ]] || say "frozen       attach with: $_acmd"
+# Run qemu as a child rather than exec'ing it.  Two things need that.  The
+# cleanup trap has to fire in EVERY boot mode -- `exec` replaces this shell and
+# runs no trap, which is why a direct boot used to leave its state file behind
+# for `attach` to read against a later guest on the same port.  And the state
+# file has to carry qemu's own pid, which only exists once it is forked.
+#
+# `<&0` is what keeps the serial console usable, and it is not decoration.  With
+# job control off -- which it is in every non-interactive shell, and this is one
+# -- POSIX assigns an asynchronous command's stdin to /dev/null unless stdin was
+# EXPLICITLY redirected.  Without it, qemu's -nographic serial chardev reads EOF
+# for ever: the guest prints and accepts nothing, and nobody can log in.
+# Measured: a plain `&` child has /proc/PID/fd/0 -> /dev/null, with `<&0` it is
+# the terminal; and with it in place, typing root/root at a `kbl run` guest logs
+# in and the guest answers.
+#
+# The rest of the terminal handling is unchanged: job control being off also
+# means the child stays in this shell's process group -- measured inside a pty,
+# same pgid, state S+ -- so -nographic's raw-mode handling and Ctrl-C behave as
+# they did under `exec`.
+"${CMD[@]}" <&0 &
+_qpid=$!
+_write_state "$_qpid"
+wait "$_qpid"; _rc=$?
+exit $_rc
