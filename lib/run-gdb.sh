@@ -403,9 +403,33 @@ if [[ "$arch" == "x86_64" ]]; then
     fi
 fi
 
-declare -a ARGS=(-q -iex "set pagination off")
+# gdb's own working directory is the kernel source tree.  The kernel's
+# scripts/gdb commands expect it: lx-symbols reloads the image with a bare
+# `symbol-file vmlinux`, and lx-dmesg / lx-lsmod resolve module .ko paths the same
+# relative way, so from anywhere else they fail with "vmlinux: No such file or
+# directory" -- which is what happens today.  Documentation/dev-tools/gdb-kernel-
+# debugging.rst says to run gdb from the build directory for exactly this reason.
+# Every path this launcher passes is already absolute, so nothing else moves.
+# -iex, so both are in force before ANY command runs -- including the kernel's
+# own scripts/gdb, which resolve `vmlinux` and module paths relative to gdb's
+# working directory.  The log file is pinned to the directory the command was
+# typed in, since the chdir would otherwise put gdb.txt inside the kernel tree.
+declare -a ARGS=(-q -iex "set pagination off" -iex "cd $src"
+                 -iex "set logging file $PWD/gdb.txt")
 [[ -n "$tool" ]] && ARGS+=(-ex "source $tool")
-ARGS+=("$vmlinux" -ex "target remote :${PORT}")
+# Connect to the address the stub was BOUND to, not to an assumed loopback.  The
+# launcher records it (KBL_GDB_BIND) and qemu's own `-gdb tcp:HOST:PORT` carries
+# it; without this a tree that set GDB_BIND to be reachable from another machine
+# is reported as listening by everything here and connectable by nothing.  A
+# wildcard bind means every interface, and loopback is then the way in.
+_gbind=""
+[[ -n "$_st" && -r "$_st" ]] && _gbind="$(sed -n 's/^KBL_GDB_BIND=//p' "$_st" | head -1)"
+if [[ -z "$_gbind" && -n "${_r_pid:-}" ]]; then
+    _gdev="$(kbl_qemu_arg "$_r_pid" -gdb 2>/dev/null)"
+    [[ "$_gdev" == tcp:* ]] && { _gbind="${_gdev#tcp:}"; _gbind="${_gbind%:*}"; }
+fi
+case "$_gbind" in ""|"0.0.0.0"|"::"|"[::]") _gbind="localhost" ;; esac
+ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
 [[ -n "$FWSYM" ]] && ARGS+=(-ex "add-symbol-file $FWSYM -o 0")
 # Default: run straight to the kernel's very first instruction (head.S _text),
 # past the QEMU reset shim -- where early-boot debugging begins, and where the
@@ -418,6 +442,42 @@ _bootbreak=0
 # --stop start_kernel: from _text, run on to start_kernel (gdbtools applies the
 # KASLR slide as the high-VA symbol is reached).
 [[ -n "$STOP_AT" ]] && ARGS+=(-ex "break $STOP_AT" -ex "continue")
+# gdb's working directory has to BE the kernel source, and it has to be that
+# BEFORE anything runs: lx-symbols reloads the image with a bare
+# `symbol-file vmlinux`, and lx-dmesg / lx-lsmod resolve module paths the same
+# relative way, so from anywhere else they fail with "vmlinux: No such file or
+# directory".  Documentation/dev-tools/gdb-kernel-debugging.rst says to run gdb
+# from the build directory for exactly this reason.
+#
+# That silently re-rooted every relative path the caller passed after `--`.  So
+# the caller's own file arguments are made absolute FIRST -- and not by guessing
+# which ones are paths, but by asking: a relative argument that names a file
+# existing here, in the directory the command was typed in, is that file.  One
+# that does not is left exactly as written, because then it is not a path this
+# code has any business rewriting.
+# Only the positions gdb's own syntax says are paths.  A catch-all "if a file by
+# that name exists here, it is a path" is a guess, and a wrong one: `-ex version`
+# in a directory that happens to contain a file called `version` would be
+# rewritten into an absolute path and stop being a gdb command.
+_relabs() {   # _relabs VALUE -> absolute if it names a file here, else unchanged
+    [[ "$1" != /* && -e "$PWD/$1" ]] && printf '%s\n' "$PWD/$1" || printf '%s\n' "$1"
+}
+for ((_i = 0; _i < ${#PASS[@]}; _i++)); do
+    case "${PASS[_i]}" in
+        # OPTION VALUE forms
+        -x|--command|-s|--symbols|-e|--exec|-c|--core|-d|--directory|--se|--se=*)
+            [[ "${PASS[_i]}" == --se=* ]] \
+                && PASS[_i]="--se=$(_relabs "${PASS[_i]#--se=}")" \
+                || { [[ -n "${PASS[_i+1]:-}" ]] && PASS[_i+1]="$(_relabs "${PASS[_i+1]}")"; } ;;
+        # OPTION=VALUE forms
+        --command=*|--symbols=*|--exec=*|--core=*|--directory=*)
+            _o="${PASS[_i]%%=*}"; PASS[_i]="$_o=$(_relabs "${PASS[_i]#*=}")" ;;
+        # A bare first argument is the symbol file; every later one is gdb's own
+        # positional grammar and is left alone.
+        -*) : ;;
+        *)  [[ $_i -eq 0 ]] && PASS[_i]="$(_relabs "${PASS[_i]}")" ;;
+    esac
+done
 ARGS+=("${PASS[@]+"${PASS[@]}"}")
 
 say "attaching    $gdb -> :$PORT"
