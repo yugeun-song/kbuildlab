@@ -81,6 +81,27 @@ RUN ln -sf gcc-15 /usr/bin/gcc && ln -sf g++-15 /usr/bin/g++ \
     && ln -sf riscv64-linux-gnu-gcc-15 /usr/bin/riscv64-linux-gnu-gcc \
     && ln -sf riscv64-linux-gnu-g++-15 /usr/bin/riscv64-linux-gnu-g++
 
+# `install` must be GNU coreutils', not uutils'.
+#
+# Ubuntu 26.04 makes uutils coreutils the default and leaves GNU's at
+# /usr/bin/gnuinstall.  buildroot checks for this at
+# support/dependencies/dependencies.mk and REFUSES to start, naming
+# uutils/coreutils#12166 -- so a rootfs build here stops before it does anything,
+# with an error about the host tool rather than about the build.  The image is
+# where a host tool is chosen, so the choice belongs here.
+#
+# Asked rather than assumed: if a future image no longer has gnuinstall, or
+# already points install at GNU's, this changes nothing and says so, instead of
+# creating a dangling symlink that would break every package that installs
+# anything.
+RUN if [ -x /usr/bin/gnuinstall ] && install --version 2>/dev/null | grep -qi uutils; then \
+        update-alternatives --install /usr/bin/install install /usr/bin/gnuinstall 100 \
+        && update-alternatives --set install /usr/bin/gnuinstall; \
+        echo "install -> $(readlink -f "$(command -v install)")"; \
+    else \
+        echo "install is already $(install --version 2>/dev/null | head -1)"; \
+    fi
+
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
