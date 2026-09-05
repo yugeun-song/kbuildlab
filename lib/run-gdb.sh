@@ -79,16 +79,26 @@ fi
 _op_entry="${GDBTOOLS_ENTRY_PA:-}"   # an operator pin; it outranks everything below
 _tree_entry=""                       # what tree.conf states, applied only as a fallback
 while IFS='=' read -r k v; do
-    v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
+    # The same grammar as kbl_tree_get, including the quote strip that this one
+    # was missing -- and this is the parser whose output goes straight into gdb's
+    # environment, so `GDBTOOLS_ENTRY_PA="0x40080000"` reached the debugger with
+    # its quotes attached and did not parse as a number.
+    v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; v="${v%\"}"; v="${v#\"}"
     [[ "$k" == GDBTOOLS_ENTRY_PA ]] && { _tree_entry="$v"; continue; }
     [[ -n "${!k:-}" ]] || export "$k=$v"
-done < <(sed -n 's/^[[:space:]]*\(GDBTOOLS_[A-Z0-9_]*\)=\(.*\)/\1=\2/p' "$tree/tree.conf")
+done < <(sed -n 's/^[[:space:]]*\(GDBTOOLS_[A-Z0-9_]*\)[[:space:]]*=[[:space:]]*\(.*\)/\1=\2/p' "$tree/tree.conf")
 export GDBTOOLS_AUTO=1
 
 # Match the exact boot combination `run` recorded for this gdb port (mode + load
 # address). In a firmware chain the bootloader lands the kernel entry at a known
 # address; point gdbtools' bootbreak HW breakpoint there. Parsed, never sourced.
-_st="/dev/shm/kbl-run-${PORT}.env"
+# The state file kbl_instances ACCEPTED for this row, and nothing else.  The `:-`
+# default used to point at the same path kbl_instances had just blanked after
+# finding its recorded pid/starttime did not match the process on that port -- so
+# `--list` called the file stale while `attach` calibrated to it, which is how a
+# session ends up loading u-boot symbols into a guest that never ran u-boot.
+# Blank means there is no usable state, exactly as for a guest started elsewhere.
+_st="${_r_sf:-}"
 FWSYM=""   # firmware ELF symbols (u-boot) for the pre-kernel stages
 _bmode=""  # boot mode this port is actually running; empty when nothing recorded it
 _kaslr=""  # whether it was booted with KASLR on; only the run state knows

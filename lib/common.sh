@@ -182,9 +182,21 @@ kbl_tree() {
 # --- the tree's own description ----------------------------------------------
 # Read from the tree, never inferred from its directory name: renaming a
 # directory must not change what gets built.
+# tree.conf grammar, and it is the SAME one in all five parsers that read this
+# file (kbuildlab's kbl_tree_get and its GDBTOOLS_ passthrough, the two firmware
+# scripts, and the editor adapter's discover.lua):
+#
+#     ^\s* KEY \s*=\s* VALUE   with a trailing  # comment  and trailing space
+#     stripped, and one layer of surrounding double quotes removed.
+#
+# They used to differ: three demanded KEY= with no space while the Lua one
+# accepted spaces, and only one stripped quotes.  A line written as
+# `GDBTOOLS_ENTRY_PA = 0x40200000` was then honoured by the editor and dropped in
+# silence by the terminal, so the same guest calibrated to two different addresses
+# with nothing to say which was which.
 kbl_tree_get() {
     local tree="$1" key="$2" v
-    v="$(sed -n "s/^[[:space:]]*${key}=//p" "$tree/tree.conf" | head -1)"
+    v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$tree/tree.conf" | head -1)"
     v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; v="${v%\"}"; v="${v#\"}"
     printf '%s\n' "$v"
 }
