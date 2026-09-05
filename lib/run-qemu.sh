@@ -359,9 +359,67 @@ cpu_paging="$(kbl_tree_get "$tree" CPU_PAGING)"
 [[ -n "$cpu" && -n "$cpu_paging" ]] && cpu="${cpu},${cpu_paging}"
 [[ -n "$cpu" ]] && CMD+=(-cpu "$cpu")
 [[ $use_kvm -eq 1 ]] && CMD+=(-enable-kvm)
-CMD+=(-gdb "tcp::${PORT}")
+# Where the gdbstub listens.  `-gdb tcp::N` binds 0.0.0.0 AND [::], and a gdbstub
+# is an unauthenticated read/write channel into the guest's memory -- so the
+# default is the loopback address, and a tree that genuinely wants to be reached
+# from another machine says so with GDB_BIND= rather than every tree being
+# exposed because one of them needed it.  Both readers of this (run-gdb.sh and
+# the editor adapter) already parse the tcp:HOST:PORT form.
+_gbind="${KBL_GDB_BIND:-$(kbl_tree_get "$tree" GDB_BIND)}"; _gbind="${_gbind:-127.0.0.1}"
+CMD+=(-gdb "tcp:${_gbind}:${PORT}")
 [[ $RUN -eq 1 ]] || CMD+=(-S)
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
+
+# Record this run so `attach` -- and the editor adapter -- can match the exact
+# boot combination on this gdb port.  Written here, not earlier, because the ssh
+# port and the final command line are only settled once the NIC and the boot mode
+# have been resolved, and a state file that says "" for a port that was in fact
+# allocated is worse than one that does not exist.
+#
+# The file name and the KBL_ key format are a published contract: the editor's
+# discover.lua reads /dev/shm/kbl-run-<PORT>.env and parses `KBL_[A-Z0-9_]+=`.
+# Keys are therefore only ADDED here, never renamed, so a reader that knows the
+# older set keeps working against a file a newer launcher wrote.
+_write_state() {   # _write_state [QEMU_PID]
+    local qpid="${1:-}" tmp
+    # The record is line-oriented, so a value containing a newline would end its
+    # own line and every reader would take the first line as the whole value -- a
+    # tree path silently truncated, after which the operator cannot attach to
+    # their own guest by name or by path.  Refuse where it is written.
+    kbl_state_safe "the tree path" "$tree"
+    kbl_state_safe "the kernel command line" "$append"
+    local -a rec=(
+        "KBL_SCHEMA=2"
+        "KBL_TREE=$tree" "KBL_NAME=$(basename "$tree")" "KBL_ARCH=$arch"
+        "KBL_BOOT=$BOOT" "KBL_KASLR=$KASLR" "KBL_GDB_PORT=$PORT"
+        "KBL_GDB_BIND=$_gbind" "KBL_FROZEN=$(( RUN == 0 ))"
+        # A firmware chain passes the cmdline itself, so it never appears on
+        # qemu's own command line; recording it is the only way anything else can
+        # read back what this guest was actually booted with.
+        "KBL_CMDLINE=$append"
+        "KBL_MACHINE=$machine" "KBL_SMP=$SMP" "KBL_MEM=$MEM"
+        "KBL_LAUNCHER_PID=$$" "KBL_LAUNCHER_START=$(kbl_proc_starttime $$ || echo)"
+        "KBL_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    )
+    [[ -n "$_loadaddr" ]] && rec+=("KBL_LOADADDR=$_loadaddr")
+    [[ $NET -eq 1 ]] && rec+=("KBL_SSH_PORT=$SSHPORT")
+    [[ $persist_ok -eq 1 ]] && rec+=("KBL_PERSIST=$persist_disk")
+    if [[ -n "$qpid" ]]; then
+        # pid alone is not an identity: pids are reused.  The process start time
+        # from /proc pins it, so a state file that outlives its guest can be told
+        # apart from one describing the process actually on this port.
+        rec+=("KBL_QEMU_PID=$qpid" "KBL_QEMU_START=$(kbl_proc_starttime "$qpid" || echo)")
+    fi
+    # Written whole and renamed into place.  Appending KBL_LOADADDR separately, as
+    # this used to, left a window of several hundred milliseconds (mkimage, mcopy,
+    # a 90 MB cp) in which `attach` could read a record that said BOOT=uboot with
+    # no load address -- and then skip the hardware breakpoint and stop somewhere
+    # the kernel never runs, with nothing on screen to say why.  rename(2) is
+    # atomic, so a reader sees either the old record or the new one.
+    tmp="$(mktemp -p "$(dirname "$_state")" .kbl-run.XXXXXX)" || return 0
+    printf '%s\n' "${rec[@]}" > "$tmp" && mv -f "$tmp" "$_state" || rm -f "$tmp"
+}
+_write_state
 
 say "guest        $(basename "$tree") ($arch) on :$PORT"
 if [[ "$BOOT" == direct ]]; then
