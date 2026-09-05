@@ -54,16 +54,96 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --initrd PATH | --no-initrd
   --net | --no-net           user NIC with an ssh forward (default on); --ssh-port N
   --persist | --no-persist   attach the tree's writable /persist disk
+  --append WORDS             extra kernel command-line words, repeatable
   --port|-g N                gdb port (default: the tree's GDB_PORT); --mem|-m, --smp, --bios
 
 kbuildlab attach [tree] [options] [-- GDB ARGS]
   --no-bootbreak|--raw       attach to an already-booted guest, no run-to-_text
   --stop text|firmware|start_kernel   where to stop (default text = head.S _text)
-  --port|-p N                gdb port (default: the tree's GDB_PORT)
+  --port|-p N                attach by port; the tree comes from the guest's run state
+  --list|-l                  list live guests and exit; never prompts
+  --first                    with several matches take the lowest port (for scripts)
 ```
 
 The gdb-port flag differs by command: `run` names it `-g` (QEMU's own spelling),
 `attach` names it `-p`.
+
+`attach` puts gdb's working directory in the kernel source, because the kernel's
+own `scripts/gdb` commands need it there -- `lx-symbols` reloads the image with a
+bare `symbol-file vmlinux`, and `lx-dmesg`/`lx-lsmod` resolve module paths the
+same relative way. Arguments you pass after `--` are unaffected: a relative path
+in the positions gdb's syntax defines as paths (`-x`, `--command`, `-s`, `-c`,
+`-d`, `-e`, and the first positional) is made absolute against the directory you
+typed the command in first, and `set logging` writes there too. Only the
+interactive session that follows sees the kernel tree as its cwd.
+
+### Several guests of one tree
+
+`run` advances to a free port rather than refusing, so a second guest of the same
+tree is normal -- and its port is a number that appears nowhere in `tree.conf`.
+`attach` therefore discovers rather than assumes:
+
+- one live guest of that tree -> exactly as before, no prompt and no extra output;
+- several -> a chooser (fzf when present, else a numbered prompt), or a refusal
+  naming the ports when stdin is not a terminal;
+- `--port N` alone -> the tree is recovered from that guest's own run state, so
+  the right `vmlinux` is still loaded;
+- both, disagreeing -> refused, saying what is actually on that port.
+
+The tree's `GDB_PORT` stays `run`'s default and is no longer `attach`'s: once a
+second guest exists, that number identifies one of them at best.
+
+The listing says whether each guest already has a debugger, and works that out
+**without touching the gdbstub**. A bare TCP connect -- not one RSP byte -- pauses
+a running guest and leaves it paused after the socket closes (measured on qemu
+11.1.1 through QMP `query-status`), so a probe that asked by connecting would stop
+the guest it was asked about. The answer instead comes from `/proc`: the socket
+inodes qemu's own fds hold, intersected with the ESTABLISHED rows on that port in
+`/proc/net/tcp` and `/proc/net/tcp6`. Ownership is the point -- the stub keeps
+listening after it accepts, so a second client finishes its handshake and shows as
+ESTABLISHED while queued behind the first, and counting rows alone would call that
+attached. An unreadable fd table (another user's process) reads `unknown`, never a
+guess.
+
+```
+$ kbuildlab attach v4.6-arm64 --list
+live guests of v4.6-arm64:
+  #   port   ssh    tree             boot    kaslr  state    dbg          pid      uptime
+  1   1435   2222   v4.6-arm64       uboot   off    frozen   -            86359    00:41
+  2   14991  2223   v4.6-arm64       uboot   off    running  attached     89478    00:12
+```
+
+The stub serves exactly one client, and a second `attach` on the same port does
+not usefully queue: the kernel completes the handshake, qemu never accepts that
+socket, and the packets sit unread until gdb's timeout -- after which, if the
+first client leaves, the late replies arrive one packet out of step and the
+session fails with a protocol error. `attach` says so rather than appearing to
+hang. Start a second guest instead; that is what the port allocator is for.
+
+### Choosing a port
+
+`run` claims its port by creating the run-state file with `O_EXCL`, and the
+claim IS the test: an unclaimed, unlistened port is taken by whoever creates the
+file first, and a run that loses moves to the next number. Testing for a free
+port and claiming it later would leave a window -- and it is not a small one,
+since a firmware chain spends seconds on `mkimage`, `mcopy` and a 90-128 MB copy
+before anything listens. Two runs started together used to land on the same port
+and the loser's cleanup then deleted the winner's live boot disk. Cleanup now
+removes the state file only while it still names this launcher.
+
+An explicit `--port` has nowhere to move to and is refused if the port is taken.
+
+### The run state
+
+`run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default
+`/dev/shm`), written whole and renamed into place so a reader never sees half a
+record. `attach` and the editor adapter both read it, so its `KBL_*` key format is
+a contract: keys are added, never renamed. It carries the boot mode, the load
+address a firmware chain landed the kernel at, the KASLR state, the ssh port, the
+effective kernel command line -- which a firmware chain passes itself and so does
+not appear on qemu's own command line -- and qemu's pid together with its
+`/proc` start time, which is what lets a file that outlived its guest be told
+apart from one describing the process actually on that port.
 
 ## The tree.conf
 
@@ -73,7 +153,22 @@ the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
 `UPSTREAM`) and the facts `run` and `attach` consume: `QEMU_BIN`, `MACHINE`,
 `CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, and where they apply `BOOT`,
 `INITRD`, `PERSIST`, `CPU_PAGING` and the firmware paths (`UBOOT`,
-`OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`). `attach` also hands the debugger every
+`OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`), plus two that steer the guest itself:
+`CMDLINE_EXTRA` (words appended to the kernel command line in every boot mode --
+`-append` for a direct boot, `setenv bootargs` in the u-boot script, the `linux`
+line in `grub.cfg`) and `GDB_BIND` (the address the gdbstub listens on, default
+`127.0.0.1`, because a gdbstub is an unauthenticated read/write channel into guest
+memory and qemu's own `tcp::N` spelling binds every interface).
+
+Every value in it is read with ONE grammar, and the same one in all five parsers
+that read the file -- kbuildlab's `kbl_tree_get`, its `GDBTOOLS_*` passthrough, the
+two firmware scripts, and the editor adapter's `discover.lua`:
+`^\s*KEY\s*=\s*VALUE`, trailing `#` comment and space stripped, one layer of
+surrounding double quotes removed. They used to differ, and a line written
+`GDBTOOLS_ENTRY_PA = 0x40200000` was honoured by the editor and dropped in silence
+by the terminal, so one guest calibrated to two different addresses.
+
+`attach` also hands the debugger every
 `GDBTOOLS_*` line verbatim, with one exception: `GDBTOOLS_ENTRY_PA` -- a kernel
 image base pinned for a target that cannot report it -- describes the mode the
 tree DEFAULTS to, so it is applied only when that is the mode this port is

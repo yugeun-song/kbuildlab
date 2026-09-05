@@ -57,3 +57,43 @@ UPSTREAM=stable          # stable | mainline
 # be introspected, add GDBTOOLS_ENTRY_PA here and say where the number came
 # from; a number whose provenance is "it worked last time" is how a session ends
 # up calibrated to the wrong address with nothing reporting it.
+
+# --- syntax ------------------------------------------------------------------
+# Every line here is read as  ^\s* KEY \s*=\s* VALUE , with a trailing # comment
+# and trailing space stripped and one layer of surrounding double quotes removed.
+# All five parsers that read this file use exactly that grammar (kbuildlab's
+# kbl_tree_get and its GDBTOOLS_ passthrough, firmware/build-bootdisk.sh,
+# firmware/build-esp.sh, and the editor adapter's discover.lua), so a line that
+# works in one works in all of them.
+
+# --- the guest's own command line --------------------------------------------
+# Words appended to the kernel command line, in every boot mode: -append for a
+# direct boot, `setenv bootargs` inside the generated u-boot script, and the
+# `linux` line of the generated grub.cfg.  `kbuildlab run --append` adds more on
+# top of this.
+#
+# The kernel also hands any key=value it does not recognise to init as an
+# ENVIRONMENT variable (init/main.c unknown_bootoption), and init passes it on --
+# which is the only place early enough to reach PID 1 itself, so a rootfs cannot
+# do it.  That is what the v4.6 tree uses it for: a modern glibc registers
+# rseq(2) in every process, a 2016 kernel has no such syscall, and arm64's
+# do_ni_syscall answers each one with a full register dump to the console.
+# CMDLINE_EXTRA=GLIBC_TUNABLES=glibc.pthread.rseq=0
+
+# --- where the gdbstub listens -----------------------------------------------
+# Default 127.0.0.1.  qemu's own `-gdb tcp::N` spelling binds 0.0.0.0 AND [::],
+# and a gdbstub is an unauthenticated read/write channel into the guest's memory,
+# so reaching it from another machine is opt-in per tree rather than the default
+# for every tree.
+# GDB_BIND=127.0.0.1
+
+# --- debugger settings passed straight through -------------------------------
+# Any GDBTOOLS_* line here is exported verbatim to the debugger, so the whole of
+# gdbtools' contract table is reachable from this file without touching the
+# launcher.  Beyond GDBTOOLS_ENTRY_PA and GDBTOOLS_BREAK_KIND, which the arch
+# templates already use, these are the ones a non-QEMU board is most likely to
+# need: GDBTOOLS_PROFILE (a JSON machine description), GDBTOOLS_DTB, GDBTOOLS_SCAN
+# (a lo:hi physical range to search for the image magic), GDBTOOLS_RAM_BASE,
+# GDBTOOLS_PHYS_WINDOW, GDBTOOLS_PRESET, GDBTOOLS_ANCHOR and the GDBTOOLS_X86_*
+# recovery keys.  See gdbtools/README.md for what each one means; a value stated
+# here that gdbtools does not read is simply ignored, so a typo is silent.
