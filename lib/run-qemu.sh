@@ -10,6 +10,7 @@ source "${KBL_REPO}/lib/common.sh"
 RUN=0; PORT=""; PORT_SET=0; MEM=1G; SMP=2; KVM=0; KASLR=0; NET=1
 INITRD=""; INITRD_SET=0; NO_INITRD=0; SSHPORT=""; SSHPORT_SET=0
 BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
+declare -a APPEND_EXTRA=()   # extra kernel command-line words (--append, CMDLINE_EXTRA)
 PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot)
 declare -a EXTRA=()
 declare -a REST=()
@@ -23,6 +24,10 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
   --kaslr|--no-kaslr randomized vs deterministic base (default: --no-kaslr)
   --kvm|--no-kvm     x86 only; default TCG for deterministic early-boot HW bp
   --initrd PATH | --no-initrd    root fs image, or none (early-boot only)
+  --append WORDS     extra kernel command-line words, repeatable; added after
+                     the tree's CMDLINE_EXTRA. Reaches the guest in every boot
+                     mode: -append (direct), boot.scr bootargs (u-boot),
+                     grub.cfg linux (uefi)
   --net|--no-net     user/virtio NIC with ssh forward, or none
   --ssh-port N       host port forwarded to guest :22 (default 2222, auto-avoids)
   --persist|--no-persist   attach the tree's writable disk (default: tree PERSIST)
@@ -44,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --no-kaslr)  KASLR=0; shift ;;      # default: nokaslr, deterministic
         --initrd)    INITRD="${2:?--initrd needs a path}"; INITRD_SET=1; shift 2 ;;
         --no-initrd) NO_INITRD=1; shift ;;  # boot without a root fs (early-boot debug)
+        --append)    APPEND_EXTRA+=("${2:?--append needs a string}"); shift 2 ;;
         --net)       NET=1; shift ;;
         --no-net)    NET=0; shift ;;        # no NIC at all
         --ssh-port)  SSHPORT="${2:?--ssh-port needs a number}"; SSHPORT_SET=1; shift 2 ;;
@@ -276,32 +282,96 @@ fi
 
 append="console=$console"
 [[ $KASLR -eq 1 ]] || append="$append nokaslr"
+# Extra command-line words.  Stated per tree with CMDLINE_EXTRA= in tree.conf and
+# added to with --append; never hardcoded here, because what a guest needs on its
+# command line is a property of that guest, not of the launcher.
+#
+# One thing this carries that is not a kernel parameter: the kernel hands any
+# unrecognised key=value on its command line to init as an ENVIRONMENT VARIABLE
+# (init/main.c unknown_bootoption).  That is the only place early enough to reach
+# PID 1 itself, which is why the rootfs alone cannot do it -- but it is also not
+# sufficient, because busybox init does not pass its environment on to what it
+# starts.  Measured: /proc/1/environ carries the value while a login shell's own
+# copy is empty.  The rootfs therefore re-exports it (rootfs/post-build.sh writes
+# the two lines into /etc/init.d/rcS and /etc/profile.d), and the two halves
+# together are what make it reach the processes that would otherwise trap.
+# v4.6-arm64/tree.conf carries the measured before/after and what still escapes.
+# What can safely travel every path.  A direct boot hands the string to execve as
+# one argument and would take anything, but the same string also has to survive
+# `setenv bootargs '<it>'` in a generated u-boot script and a `linux <it>` line in
+# a generated grub.cfg -- neither of which is a shell, and neither of which has an
+# escape for the character that ends its own quoting.  A single quote would end
+# the u-boot argument early and let the rest of the value run as u-boot COMMANDS;
+# a newline would do the same in both.  Refuse those here, where the value is
+# still identifiable, instead of producing a guest that boots with a truncated
+# command line and no indication of it.
+_cmdline_ok() {   # _cmdline_ok VALUE SOURCE
+    # Neither destination is a shell, and neither has an escape for the character
+    # that ends its own quoting -- so the answer is to refuse the character, here,
+    # where the value can still be named.  u-boot's hush ends a single-quoted
+    # argument at the next `'` and then parses the rest as COMMANDS; grub treats
+    # `;` as a command separator and expands `$NAME` before the kernel ever sees
+    # the line, so a value with a `$` in it reaches the guest silently rewritten
+    # while the run state records what was asked for.  Both were reproduced.
+    case "$1" in
+        *\'*)   die "$2 contains a single quote.  u-boot's 'setenv bootargs' argument ends
+       at that quote and the rest is run as u-boot commands: $1" ;;
+        *'"'*)  die "$2 contains a double quote, which grub.cfg does not quote: $1" ;;
+        *';'*)  die "$2 contains a semicolon, which ends the grub.cfg 'linux' line and
+       makes the rest a separate grub command: $1" ;;
+        *'$'*)  die "$2 contains a '\$'.  grub substitutes \$NAME before the kernel sees the
+       line, so the guest would boot with something other than this: $1" ;;
+        *'`'*)  die "$2 contains a backquote: $1" ;;
+        *[$'\n\r']*) die "$2 contains a newline, which splits both the u-boot script and
+       the grub.cfg into extra commands: $1" ;;
+    esac
+}
+_cmdx="$(kbl_tree_get "$tree" CMDLINE_EXTRA)"
+if [[ -n "$_cmdx" ]]; then
+    _cmdline_ok "$_cmdx" "CMDLINE_EXTRA in $tree/tree.conf"
+    append="$append $_cmdx"
+fi
+for _w in "${APPEND_EXTRA[@]+"${APPEND_EXTRA[@]}"}"; do
+    [[ -n "$_w" ]] || continue
+    _cmdline_ok "$_w" "--append"
+    append="$append $_w"
+done
 declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic)
 
 # An entropy source.  A headless guest has no keyboard, no disk seek noise and no
-# hardware RNG, so its CRNG is seeded by whatever the kernel can manufacture on its
-# own -- and only kernels from 5.4 can (try_to_generate_entropy, jitter entropy).
-# Older ones never initialise it, and the first process to call getrandom() blocks
-# for ever: on v4.6 that is ssh-keygen in the rootfs's S50sshd, which stops rcS
-# before init ever spawns a getty, so the guest boots to a blank console instead of
-# a login prompt.  virtio-rng-pci exists on every machine kbuildlab drives (checked
-# with `-device help` on all three qemu-system binaries) and costs nothing; the
-# guest still needs CONFIG_HW_RANDOM_VIRTIO to use it, which the preset now sets.
+# hardware RNG, so its CRNG is seeded by whatever the kernel can manufacture on
+# its own -- and only kernels from 5.4 can (try_to_generate_entropy, jitter
+# entropy).  virtio-rng-pci exists on every machine kbuildlab drives (checked with
+# `-device help` on all three qemu-system binaries) and costs nothing; the guest
+# still needs CONFIG_HW_RANDOM_VIRTIO to use it, which the preset sets.
+#
+# This device is necessary and not sufficient on a pre-4.8 kernel, and the
+# difference was measured rather than assumed.  On v4.6.7/arm64 the driver binds,
+# khwrngd runs, and /proc/sys/kernel/random/entropy_avail reads ~1300 by t=2s --
+# yet getrandom() still blocked until t=110s.  The reason is that 4.6 has two
+# pools: khwrngd feeds the INPUT pool, while getrandom() waits on the NONBLOCKING
+# one, which is refilled only by a READ of /dev/urandom and only once per
+# kernel.random.urandom_min_reseed_secs (60).  Nothing reads urandom in that
+# window, so the guest waits with a full pool.  The rootfs's S00entropy drops the
+# interval and forces one refill; that is the half of the fix the launcher cannot
+# do, because there is no way to set a sysctl from a 4.6 kernel command line.
 CMD+=(-device virtio-rng-pci)
 
-# Prune stale per-run scratch (RAM disks + state files) whose guest is gone.
-for _f in /dev/shm/kbl-boot-*.img /dev/shm/kbl-vars-*.fd /dev/shm/kbl-run-*.env; do
-    [[ -e "$_f" ]] || continue
-    _fp="${_f##*-}"; _fp="${_fp%.img}"; _fp="${_fp%.fd}"; _fp="${_fp%.env}"
-    _busy "$_fp" || rm -f "$_f"
-done
-# Record this run so `attach` can match the exact boot combination (mode, load
-# address) on this gdb port -- the same kernel/name can run in several combos.
-_state="/dev/shm/kbl-run-${PORT}.env"
-{ printf 'KBL_TREE=%s\n' "$tree"; printf 'KBL_ARCH=%s\n' "$arch"
-  printf 'KBL_BOOT=%s\n' "$BOOT"; printf 'KBL_KASLR=%s\n' "$KASLR"; } > "$_state"
 
-shmdisk=""; shmvars=""   # per-run RAM copies (boot disk / OVMF vars)
+
+
+# Enough room for the copy before making it, with the size read from the file
+# rather than assumed.  `cp` onto a full tmpfs produces a truncated image that
+# boots into a firmware prompt with no explanation.
+_shm_room_for() {
+    local src="$1" need avail
+    need="$(stat -c%s "$src" 2>/dev/null)" || return 0
+    local sd; sd="$(kbl_statedir)"
+    avail="$(df -B1 --output=avail "$sd" 2>/dev/null | tail -1 | tr -dc 0-9)"
+    [[ -n "$avail" ]] || return 0
+    (( avail > need + (need / 4) )) || die "$sd has $((avail / 1048576)) MiB free; this run needs \
+$((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_DIR elsewhere."
+}
 case "$BOOT" in
     direct)
         CMD+=(-kernel "$image" -append "$append")
