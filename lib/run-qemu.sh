@@ -339,6 +339,13 @@ if [[ $NET -eq 1 ]]; then
     esac
     CMD+=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSHPORT}-:22"
           -device "${_nicdev},netdev=net0")
+else
+    # Omitting our NIC is not the same as having none: qemu creates its DEFAULT
+    # user-mode NIC on any machine that has one, so --no-net used to print
+    # "net none" over a guest that had a working DHCP lease.  `-nic none` is what
+    # actually suppresses it, and any measurement taken under --no-net -- boot
+    # timing, entropy, syscall counts -- depended on this being true.
+    CMD+=(-nic none)
 fi
 use_kvm=0
 [[ "$arch" == "x86_64" && "$KVM" -eq 1 && -r /dev/kvm && -w /dev/kvm ]] && use_kvm=1
