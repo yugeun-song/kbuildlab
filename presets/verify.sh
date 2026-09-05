@@ -15,9 +15,29 @@ shift
 
 fail=0
 checked=0
+absent=0
 
 state() {   # state SYMBOL -> the line as .config has it, or ""
     grep -E "^(CONFIG_$1=|# CONFIG_$1 is not set)" "$CONFIG" | head -1
+}
+
+# Does this kernel DEFINE the symbol at all?
+#
+# A preset line that names a symbol the tree has never heard of is not drift: it
+# is a preset written against a newer kernel being read back against an older
+# one.  v4.6 has no DEBUG_INFO_DWARF5 (5.2), no DEBUG_INFO_BTF (5.2) and no
+# DEBUG_INFO_COMPRESSED (5.14), so asking for them there can only ever fail --
+# and reporting that as a regression trains the reader to ignore this output,
+# which is the one thing a check like this cannot afford.
+#
+# Answered from the tree's own Kconfig files, so it stays true for whatever
+# kernel is in front of it; asked only for symbols that are already missing, so
+# the cost is a handful of greps rather than one per preset line.
+SRC="$(cd -P "$(dirname "$CONFIG")" && pwd)"
+symbol_exists() {
+    [ -d "$SRC/arch" ] || return 0        # not a kernel tree: cannot tell, assume it does
+    grep -rlqE "^[[:space:]]*(menu)?config[[:space:]]+$1([[:space:]]|\$)" \
+        --include='Kconfig*' "$SRC" 2>/dev/null
 }
 
 for frag in "$@"; do
@@ -29,9 +49,15 @@ for frag in "$@"; do
                 checked=$((checked + 1))
                 got="$(state "$sym")"
                 if [[ -z "$got" ]]; then
-                    printf 'MISSING  CONFIG_%s=%s\n         asked for by %s, absent from the .config --\n         a `depends on` was not met, or another fragment overrode it\n' \
-                        "$sym" "$want" "$(basename "$frag")"
-                    fail=$((fail + 1))
+                    if symbol_exists "$sym"; then
+                        printf 'MISSING  CONFIG_%s=%s\n         asked for by %s, absent from the .config although this kernel\n         defines the symbol -- a `depends on` was not met, or another fragment overrode it\n' \
+                            "$sym" "$want" "$(basename "$frag")"
+                        fail=$((fail + 1))
+                    else
+                        printf 'ABSENT   CONFIG_%s=%s\n         %s asks for it; this kernel does not define the symbol at all,\n         so it is a preset written for a newer version, not a setting that was lost\n' \
+                            "$sym" "$want" "$(basename "$frag")"
+                        absent=$((absent + 1))
+                    fi
                 elif [[ "$got" != "CONFIG_$sym=$want" ]]; then
                     printf 'CHANGED  CONFIG_%s: asked %s, got %s  (%s)\n' \
                         "$sym" "$want" "${got#*=}" "$(basename "$frag")"
@@ -55,7 +81,13 @@ for frag in "$@"; do
 done
 
 if [[ $fail -gt 0 ]]; then
-    printf '\nverify: %d of %d preset lines did not survive\n' "$fail" "$checked" >&2
+    printf '\nverify: %d of %d preset lines did not survive%s\n' "$fail" "$checked" \
+        "$([[ $absent -gt 0 ]] && printf ' (%d more name symbols this kernel does not have)' "$absent")" >&2
     exit 1
 fi
-printf 'verify: all %d preset lines survived\n' "$checked"
+if [[ $absent -gt 0 ]]; then
+    printf 'verify: %d of %d preset lines survived; %d name symbols this kernel version does not define\n' \
+        "$((checked - absent))" "$checked" "$absent"
+else
+    printf 'verify: all %d preset lines survived\n' "$checked"
+fi

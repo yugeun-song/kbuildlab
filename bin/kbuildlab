@@ -28,11 +28,19 @@ kbuildlab -- containerised Linux kernel build, boot and debug
   kbuildlab config [TREE] [--preset]        apply the debuggability preset
   kbuildlab build  [TREE] [-- MAKE ARGS]    build in the container
   kbuildlab update [TREE]                   sync + rebuild + reindex, keeping .config
+                                            (reports what olddefconfig changed and
+                                             any preset line the newer source lost;
+                                             repairs neither)
   kbuildlab tags   [TREE]                   refresh ctags and cscope
   kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
                                             (attaches the tree's INITRD rootfs;
-                                             --run to boot now, --no-initrd for none)
-  kbuildlab attach [TREE]                   attach gdb to a running guest
+                                             --run to boot now, --no-initrd for none,
+                                             --append to add kernel command-line words)
+  kbuildlab attach [TREE] [--port N]        attach gdb to a running guest, found by
+                                            discovery rather than by the tree's
+                                            GDB_PORT; asks which when several of a
+                                            tree are live (--list to just look,
+                                            --first to take the lowest port)
                                             (defaults to stopping at head.S _text;
                                              --no-bootbreak to attach raw)
   kbuildlab trees                           what is in the workspace
@@ -374,6 +382,85 @@ cmd_tags() {
 }
 
 # ---------------------------------------------------------------- update
+# What `make olddefconfig` does and does not say.
+#
+# It reads the existing .config, answers every symbol the newer source ADDED
+# with that symbol's default, leaves every existing answer alone, and writes the
+# result back in place -- so the tree's .config becomes the current one without
+# being re-derived.  That is the right operation for an update and is why
+# cmd_update calls cmd_config WITHOUT --preset: re-merging the fragments would
+# overwrite answers the operator changed on purpose.
+#
+# What it does not do is say anything, and two things then pass unnoticed:
+#
+#   1. A preset line that the newer source renamed, moved under a different
+#      `depends on`, or deleted.  The setting is simply gone, the build succeeds,
+#      and the next debugging session is quietly worse -- which is the exact
+#      failure presets/verify.sh was written to catch, except that verify.sh only
+#      runs under --preset and so never ran on an update.
+#   2. A DEFAULT that moved between versions.  olddefconfig takes the new default
+#      for a new symbol, and that is a real behaviour change nobody asked for.
+#
+# Both are reported here and neither is repaired: an update preserves the tree's
+# answers, and a tool that silently rewrote them would be the worse failure.
+# kbuild leaves .config.old behind on every config run, which is what the first
+# report compares against.
+_update_report() {   # _update_report TREE
+    local tree="$1" src cfg old
+    src="$(kbl_tree_src "$tree")"; cfg="$src/.config"; old="$src/.config.old"
+    [[ -r "$cfg" ]] || return 0
+
+    # (1) what this update changed in the .config, from kbuild's own backup.
+    if [[ -r "$old" ]]; then
+        local added removed changed
+        added=$(comm -13 <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$old" | sort -u) \
+                         <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$cfg" | sort -u) | wc -l)
+        removed=$(comm -23 <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$old" | sort -u) \
+                           <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$cfg" | sort -u) | wc -l)
+        changed=$(diff <(grep -E '^(CONFIG_|# CONFIG_)' "$old" | sort) \
+                       <(grep -E '^(CONFIG_|# CONFIG_)' "$cfg" | sort) 2>/dev/null | grep -c '^<')
+        if [[ "$added" -eq 0 && "$removed" -eq 0 && "$changed" -eq 0 ]]; then
+            say "config       unchanged by this update"
+        else
+            say "config       $added new symbol(s) took their default, $removed gone, $changed line(s) differ"
+            say "             diff .config.old .config   (in $src)"
+        fi
+    fi
+
+    # (2) does the .config still say what the preset asked for?  Reported, never
+    # repaired -- see above.  A tree with its own fragment is checked against
+    # that too, in the same order cmd_config would merge them.
+    local -a frags=("${KBL_REPO}/presets/common.config")
+    local arch; arch="$(kbl_tree_arch "$tree")"
+    local archpreset="${KBL_REPO}/presets/arch/${arch}.config"
+    [[ "$(kbl_tree_get "$tree" UPSTREAM)" == "mainline" \
+       && -f "${KBL_REPO}/presets/arch/${arch}-mainline.config" ]] \
+        && archpreset="${KBL_REPO}/presets/arch/${arch}-mainline.config"
+    [[ -f "$archpreset" ]] && frags+=("$archpreset")
+    [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
+    local out
+    if out="$("${KBL_REPO}/presets/verify.sh" "$cfg" "${frags[@]}" 2>&1)"; then
+        say "preset       $(tail -1 <<<"$out")"
+    else
+        warn "preset drift in $(basename "$tree") -- the update did not change these, the newer
+       source did.  Nothing was repaired; re-apply deliberately with
+       'kbuildlab config $(basename "$tree") --preset' if that is what you want:"
+        printf '%s\n' "$out" >&2
+    fi
+
+    # (3) a minimal, diffable snapshot of what this tree is now configured as.
+    # savedefconfig writes only the symbols that differ from the arch defconfig,
+    # which is how the kernel itself stores a configuration and the only form in
+    # which a config change is readable in a diff.  Regenerating .config from it
+    # is `make defconfig KBUILD_DEFCONFIG=<this file>`.
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    if _in_container "$src" make ARCH="$(_karch "$arch")" savedefconfig >/dev/null 2>&1 \
+       && [[ -f "$src/defconfig" ]]; then
+        mv -f "$src/defconfig" "$tree/defconfig.snapshot"
+        say "snapshot     $tree/defconfig.snapshot ($(grep -c . "$tree/defconfig.snapshot") lines)"
+    fi
+}
+
 cmd_update() {
     local tree; tree="$(kbl_tree "${1:-}")" || exit 1
     local name; name="$(basename "$tree")"
@@ -383,6 +470,7 @@ cmd_update() {
     # answers whatever new symbols the newer source introduced, using their
     # defaults, and leaves every existing answer alone.
     cmd_config "$name"
+    _update_report "$tree"
     cmd_build "$name"
     cmd_tags "$name"
 }
