@@ -224,6 +224,34 @@ instead.
   bpftrace, uftrace, blktrace and `perf trace`.
 - **eBPF and XDP.** Syscall, JIT, LSM, BTF, and the attach points the tooling
   expects.
+- **The early memory map.** `PTDUMP_DEBUGFS` exports every kernel mapping with
+  its permissions, split by the address markers that name each region --
+  "Fixmap start" and "Fixmap end" among them, which is the only in-kernel view
+  that says where the fixmap *is* rather than what a header computes it to be.
+  One symbol, two layouts: arm64 and riscv call `ptdump_debugfs_register(...,
+  "kernel_page_tables")` and get `/sys/kernel/debug/kernel_page_tables`, while
+  the same symbol builds `arch/x86/mm/debug_pagetables.c` on x86 and that
+  creates a `page_tables/` directory holding `kernel`, `current_kernel`,
+  `current_user` and `efi`. Reading one absence as a missing feature is the
+  mistake to avoid here. `DEBUG_WX` walks the same tables
+  at boot and warns on a W+X mapping; `DEBUG_VIRTUAL` reports a
+  `__pa()`/`virt_to_phys()` given an address outside the linear map, which is
+  exactly what handing it a fixmap or vmalloc address does; `MEMTEST` reports
+  bad ranges through memblock. v4.6 predates the generic ptdump and restricts
+  both `DEBUG_WX` and `DEBUG_VIRTUAL` to x86, so that tree states the arm64
+  equivalent it does have, `ARM64_PTDUMP`, in its own `config-fragment`.
+
+  `ARCH_KEEP_MEMBLOCK` -- which keeps the memblock arrays past `mem_init()`, so
+  `/sys/kernel/debug/memblock` exists -- is *not* set. It is promptless; arm64
+  and riscv select it outright, and on x86_64 the only symbol that selects it in
+  either 6.12 or mainline is `INTEL_TDX_HOST`, which is the whole TDX host stack
+  for one debugfs file. Before `mem_init()` the arrays are live on every
+  architecture, and gdbtools' `kmemblock` reads them there.
+
+  memblock's own running commentary is a boot parameter rather than a symbol.
+  `memblock=debug`, `early_ioremap_debug` and `mminit_loglevel=4` are
+  `early_param()` in all seven trees, so `CMDLINE_EXTRA=` in `tree.conf` or a
+  one-off `kbuildlab run --append` reaches them.
 
 ### What it does not
 
