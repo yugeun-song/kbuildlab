@@ -32,9 +32,11 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                                              any preset line the newer source lost;
                                              repairs neither)
   kbuildlab tags   [TREE] [--no-clangd]     refresh ctags, cscope, gtags and the
-                          [--clangd-only]     clangd index (the last one out of
-                                              tree, in the host's clangd config;
-                                              KBL_CLANGD=0 also turns it off)
+                          [--clangd-only]     clangd index -- the last one out of
+                          [--no-warm]         tree, in the host's clangd config,
+                                              and warmed here so an editor opens
+                                              on a finished index (KBL_CLANGD=0,
+                                              KBL_CLANGD_WARM=0 turn them off)
   kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
                                             (attaches the tree's INITRD rootfs;
                                              --run to boot now, --no-initrd for none,
@@ -397,7 +399,22 @@ _clangd_index() {
     for d in "$ws"/*/; do kbl_is_tree "${d%/}" && peers+=(--peer "${d%/}"); done
     say "indexing     clangd (compile_commands.json, out of tree)"
     python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" "${peers[@]}" gen --force \
-        || warn "clangd index failed (ctags/cscope/gtags are still current)"
+        || { warn "clangd index failed (ctags/cscope/gtags are still current)"; return 0; }
+
+    # And then build clangd's own index, here, rather than leaving it to
+    # whichever clangd an editor starts later.  It is the same work; done here
+    # it is finished before the editor opens, instead of competing with the
+    # reading you opened the editor to do.  clangd keys its shards on file
+    # contents, so a rebuild that touched forty files re-indexes forty files
+    # and an already-warm tree returns in seconds.
+    #
+    # Synchronous on purpose.  A background daemon this command started and did
+    # not mention would be a process the operator has to discover; `tags` is
+    # already the slow command, and the wait is visible and interruptible.
+    [[ "${KBL_CLANGD_WARM:-1}" == "0" ]] && { say "clangd       index left cold (KBL_CLANGD_WARM=0)"; return 0; }
+    say "indexing     clangd background index"
+    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" warm \
+        || warn "clangd index warming did not finish (the editor will resume it)"
 }
 
 cmd_tags() {
@@ -407,6 +424,7 @@ cmd_tags() {
         case "$1" in
             --no-clangd) clangd=0; shift ;;
             --clangd-only) clangd=2; shift ;;
+            --no-warm) export KBL_CLANGD_WARM=0; shift ;;
             *) rest+=("$1"); shift ;;
         esac
     done

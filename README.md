@@ -88,10 +88,24 @@ something; on `_text` or `__init_begin`, on the declaration with the
 `vmlinux.lds.S` line that places it. (Hover does not show these — clangd's
 hover card leaves the comment out. Jump, don't hover.)
 
+The index is built here rather than left to the editor. Without that, the
+first clangd an editor starts after a rebuild spends its time indexing while
+you are trying to read — and after every rebuild there is something new to do,
+so it happens again. It is the same work either way; done from the command
+line it is finished before the editor opens. clangd keys its shards on file
+contents, so it is incremental by construction: a rebuild that touched forty
+files re-indexes forty files, and an already-warm tree returns in seconds.
+
+Measured on a 3887-file tree with two indexing threads: ten minutes from
+nothing, seven seconds when already warm.
+
 ```
-kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd
-                      [--clangd-only]   just the clangd index
-KBL_CLANGD=0 kbuildlab tags [tree]      same as --no-clangd
+kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
+                      [--clangd-only]   just the clangd parts
+                      [--no-warm]       database and config, leave the index cold
+KBL_CLANGD=0 / KBL_CLANGD_WARM=0        the same two, from the environment
+
+python3 lib/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
 ```
 
 To see what an editor would actually report, `lib/clangd.py` can measure it —

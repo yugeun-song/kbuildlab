@@ -749,6 +749,19 @@ CLANG_ONLY_NOISE = [
     # clang 18+.  Fires on out-parameters passed as const pointers, which the
     # kernel does constantly; the callee fills them in.
     "-Wno-uninitialized-const-pointer",
+    # sprintf(str + strlen(str), ...) is how the kernel's own build tools
+    # assemble a string; clang reads the pointer arithmetic as an attempt to
+    # append to a literal.
+    "-Wno-string-plus-int",
+    # An enum constant used as a condition, which is how the tracing macros
+    # are written.  clang's spelling of this has no GCC counterpart to match.
+    "-Wno-int-in-bool-context",
+    # `if (p->name)` where name is an array member: always true, and the
+    # kernel writes it deliberately to mean "the containing object exists".
+    "-Wno-pointer-bool-conversion",
+    # __section() spellings clang and GCC disagree about attaching to a
+    # forward declaration.
+    "-Wno-section",
 ]
 
 # Compiler-provided intrinsic headers are not the same header in clang and GCC:
@@ -780,24 +793,36 @@ _WNO_RE = re.compile(r"-Wno-[a-z0-9-]+")
 
 
 def kernel_warning_opinions(tree: str, triple: str) -> list[str]:
-    """Every -Wno- the tree's own makefiles mention, kept only where this clang
-    recognises it.  A GCC-only spelling is dropped here rather than reaching
-    the editor as an unknown-warning-option diagnostic."""
-    ksrc = kernel_root(tree)
+    """Every -Wno- the makefiles mention, kept only where this clang knows it.
+
+    Read from every tree in the workspace, not just this one.  A kernel from
+    2016 predates the kernel's clang support and so has no way to say which
+    clang warnings it considers noise on its own source -- but a 6.12 or
+    mainline tree sitting next to it says exactly that, in
+    scripts/Makefile.extrawarn, about code that has barely changed.  Applying
+    the newer tree's judgement to the older one is the whole point: it is the
+    same project's opinion about the same idioms, expressed where it could be.
+
+    A GCC-only spelling is dropped here rather than reaching the editor as an
+    unknown-warning-option diagnostic on line 1 of every file.
+    """
     found: set[str] = set()
-    paths = list(WARNING_MAKEFILES)
-    arch_dir = os.path.join(ksrc, "arch")
-    if os.path.isdir(arch_dir):
-        paths += [os.path.join("arch", a, "Makefile") for a in os.listdir(arch_dir)]
-    for rel in paths:
-        p = os.path.join(ksrc, rel)
-        if not os.path.isfile(p):
-            continue
-        try:
-            with open(p, encoding="utf-8", errors="replace") as f:
-                found.update(_WNO_RE.findall(f.read()))
-        except OSError:
-            continue
+    for name in discover_trees():
+        ksrc = kernel_root(name)
+        paths = list(WARNING_MAKEFILES)
+        arch_dir = os.path.join(ksrc, "arch")
+        if os.path.isdir(arch_dir):
+            paths += [os.path.join("arch", a, "Makefile")
+                      for a in os.listdir(arch_dir)]
+        for rel in paths:
+            p = os.path.join(ksrc, rel)
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, encoding="utf-8", errors="replace") as f:
+                    found.update(_WNO_RE.findall(f.read()))
+            except OSError:
+                continue
     found.discard("-Wno-unknown-warning-option")
     return sorted(found - set(probe_flags(found, triple)))
 
@@ -1419,6 +1444,139 @@ def run_check(tree: str, files: list[str], jobs: int, journal=None,
 
 
 # ---------------------------------------------------------------------------
+# warming the index
+# ---------------------------------------------------------------------------
+
+def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> bool:
+    """Build clangd's background index now, from the command line.
+
+    Without this the index is built by whichever clangd the editor starts, in
+    the background, while you are trying to read code -- and after a rebuild
+    there is always something new to do, so it happens again.  It is the same
+    work either way; doing it here means it is finished before an editor is
+    opened, and finished on this machine's terms rather than in competition
+    with the thing you actually wanted to do.
+
+    It is incremental by construction: clangd keys its index shards on each
+    file's contents, so a rebuild that changed forty files re-indexes forty
+    files.  A tree already warm returns in seconds.
+
+    Driven through the LSP progress notifications rather than by watching the
+    cache directory: clangd says when it starts and when it has nothing left,
+    and guessing from file timestamps would either stop early or never stop.
+    """
+    root = kernel_root(tree)
+    proc = subprocess.Popen(
+        ["clangd", "--background-index", f"-j={jobs}", "--log=error",
+         "--background-index-priority=normal"],
+        cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL)
+    state = {"begun": False, "done": False, "last": "", "replies": {}}
+    lock = threading.Lock()
+
+    def write(obj):
+        body = json.dumps(obj).encode()
+        proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        proc.stdin.flush()
+
+    def reader():
+        out = proc.stdout
+        while True:
+            line = out.readline()
+            if not line:
+                return
+            if not line.startswith(b"Content-Length:"):
+                continue
+            n = int(line.split(b":")[1])
+            out.readline()
+            try:
+                msg = json.loads(out.read(n))
+            except Exception:
+                continue
+            with lock:
+                if msg.get("method") == "$/progress":
+                    v = msg.get("params", {}).get("value", {})
+                    kind = v.get("kind")
+                    if kind == "begin":
+                        state["begun"] = True
+                    elif kind == "report":
+                        state["begun"] = True
+                        pct = v.get("percentage")
+                        msgtxt = v.get("message", "")
+                        state["last"] = f"{pct}% {msgtxt}".strip() if pct is not None else msgtxt
+                    elif kind == "end":
+                        state["done"] = True
+                elif "id" in msg and "method" in msg:
+                    write({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+                elif "id" in msg:
+                    state["replies"][msg["id"]] = msg
+
+    threading.Thread(target=reader, daemon=True).start()
+    write({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "processId": os.getpid(),
+        "rootUri": "file://" + root,
+        "capabilities": {"window": {"workDoneProgress": True}},
+    }})
+    write({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    # Indexing starts when clangd is given something to look at.  Any source
+    # from the database will do; the first one keeps it deterministic.
+    seed = next((e["file"] for e in cdb_entries(tree) if not is_header(e["file"])), None)
+    if seed and os.path.isfile(seed):
+        try:
+            with open(seed, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            write({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+                "textDocument": {"uri": "file://" + seed, "languageId": "c",
+                                 "version": 1, "text": text}}})
+        except OSError:
+            pass
+
+    started = time.time()
+    grace = 45.0            # how long to wait for indexing to even begin
+    last_shown = 0.0
+    ok = False
+    try:
+        while time.time() - started < timeout:
+            with lock:
+                begun, done, last = state["begun"], state["done"], state["last"]
+            if done:
+                ok = True
+                break
+            if not begun and time.time() - started > grace:
+                ok = True       # nothing to do: the tree is already warm
+                break
+            if not quiet and last and time.time() - last_shown > 15:
+                last_shown = time.time()
+                print(f"      indexing {tree}: {last}", flush=True)
+            time.sleep(0.5)
+    finally:
+        try:
+            write({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+            write({"jsonrpc": "2.0", "method": "exit", "params": None})
+            proc.wait(timeout=30)
+        except Exception:
+            proc.kill()
+    return ok
+
+
+def index_size(tree: str) -> str:
+    d = os.path.join(cache_dir(tree), ".cache", "clangd", "index")
+    if not os.path.isdir(d):
+        return "none"
+    total = 0
+    files = 0
+    for root, _, names in os.walk(d):
+        for n in names:
+            try:
+                total += os.path.getsize(os.path.join(root, n))
+                files += 1
+            except OSError:
+                pass
+    return f"{files} shards, {total / (1 << 20):.0f} MiB"
+
+
+# ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
 
@@ -1516,6 +1674,26 @@ def cmd_check(args) -> int:
     return 1 if grand_diags else 0
 
 
+def cmd_warm(args) -> int:
+    jobs = args.jobs or max(1, (os.cpu_count() or 2) // 2)
+    rc = 0
+    for tree in args.trees:
+        if not os.path.isfile(os.path.join(cache_dir(tree), "compile_commands.json")):
+            print(f"[{tree}] no database yet -- run gen first")
+            rc = 1
+            continue
+        print(f"[{tree}] warming clangd's index ({jobs} threads), "
+              f"currently {index_size(tree)}")
+        started = time.time()
+        ok = warm_index(tree, jobs, args.timeout)
+        took = time.time() - started
+        print(f"    {'done' if ok else 'TIMED OUT'} in {took:.0f}s -- "
+              f"now {index_size(tree)}")
+        if not ok:
+            rc = 1
+    return rc
+
+
 def cmd_clean(args) -> int:
     for tree in args.trees:
         d = cache_dir(tree)
@@ -1565,6 +1743,13 @@ def main() -> int:
     c.add_argument("--resume", action="store_true",
                    help="with --journal, skip files already recorded")
     c.set_defaults(func=cmd_check)
+
+    w = sub.add_parser("warm", help="build clangd's background index now")
+    w.add_argument("-j", "--jobs", type=int, default=0,
+                   help="clangd indexing threads (default: half the CPUs)")
+    w.add_argument("--timeout", type=float, default=7200.0,
+                   help="give up after this many seconds (default 2h)")
+    w.set_defaults(func=cmd_warm)
 
     k = sub.add_parser("clean", help="undo everything gen wrote for these trees")
     k.set_defaults(func=cmd_clean)
