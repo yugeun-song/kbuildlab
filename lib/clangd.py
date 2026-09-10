@@ -912,6 +912,60 @@ def path_regex(*parts: str) -> str:
     return "".join(parts)
 
 
+def unparseable_sources(tree: str, entries: list[dict], verbose: bool) -> list[str]:
+    """Sources sitting in a built directory that this tree cannot parse.
+
+    Most of what a tree does not build still reads fine: a driver switched off
+    in .config is the same C, and clangd borrows a neighbour's command for it.
+    The ones that do not read are the ones asking for headers this tree does
+    not have -- drivers/macintosh wanting powerpc's asm/, block/partitions/ibm.c
+    wanting s390's, the build's own host tools wanting stdio.h through a
+    -nostdinc command line.  There is no command that makes those parse here,
+    so they get the same treatment as a foreign arch directory: navigation
+    kept, diagnostics dropped.
+
+    Found by checking whether each include resolves, rather than by matching
+    names: `arm64.c` is a giveaway but `ibm.c` is not, and the question that
+    actually matters is whether the file's dependencies exist in this tree.
+    Only directories that contain something the tree does build are searched,
+    which is where the problem shows up and keeps this to seconds.
+    """
+    ksrc = kernel_root(tree)
+    arch = srcarch(tree) or ""
+    built = {e["file"] for e in entries}
+    search = ["include", f"arch/{arch}/include", f"arch/{arch}/include/generated",
+              "include/uapi", f"arch/{arch}/include/uapi", "include/generated/uapi",
+              "include/generated", "."]
+    out: list[str] = []
+    for d in sorted({os.path.dirname(f) for f in built}):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if not n.endswith((".c", ".h")):
+                continue
+            path = os.path.join(d, n)
+            if path in built:
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    incs = _INCLUDE_RE.findall(f.read(40000))
+            except OSError:
+                continue
+            for spelling in incs:
+                if os.path.isfile(os.path.join(d, spelling)):
+                    continue
+                if any(os.path.isfile(os.path.join(ksrc, sd, spelling)) for sd in search):
+                    continue
+                out.append(os.path.relpath(path, ksrc))
+                break
+    if verbose and out:
+        print(f"    {len(out)} source(s) in built directories need headers this "
+              f"tree does not have")
+    return sorted(out)
+
+
 def coverage(tree: str, entries: list[dict]) -> tuple[set[str], set[str]]:
     """Which top-level directories, and which arch/<name>, this tree actually
     compiles.  A tree configured for arm64 never builds arch/powerpc, so every
@@ -1030,11 +1084,12 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool,
         if verbose:
             print(f"    sub-build {sub_triple} {hit}: "
                   f"{len(sub_bad)}/{len(flags)} flags rejected")
-        pat = "|".join(re.escape(p) for p in hit)
+        # Directory prefixes, so everything under them matches.
+        pat = "|".join(re.escape(p) + ".*" for p in hit)
         sub = [
             f"# {tree}: built for {sub_triple}, not for the tree's own target",
             "If:",
-            f"  PathMatch: {path_regex(prefix, '(', pat, ').*')}",
+            f"  PathMatch: {path_regex(prefix, '(', pat, ')')}",
             "CompileFlags:",
             "  Add:",
             f"    - --target={sub_triple}",
@@ -1125,17 +1180,24 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool,
         if top in tops or top in ("arch", "include"):
             continue
         dead.append(f"{top}/")
-    if dead:
+    stray = unparseable_sources(tree, entries, verbose)
+
+    if dead or stray:
         if verbose:
             not_built = [d for d in dead if not d.startswith("arch/")]
             print(f"    {len(dead)} paths this tree never compiles are silenced "
                   f"({len(dead) - len(not_built)} foreign arch, "
                   f"{len(not_built)} non-kernel: {', '.join(sorted(not_built)[:6])})")
-        pat = "|".join(re.escape(d) for d in dead)
+        # Directories match everything under them; individual files match
+        # themselves.  Built separately rather than sharing one suffix, so a
+        # file entry cannot accidentally match a longer path that starts the
+        # same way.
+        pat = "|".join([re.escape(d) + ".*" for d in dead]
+                       + [re.escape(s) for s in stray])
         frags.append("\n".join([
             f"# {tree}: not built here -- no command line makes this parse correctly",
             "If:",
-            f"  PathMatch: {path_regex(prefix, '(', pat, ').*')}",
+            f"  PathMatch: {path_regex(prefix, '(', pat, ')')}",
             "CompileFlags:",
             # Suppress silences named diagnostics, but clangd reports the
             # "too many errors" fatal outside that filter -- it is how the AST
