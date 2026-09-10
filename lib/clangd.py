@@ -1196,6 +1196,45 @@ def write_tree_block(tree: str, blocks: list[str] | None) -> None:
 
 SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 
+# One clangd parsing kernel sources holds on to roughly a gigabyte, so how many
+# can run at once is a memory question and not a core-count one.  Fixing the
+# number is what makes a 16 GiB machine swap: the right count depends on what
+# else is running, which is not knowable when the flag is typed.
+SESSION_MB = 1200          # measured RSS of a clangd chewing through kernel code
+# Enough for an editor with its own clangd (or several), a browser, and the
+# work the operator actually sat down to do.  Measured the hard way: at 3 GiB
+# reserved, a scan and an editor indexing the same trees drove a 16 GiB machine
+# to the point where the kernel started killing things.
+RESERVE_MB = 4096
+
+
+def available_mb() -> int | None:
+    """MemAvailable, which already accounts for reclaimable cache -- unlike
+    MemFree, which on a machine that has just built a kernel reads as nearly
+    zero and says nothing about what can actually be allocated."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return None
+
+
+def auto_jobs(cap: int | None = None, reserve_mb: int = RESERVE_MB) -> int:
+    cpus = os.cpu_count() or 2
+    ceiling = cap or max(1, cpus - 1)
+    av = available_mb()
+    if av is None:
+        return min(2, ceiling)
+    return max(1, min(ceiling, (av - reserve_mb) // SESSION_MB))
+
+
+def memory_is_tight(reserve_mb: int = RESERVE_MB) -> bool:
+    av = available_mb()
+    return av is not None and av < reserve_mb
+
 
 class Session:
     """One clangd process, driven over stdio the way an editor drives it."""
@@ -1399,6 +1438,7 @@ def run_check(tree: str, files: list[str], jobs: int, journal=None,
     results: list[tuple[str, list]] = []
     rlock = threading.Lock()
     done = [0]
+    paused = [False]
     RECYCLE = 250
 
     def worker():
@@ -1410,6 +1450,27 @@ def run_check(tree: str, files: list[str], jobs: int, journal=None,
                     f = work.get_nowait()
                 except queue.Empty:
                     return
+                # Under pressure, drop this session and wait rather than push
+                # the machine into swap.  Closing it returns its arena
+                # immediately, which is the whole point: the scan yields, the
+                # editor and everything else keep their memory.
+                waited = 0.0
+                while memory_is_tight() and waited < 300:
+                    if session is not None:
+                        session.close()
+                        session = None
+                        with rlock:
+                            if not paused[0]:
+                                paused[0] = True
+                                print("      memory is tight -- pausing a scan "
+                                      "session until it frees up", flush=True)
+                    time.sleep(5)
+                    waited += 5
+                if session is None:
+                    with rlock:
+                        paused[0] = False
+                    session = Session(root)
+                    served = 0
                 d = session.diagnose(f)
                 with rlock:
                     done[0] += 1
@@ -1639,9 +1700,14 @@ def cmd_check(args) -> int:
                 print(f"[{tree}] resuming: {before - len(files)} already scanned, "
                       f"{len(files)} left")
             journal = open(path, "a" if args.resume else "w")
+        jobs = args.jobs or auto_jobs()
+        if not args.jobs:
+            av = available_mb()
+            print(f"[{tree}] {jobs} parallel session(s)"
+                  + (f" ({av} MiB available, {RESERVE_MB} MiB reserved)" if av else ""))
         started = time.time()
         try:
-            results = run_check(tree, files, args.jobs, journal,
+            results = run_check(tree, files, jobs, journal,
                                 progress_every=500 if args.all else 0)
         finally:
             if journal is not None:
@@ -1675,7 +1741,11 @@ def cmd_check(args) -> int:
 
 
 def cmd_warm(args) -> int:
-    jobs = args.jobs or max(1, (os.cpu_count() or 2) // 2)
+    # One indexing thread is far cheaper than a whole session, but they still
+    # add up on a tree this size; scale them the same way and leave the same
+    # headroom.
+    jobs = args.jobs or max(1, min(auto_jobs(cap=(os.cpu_count() or 2)) * 2,
+                                   (os.cpu_count() or 2)))
     rc = 0
     for tree in args.trees:
         if not os.path.isfile(os.path.join(cache_dir(tree), "compile_commands.json")):
@@ -1733,7 +1803,9 @@ def main() -> int:
 
     c = sub.add_parser("check", help="measure diagnostics through a real clangd session")
     c.add_argument("-n", "--number", type=int, default=120, help="sources to sample")
-    c.add_argument("-j", "--jobs", type=int, default=4)
+    c.add_argument("-j", "--jobs", type=int, default=0,
+                   help="parallel clangd sessions; 0 (default) picks a number "
+                        "from free memory and adjusts if it runs short")
     c.add_argument("-s", "--seed", type=int, default=1)
     c.add_argument("-v", "--verbose", action="store_true")
     c.add_argument("--all", action="store_true",
@@ -1746,7 +1818,8 @@ def main() -> int:
 
     w = sub.add_parser("warm", help="build clangd's background index now")
     w.add_argument("-j", "--jobs", type=int, default=0,
-                   help="clangd indexing threads (default: half the CPUs)")
+                   help="clangd indexing threads; 0 (default) picks a number "
+                        "from free memory")
     w.add_argument("--timeout", type=float, default=7200.0,
                    help="give up after this many seconds (default 2h)")
     w.set_defaults(func=cmd_warm)
