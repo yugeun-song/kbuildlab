@@ -424,6 +424,83 @@ def write_sections_overlay(ksrc: str, out_path: str, lds) -> tuple[int, int]:
     return total, documented
 
 
+# ---------------------------------------------------------------------------
+# compiler_types.h: attributes this clang cannot parse
+# ---------------------------------------------------------------------------
+
+_COUNTED_BY_DEFINE = re.compile(
+    r"^(#\s*define\s+__counted_by(?:_ptr|_le|_be)?\s*\(\s*member\s*\)\s+)"
+    r"__attribute__\s*\(\s*\(\s*__counted_by__\s*\(\s*member\s*\)\s*\)\s*\)\s*$")
+
+
+def clang_handles_forward_counted_by(clang: str = "clang") -> bool:
+    """Does this clang accept counted_by naming a member declared later?
+
+    GCC resolves the argument against the completed struct, so the kernel
+    writes `char *p __counted_by_ptr(size); int used, size;` and means it.
+    clang resolves it where it stands and reports an undeclared identifier,
+    which turns one struct definition into a cascade of errors in every file
+    that includes it.  Asked rather than assumed, because this is exactly the
+    kind of gap a later clang closes.
+    """
+    import subprocess, tempfile
+    fd, src = tempfile.mkstemp(suffix=".c", prefix="counted_by_probe_")
+    with os.fdopen(fd, "w") as f:
+        f.write("struct s { char *p __attribute__((counted_by(n))); int n; };\n")
+    try:
+        r = subprocess.run([clang, "-fsyntax-only", src],
+                           capture_output=True, text=True)
+        return r.returncode == 0
+    except OSError:
+        return True
+    finally:
+        try:
+            os.unlink(src)
+        except OSError:
+            pass
+
+
+def write_compiler_types_overlay(ksrc: str, out_path: str) -> int:
+    """Copy linux/compiler_types.h with the counted_by attributes defined away.
+
+    This overlay changes meaning, unlike the other two, so it is worth being
+    plain about what it costs: nothing this build cares about.  The tree is
+    compiled by GCC, which understands the attribute; the copy exists only for
+    the clang that reads the tree, and all the attribute does for a reader is
+    let clang bounds-check accesses it cannot bounds-check anyway once the
+    struct has failed to parse.  The kernel already spells the fallback
+    itself -- `#define __counted_by(member)` with an empty body, for compilers
+    without the attribute -- so this is that branch, taken deliberately.
+
+    Done here rather than with -D because the header defines these macros
+    itself: a command-line definition is simply overwritten a few lines later.
+
+    Returns the number of definitions neutralised.
+    """
+    src = os.path.join(ksrc, "include", "linux", "compiler_types.h")
+    if not os.path.isfile(src):
+        return 0
+    changed = 0
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(src, encoding="utf-8", errors="replace") as f, \
+            open(out_path, "w", encoding="utf-8") as w:
+        w.write("/*\n * Overlay of the tree's linux/compiler_types.h.\n"
+                " *\n * Identical except that the counted_by attributes are defined empty:\n"
+                " * this clang cannot resolve one that names a member declared later in\n"
+                " * the same struct, which GCC -- the compiler that builds this tree --\n"
+                " * does.  Written by setup via kbuildinfo.py.\n */\n")
+        for line in f:
+            m = _COUNTED_BY_DEFINE.match(line.rstrip("\n"))
+            if m:
+                changed += 1
+                w.write(f"{m.group(1).rstrip()}   /* emptied: see overlay header */\n")
+                continue
+            w.write(line)
+    if not changed:
+        os.unlink(out_path)
+    return changed
+
+
 def verify_comments(path: str) -> list[str]:
     """An inserted comment that closes early turns the rest of the file into
     code.  Check the property directly rather than trusting the sanitiser:
@@ -470,6 +547,10 @@ def build_overlay(ksrc: str, overlay_dir: str, arch: str, verbose: bool = False)
         ksrc, os.path.join(overlay_dir, "generated", "autoconf.h"), kconfig, makefiles)
     se_total, se_doc = write_sections_overlay(
         ksrc, os.path.join(overlay_dir, "asm-generic", "sections.h"), lds)
+    counted = 0
+    if not clang_handles_forward_counted_by():
+        counted = write_compiler_types_overlay(
+            ksrc, os.path.join(overlay_dir, "linux", "compiler_types.h"))
     problems: list[str] = []
     for rel in ("generated/autoconf.h", "asm-generic/sections.h"):
         p = os.path.join(overlay_dir, rel)
@@ -485,8 +566,10 @@ def build_overlay(ksrc: str, overlay_dir: str, arch: str, verbose: bool = False)
               f"Makefiles: {len(makefiles)} config-gated build rules, "
               f"linker script: {len(lds)} symbols")
         print(f"    overlay: {ac_doc}/{ac_total} CONFIG defines documented, "
-              f"{se_doc}/{se_total} section declarations documented")
+              f"{se_doc}/{se_total} section declarations documented"
+              + (f", {counted} counted_by attribute(s) defined away" if counted else ""))
     return {"kconfig": len(kconfig), "makefile_rules": len(makefiles),
+            "counted_by_neutralised": counted,
             "lds_symbols": len(lds), "config_defines": ac_total,
             "config_documented": ac_doc, "section_decls": se_total,
             "section_documented": se_doc}

@@ -257,19 +257,44 @@ def apply_overlay(tree: str) -> int:
     with open(cdb) as f:
         entries = json.load(f)
     flag = f"-I{ov}"
+
+    # The build names its forced includes by path, not by search: -include
+    # ./include/linux/compiler_types.h reaches the tree's copy whatever -I says,
+    # and the guard then keeps the overlay's copy from ever being read.  So the
+    # path itself is rewritten for the headers the overlay actually replaces.
+    redirect = {}
+    for rel in ("linux/compiler_types.h",):
+        if os.path.isfile(os.path.join(ov, rel)):
+            redirect["./include/" + rel] = os.path.join(ov, rel)
+            redirect["include/" + rel] = os.path.join(ov, rel)
+
+    def fix(args: list[str]) -> bool:
+        did = False
+        for i, a in enumerate(args):
+            if a == "-include" and i + 1 < len(args) and args[i + 1] in redirect:
+                args[i + 1] = redirect[args[i + 1]]
+                did = True
+        return did
+
     touched = 0
     for e in entries:
         cmd = e.get("command")
         if cmd is not None:
-            if flag in cmd:
-                continue
             args = shlex.split(cmd)
-            args.insert(1, flag)
+            changed = fix(args)
+            if flag not in args:
+                args.insert(1, flag)
+                changed = True
+            if not changed:
+                continue
             e["command"] = shlex.join(args)
         else:
-            if flag in e["arguments"]:
+            changed = fix(e["arguments"])
+            if flag not in e["arguments"]:
+                e["arguments"].insert(1, flag)
+                changed = True
+            if not changed:
                 continue
-            e["arguments"].insert(1, flag)
         touched += 1
     if touched:
         with open(cdb, "w") as f:
