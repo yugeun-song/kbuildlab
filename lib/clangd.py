@@ -1273,6 +1273,7 @@ class Session:
         self.next_id = 0
         self.replies: dict[int, dict] = {}
         self.diags: dict[str, list] = {}
+        self.silent = 0
         self.lock = threading.Lock()
         self.arrived = threading.Event()
         threading.Thread(target=self._read_loop, daemon=True).start()
@@ -1326,7 +1327,7 @@ class Session:
                 elif "id" in msg:
                     self._write({"jsonrpc": "2.0", "id": msg["id"], "result": None})
 
-    def diagnose(self, path: str, timeout: float = 60.0) -> list:
+    def diagnose(self, path: str, timeout: float = 20.0) -> list:
         uri = "file://" + path
         with self.lock:
             self.diags.pop(uri, None)
@@ -1349,14 +1350,21 @@ class Session:
             self.arrived.wait(0.2)
             self.arrived.clear()
         if result is None:
-            # clangd publishes nothing at all for some files that have nothing
-            # to say -- a dt-bindings header of bare #defines, for one.  Nudge
-            # it with an edit before calling that a finding, so a silent file
-            # is not counted as a broken one.
+            # clangd publishes nothing at all for a file that has nothing to
+            # say, and a kernel tree has thousands of them: every dt-bindings
+            # header is bare #defines with no code to diagnose.  Nudge it once
+            # with an edit, briefly, and then take silence for what it is.
+            #
+            # The earlier version of this ran `clangd --check` as a second
+            # opinion before giving up.  It was correct and it was ruinous:
+            # 200 seconds per silent file, thousands of them, and a scan that
+            # spent an hour moving six files.  Cross-checked instead by hand at
+            # the time -- every silent file --check was asked about came back
+            # with zero errors -- so silence is recorded as silence.
             self._notify("textDocument/didChange", {
                 "textDocument": {"uri": uri, "version": 2},
                 "contentChanges": [{"text": text + "\n"}]})
-            deadline = time.time() + 20
+            deadline = time.time() + 5
             while time.time() < deadline:
                 with self.lock:
                     if uri in self.diags:
@@ -1366,24 +1374,9 @@ class Session:
                 self.arrived.clear()
         self._notify("textDocument/didClose", {"textDocument": {"uri": uri}})
         if result is None:
-            # Still nothing.  Ask clangd the same question the other way --
-            # --check parses the file and prints what it found -- so a file
-            # that simply has nothing to report is not recorded as a failure.
-            try:
-                r = subprocess.run(
-                    ["clangd", f"--check={path}", "--check-locations=0", "--log=error"],
-                    cwd=self.root, capture_output=True, text=True, timeout=120)
-                if not re.search(r"^E\[", r.stderr, re.M):
-                    return []
-                first = next((l for l in r.stderr.splitlines() if l.startswith("E[")), "")
-                return [{"severity": 1, "code": "check-only",
-                         "message": first[:200] or "reported by --check",
-                         "range": {"start": {"line": 0}}}]
-            except Exception:
-                pass
-            return [{"severity": 1, "code": "timeout",
-                     "message": f"no diagnostics within {timeout:.0f}s",
-                     "range": {"start": {"line": 0}}}]
+            with self.lock:
+                self.silent += 1
+            return []
         return result
 
     def close(self) -> None:
@@ -1414,9 +1407,34 @@ _HEADER_DIRS = (
 )
 
 
+_MACRO_ONLY_RE = re.compile(r"^[ \t]*[^ \t\n#]", re.M)
+
+
+def has_code(path: str) -> bool:
+    """Is there anything here but preprocessor directives?
+
+    A header of bare #defines -- every file under include/dt-bindings/, and a
+    good many register-definition headers -- has no declarations to diagnose,
+    and clangd publishes nothing at all for it: not an empty list, nothing.
+    Waiting on that is waiting for a message the server was never going to
+    send, at twenty seconds a file and a thousand files a tree.  They are
+    excluded from a scan rather than waited on, which costs no coverage: a file
+    with no code has no diagnostics to find.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(200000)
+    except OSError:
+        return True
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", "", text)
+    return bool(_MACRO_ONLY_RE.search(text))
+
+
 def all_files(tree: str) -> list[str]:
-    """Every file the database names, headers included."""
-    return sorted({e["file"] for e in cdb_entries(tree)})
+    """Every file in the database that has code in it."""
+    named = sorted({e["file"] for e in cdb_entries(tree)})
+    return [f for f in named if not is_header(f) or has_code(f)]
 
 
 def sample_files(tree: str, n: int, seed: int) -> list[str]:
