@@ -1230,7 +1230,7 @@ SESSION_MB = 1200          # measured RSS of a clangd chewing through kernel cod
 # work the operator actually sat down to do.  Measured the hard way: at 3 GiB
 # reserved, a scan and an editor indexing the same trees drove a 16 GiB machine
 # to the point where the kernel started killing things.
-RESERVE_MB = 4096
+RESERVE_MB = 3584
 
 
 def available_mb() -> int | None:
@@ -1463,7 +1463,7 @@ def run_check(tree: str, files: list[str], jobs: int, journal=None,
     results: list[tuple[str, list]] = []
     rlock = threading.Lock()
     done = [0]
-    paused = [False]
+    live = [jobs]
     RECYCLE = 250
 
     def worker():
@@ -1475,27 +1475,33 @@ def run_check(tree: str, files: list[str], jobs: int, journal=None,
                     f = work.get_nowait()
                 except queue.Empty:
                     return
-                # Under pressure, drop this session and wait rather than push
-                # the machine into swap.  Closing it returns its arena
-                # immediately, which is the whole point: the scan yields, the
-                # editor and everything else keep their memory.
-                waited = 0.0
-                while memory_is_tight() and waited < 300:
-                    if session is not None:
-                        session.close()
-                        session = None
-                        with rlock:
-                            if not paused[0]:
-                                paused[0] = True
-                                print("      memory is tight -- pausing a scan "
-                                      "session until it frees up", flush=True)
-                    time.sleep(5)
-                    waited += 5
-                if session is None:
+                # Under pressure, retire this worker instead of pausing it.
+                #
+                # Pausing was the first attempt and it oscillates: the sessions
+                # are themselves most of the pressure, so they all find memory
+                # tight, all stop, all see it free, and all start again --
+                # paying for a fresh preamble every cycle and making no
+                # progress.  Retiring converges instead.  One worker leaves,
+                # its arena goes back, and the rest carry on; if it is still
+                # tight the next one leaves too, until what is left fits.  The
+                # queue is shared, so nothing is dropped -- the same files get
+                # scanned by fewer sessions.
+                if memory_is_tight():
                     with rlock:
-                        paused[0] = False
-                    session = Session(root)
-                    served = 0
+                        if live[0] > 1:
+                            live[0] -= 1
+                            n_left = live[0]
+                            work.put(f)          # hand the file back
+                            retire = True
+                        else:
+                            retire = False
+                    if retire:
+                        session.close()
+                        print(f"      memory is tight -- one scan session "
+                              f"retired, {n_left} left", flush=True)
+                        return
+                    # The last one stays: something has to make progress, and
+                    # a single session is a smaller footprint than the editor.
                 d = session.diagnose(f)
                 with rlock:
                     done[0] += 1
