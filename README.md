@@ -38,9 +38,70 @@ kbuildlab attach arm64-v6.12            # gdb, in another terminal
 `kbuildlab update <tree>` is the one for a tree you already have: it fetches,
 fast-forwards if the tracked version is a moving branch rather than a pinned
 tag, rebuilds with **the .config you already had**, and refreshes ctags,
-cscope and -- when the build image ships GNU GLOBAL -- gtags. It never
+cscope, gtags where the image ships GNU GLOBAL, and the clangd index. It never
 re-applies the preset, because your local answers to new Kconfig symbols are
 yours.
+
+### The clangd index
+
+`kbuildlab tags` builds a fourth index, for clangd, alongside the other three.
+It answers the same question they do — where is this symbol — so a tree
+reindexed for three of them and not the fourth is a tree whose editor is
+quietly describing the previous build.
+
+It is the odd one out in two ways. It runs on the host, not in the build image:
+its input is the `.cmd` files kbuild has already written, and the clangd that
+will read the result is the host's. And it writes nothing into the tree — a
+`compile_commands.json` in the source root would show up in `git status` and
+`make mrproper` would take it away again, so the database lives in
+`$XDG_CACHE_HOME/kbuildlab/clangd/<tree>/` and clangd is pointed there from
+`~/.config/clangd/config.yaml`. clangd's background index follows the database,
+so that lands beside it rather than in your source.
+
+A kernel built by GCC is not a project clangd can read as-is, and the config it
+gets is what closes each gap — every one of them measured on the tree in front
+of it rather than taken from a list:
+
+- **GCC-only flags.** `-fconserve-stack`, `-mabi=lp64` on arm64,
+  `-mindirect-branch=…`: clang answers each with a driver error, and one it
+  cannot parse at all kills the whole file. Every unique flag in the database
+  is probed against the real clang for that tree's target, and only what clang
+  rejects is removed — which is what keeps it right across trees, since
+  `-mabi=lp64` is wrong on arm64 and correct on riscv64.
+- **Sub-builds for another machine.** x86_64 compiles its boot stub and
+  realmode trampoline as i386; riscv64 builds a 32-bit compat vDSO. Those get a
+  fragment naming their real target, so the code parses as what it is.
+- **Headers opened on their own.** A kernel header is not self-contained —
+  `asm/atomic_lse.h` has no idea what `atomic_t` is, because in a real build
+  `asm/atomic.h` got there first. Each header gets a database entry
+  reproducing the includes that precede it in a source that uses it.
+- **Source the tree never compiles.** A tree configured for arm64 does not
+  build `arch/powerpc`, and no command line makes powerpc source parse through
+  an aarch64 one. Those paths keep navigation and lose diagnostics.
+- **Everything named "unused"** is off, compiler and clang-tidy alike.
+
+Two things the build system knows and clangd does not are injected as comments
+on copies of the tree's own headers, put ahead of it on the include path.
+Go-to-definition on a `CONFIG_` symbol lands on its `#define` with Kconfig's
+prompt, type, dependencies, help text and the Makefile rule that makes it build
+something; on `_text` or `__init_begin`, on the declaration with the
+`vmlinux.lds.S` line that places it. (Hover does not show these — clangd's
+hover card leaves the comment out. Jump, don't hover.)
+
+```
+kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd
+                      [--clangd-only]   just the clangd index
+KBL_CLANGD=0 kbuildlab tags [tree]      same as --no-clangd
+```
+
+To see what an editor would actually report, `lib/clangd.py` can measure it —
+a real clangd session, one `didOpen` per file, counting published diagnostics:
+
+```sh
+python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check -n 80
+python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 \
+        --journal /tmp/scan --resume     # every file, resumable
+```
 
 Every command takes `-h`/`--help`; `run` and `attach` carry the options worth
 knowing.
@@ -430,5 +491,8 @@ the target — a cross gdb, or a host gdb built `--enable-targets=all`.
 Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which is what
 makes symbols resolve before the MMU is on. `kbuildlab attach` finds it if it is
 installed and says so if it is not.
+
+Optional: `clangd` and `python3` on the host, for the clangd index. Absent,
+`kbuildlab tags` says so and builds the other three.
 
 Nothing is installed for you, and no system setting is changed.
