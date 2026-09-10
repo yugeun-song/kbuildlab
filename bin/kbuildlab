@@ -31,7 +31,10 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                                             (reports what olddefconfig changed and
                                              any preset line the newer source lost;
                                              repairs neither)
-  kbuildlab tags   [TREE]                   refresh ctags and cscope
+  kbuildlab tags   [TREE] [--no-clangd]     refresh ctags, cscope, gtags and the
+                          [--clangd-only]     clangd index (the last one out of
+                                              tree, in the host's clangd config;
+                                              KBL_CLANGD=0 also turns it off)
   kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
                                             (attaches the tree's INITRD rootfs;
                                              --run to boot now, --no-initrd for none,
@@ -361,24 +364,73 @@ cmd_build() {
 }
 
 # ---------------------------------------------------------------- tags
+# The fourth index is clangd's, and it is the odd one out in three ways worth
+# stating, because each is why it is done here rather than somewhere else.
+#
+# It needs no container.  ctags, cscope and gtags run inside the build image
+# because they are the kernel's own make targets; clangd's input is the .cmd
+# files kbuild has already written, and the clangd that will read the result is
+# the one on the host, so the host is where it has to be computed.
+#
+# It writes nothing into the tree.  A compilation database in the source root
+# would show up in `git status`, and `make mrproper` would take it away again;
+# it lives in $XDG_CACHE_HOME/kbuildlab/clangd/<tree> instead, with clangd
+# pointed there from the user's config by path.
+#
+# And it belongs on this command rather than on `build`.  ctags, cscope, gtags
+# and clangd answer the same question -- where is this symbol -- and a tree
+# reindexed for three of them and not the fourth is a tree whose editor is
+# quietly describing the previous build.  `update` calls this, so a synced and
+# rebuilt tree gets all four without being asked.
+_clangd_index() {
+    local tree="$1"
+    [[ "${KBL_CLANGD:-1}" == "0" ]] && { say "clangd       skipped (KBL_CLANGD=0)"; return 0; }
+    command -v clangd  >/dev/null 2>&1 || { warn "clangd skipped: no clangd on the host"; return 0; }
+    command -v python3 >/dev/null 2>&1 || { warn "clangd skipped: no python3 on the host"; return 0; }
+    # Every tree in the workspace is named as a peer so a tree too old to ship
+    # scripts/clang-tools/gen_compile_commands.py can borrow a newer tree's
+    # copy.  The .cmd format that script reads has not changed since it was
+    # added in v5.4, and copying it into the old tree would be writing into the
+    # source -- which is the one thing this must not do.
+    local ws d; local -a peers=()
+    ws="$(kbl_workspace)" || return 0
+    for d in "$ws"/*/; do kbl_is_tree "${d%/}" && peers+=(--peer "${d%/}"); done
+    say "indexing     clangd (compile_commands.json, out of tree)"
+    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" "${peers[@]}" gen --force \
+        || warn "clangd index failed (ctags/cscope/gtags are still current)"
+}
+
 cmd_tags() {
-    local tree; tree="$(kbl_tree "${1:-}")" || exit 1
+    local clangd=1
+    local -a rest=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-clangd) clangd=0; shift ;;
+            --clangd-only) clangd=2; shift ;;
+            *) rest+=("$1"); shift ;;
+        esac
+    done
+    local tree; tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
     [[ -d "$src" ]] || die "no kernel source in $tree"
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
-    # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
-    # optional -- not every image ships `global`, so absent is a warn, not fatal.
-    say "indexing     ctags + cscope for $karch"
-    _in_container "$src" make ARCH="$karch" tags cscope \
-        || die "tags/cscope failed"
-    if _in_container "$src" sh -c 'command -v gtags >/dev/null 2>&1'; then
-        say "indexing     gtags (GNU GLOBAL) for $karch"
-        _in_container "$src" make ARCH="$karch" gtags \
-            || warn "gtags failed (ctags/cscope are still current)"
-    else
-        warn "gtags skipped: no 'global' in the build image (rebuild image to add it)"
+    if [[ $clangd -ne 2 ]]; then
+        local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+        # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
+        # optional -- not every image ships `global`, so absent is a warn, not fatal.
+        say "indexing     ctags + cscope for $karch"
+        _in_container "$src" make ARCH="$karch" tags cscope \
+            || die "tags/cscope failed"
+        if _in_container "$src" sh -c 'command -v gtags >/dev/null 2>&1'; then
+            say "indexing     gtags (GNU GLOBAL) for $karch"
+            _in_container "$src" make ARCH="$karch" gtags \
+                || warn "gtags failed (ctags/cscope are still current)"
+        else
+            warn "gtags skipped: no 'global' in the build image (rebuild image to add it)"
+        fi
+        _in_container "$src" sh -c 'ls -la tags cscope.out GTAGS 2>/dev/null || true'
     fi
-    _in_container "$src" sh -c 'ls -la tags cscope.out GTAGS 2>/dev/null || true'
+    [[ $clangd -ne 0 ]] && _clangd_index "$tree"
+    return 0
 }
 
 # ---------------------------------------------------------------- update
