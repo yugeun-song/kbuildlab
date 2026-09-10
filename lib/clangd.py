@@ -771,8 +771,20 @@ CLANG_ONLY_NOISE = [
     # the kernel writes as ~0UL masks assigned into a u32.
     "-Wno-duplicate-decl-specifier",
     "-Wno-constant-conversion",
-    # clang 18+.  Fires on out-parameters passed as const pointers, which the
-    # kernel does constantly; the callee fills them in.
+    # Uninitialized-value analysis rests on the compiler seeing every write to
+    # a variable.  In a kernel that premise does not hold.  The write often
+    # happens somewhere the translation unit cannot contain and the compiler
+    # was never going to read: a bootloader handing over a register block,
+    # firmware filling a table before the kernel is entered, an assembly stub,
+    # a linker script, another CPU.  Some of it is not C at all.
+    #
+    # What the analysis produces on this kind of code is a report about a write
+    # it could not see, which is not the same claim as a write that does not
+    # happen -- and telling those apart needs knowledge of the boot path that
+    # no single-translation-unit analysis has.  The family is off.
+    "-Wno-uninitialized",
+    "-Wno-sometimes-uninitialized",
+    "-Wno-conditional-uninitialized",
     "-Wno-uninitialized-const-pointer",
     # sprintf(str + strlen(str), ...) is how the kernel's own build tools
     # assemble a string; clang reads the pointer arithmetic as an attempt to
@@ -795,6 +807,25 @@ CLANG_ONLY_NOISE = [
 # error -- one clang produces about its own header, in a tree GCC compiled
 # cleanly.  Files that reach for these headers get the narrow suppressions that
 # difference needs.
+# What a header reports about being parsed twice rather than about anything
+# written in it.  clangd ignores a header's own include guard when that header
+# is the file being edited -- otherwise opening one would show an empty buffer
+# -- so a header the build force-includes gets parsed again as the main file
+# and every declaration in it is a redefinition of itself.  Named separately
+# from the blanket suppression so --header-diagnostics is worth using.
+SELF_REPARSE_DIAGNOSTICS = [
+    "redefinition",
+    "redefinition_different_typedef",
+    "err_redefinition_different_kind",
+    "typedef_redefinition",
+    "duplicate_member",
+    "static_non_static",
+    "pp_including_mainfile_in_preamble",
+    "fatal_too_many_errors",
+    "macro-redefined",
+    "builtin-macro-redefined",
+]
+
 INTRINSIC_HEADERS = ("arm_neon.h", "arm_sve.h", "arm_acle.h", "arm_bf16.h",
                      "immintrin.h", "x86intrin.h", "emmintrin.h", "xmmintrin.h",
                      "riscv_vector.h", "riscv_crypto.h", "altivec.h")
@@ -1232,8 +1263,21 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool,
         "    - -Wno-macro-redefined",
         "    - -Wno-builtin-macro-redefined",
     ]
+    # Measured both ways.  With header diagnostics on, a 640-file sample
+    # reports 40: headers no source in this tree includes (a driver switched
+    # off in .config), and fragments meant to be pasted in after macros are set
+    # -- include/asm-generic/audit_*.h, include/trace/*.h.  Neither can be given
+    # the context it needs; the first because nothing recorded one, the second
+    # because no ordering makes it a translation unit.  Giving every header a
+    # linux/kernel.h floor was tried and made it worse, 40 to 72.
+    #
+    # So silent by default.  --header-diagnostics turns them on for someone
+    # editing a header, and the self-reparse artefacts stay suppressed either
+    # way, since those are never about the code.
+    hdr += ["    - -ferror-limit=0", "Diagnostics:", "  Suppress:"]
+    hdr += [f"    - {c}" for c in SELF_REPARSE_DIAGNOSTICS]
     if not header_diagnostics:
-        hdr += ["    - -ferror-limit=0", "Diagnostics:", "  Suppress: '*'"]
+        hdr += ["    - '*'"]
     frags.append("\n".join(hdr) + "\n")
     return frags
 
