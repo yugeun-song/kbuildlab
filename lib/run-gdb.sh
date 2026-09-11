@@ -439,6 +439,15 @@ ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
 # returns). x86 lands at the decompressor entry; add `kearly kaslr auto` there.
 _bootbreak=0
 [[ $BOOTBREAK -eq 1 && -n "$tool" ]] && { ARGS+=(-ex "kearly bootbreak"); _bootbreak=1; }
+# The firmware symbols above are loaded at 0 because that is where u-boot is LINKED;
+# it relocates itself to the top of DRAM, so they never describe the running firmware
+# anyway.  What they do describe, once the run-to-_text has landed inside the kernel,
+# is every small integer the kernel happens to hold: a register reading 0 renders as
+# `_start`, 0x711 as `efi_var_collect_mem+5`, and a context panel of kernel registers
+# comes back labelled with bootloader names.  So they are dropped for a KERNEL stop
+# and kept for a FIRMWARE one (--stop firmware clears BOOTBREAK above, which is the
+# only mode where the pre-kernel stages are what is being debugged).
+[[ $_bootbreak -eq 1 && -n "$FWSYM" ]] && ARGS+=(-ex "remove-symbol-file -a 0")
 # --stop start_kernel: from _text, run on to start_kernel (gdbtools applies the
 # KASLR slide as the high-VA symbol is reached).
 [[ -n "$STOP_AT" ]] && ARGS+=(-ex "break $STOP_AT" -ex "continue")
