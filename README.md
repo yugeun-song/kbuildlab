@@ -257,6 +257,13 @@ drgn identifies the guest by itself only over the unix socket. `--tcp` reaches
 the TCP port instead, from elsewhere on the network, but then the note has to be
 supplied with `-- --vmcoreinfo PATH`.
 
+riscv64 is the exception, and it is drgn's, not this tool's. Measured on drgn
+0.2.0: the guest is identified, its build ID matches, and physical reads return
+real data, but every kernel virtual address raises `FaultError: could not find
+memory segment` -- identically with the tree's Sv39 pin and with Sv48/Sv57
+allowed, so it is not a paging-mode question. `drgn` says so before handing over.
+x86_64 and arm64 read symbols normally.
+
 ### The run state
 
 `run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default

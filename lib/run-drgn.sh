@@ -173,6 +173,19 @@ if [[ -r "$_cfg" ]]; then
     fi
 fi
 
+# 3. drgn reads guest PHYSICAL memory on every architecture it knows, but the
+#    kernel virtual translation it needs on top of that is per-architecture and
+#    riscv64 has none.  Measured on drgn 0.2.0: `prog.read(0x80200000, 8,
+#    physical=True)` returns the Image header while any kernel VA raises
+#    FaultError "could not find memory segment", identically under Sv39 and
+#    under Sv48/Sv57.  Say so here rather than let that error be the first news.
+if [[ "$(kbl_tree_arch "$tree")" == riscv64 ]]; then
+    warn "drgn: $(drgn --version 2>/dev/null | head -1) translates no riscv64 kernel virtual
+       address, so reads through symbols raise FaultError even though the guest is
+       identified and physical reads work.  Use prog.read(PA, N, physical=True),
+       or 'kbuildlab attach' for this tree."
+fi
+
 declare -a ARGS=(--qemu "$addr")
 [[ $SYMBOLS -eq 1 ]] && ARGS+=(-s "$vmlinux")
 ARGS+=("${PASS[@]+"${PASS[@]}"}")
