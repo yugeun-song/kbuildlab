@@ -253,6 +253,20 @@ Two halves have to line up and `drgn` names whichever is missing:
   `CONFIG_VMCORE_INFO` (`CONFIG_CRASH_CORE` before 6.10) -- both in the preset,
   and both needing a 4.17 kernel or newer.
 
+**When to attach matters more than it looks.** The note is written by
+`qemu_fw_cfg`'s device initcall, inside `do_initcalls()`, which is after
+`start_kernel` has returned -- so a guest frozen at reset or stopped at
+`start_kernel` has no note, and drgn cannot tell it is a Linux kernel. drgn also
+builds its `Program` when it connects, so a session opened too early never
+recovers: booting the guest further does not re-identify it. `drgn` asks the
+question directly before handing over -- a symbol-less identification probe,
+measured at 0.1s -- and says which of the two it is rather than leaving you with
+`ObjectNotFoundError: could not find 'init_task'`.
+
+QEMU serves one client per monitor, so a second `kbuildlab drgn` waits in the
+listen backlog until the first session quits. That is a hang with no message
+unless you know it.
+
 drgn identifies the guest by itself only over the unix socket. `--tcp` reaches
 the TCP port instead, from elsewhere on the network, but then the note has to be
 supplied with `-- --vmcoreinfo PATH`.

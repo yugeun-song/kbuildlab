@@ -127,59 +127,76 @@ if [[ $SYMBOLS -eq 1 ]]; then
        build it first: kbuildlab build $(basename "$tree")"
 fi
 
-# Two things make drgn fail with a message about drgn rather than about the
-# guest.  Both are readable here without touching anything.
+# Whether this guest is readable is asked, not inferred.  A drgn that only
+# identifies -- no symbols -- answers in 0.1s, and it is the same question the
+# session is about to ask.  QMP's runstate cannot answer it: measured on
+# upstream-arm64, a guest held at start_kernel and one held at a late breakpoint
+# both read `debug`, and only the second is readable.
+_ident=""
+if [[ $TCP -eq 0 && -S "$qmpsock" ]]; then
+    _ident="$(timeout 30 drgn --qemu "$qmpsock" --no-default-symbols \
+                -e 'import drgn; print(1 if prog.flags & drgn.ProgramFlags.IS_LINUX_KERNEL else 0)' \
+              2>/dev/null | tail -1)"
+fi
 
-# 1. A guest still at its reset vector has no kernel yet.  Probed on the TCP
-#    monitor so the unix one stays free: each -qmp chardev serves one client.
-if [[ -n "$qmpport" ]] && command -v python3 >/dev/null 2>&1; then
-    _status="$(python3 - "$qmpport" <<'PY' 2>/dev/null
+_qmp_status() {
+    [[ -n "$qmpport" ]] && command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$qmpport" <<'QMPPY' 2>/dev/null
 import json, socket, sys
 try:
     s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2)
-    s.recv(65536)
-    s.sendall(b'{"execute":"qmp_capabilities"}\n'); s.recv(65536)
+    s.recv(65536); s.sendall(b'{"execute":"qmp_capabilities"}\n'); s.recv(65536)
     s.sendall(b'{"execute":"query-status"}\n')
     print(json.loads(s.recv(65536).splitlines()[0])["return"]["status"])
-    s.close()
 except Exception:
     pass
-PY
-)"
-    case "$_status" in
-        prelaunch) warn "drgn: the guest on :$PORT has never been started -- it is still frozen at
-       its reset vector, so there is no kernel in memory yet.  Continue it first
-       (kbuildlab attach $(basename "$tree") --port $PORT, then 'continue')." ;;
-        paused)    say "guest        paused (a debugger stopped it); drgn reads it either way" ;;
-        running)   say "guest        running; QMP reads do not stop it" ;;
-    esac
-fi
+QMPPY
+}
 
-# 2. The note `-device vmcoreinfo` advertises is written by the guest, not by
-#    QEMU, so its absence is a kernel config and not a drgn defect.
-_cfg="$src/.config"
-if [[ -r "$_cfg" ]]; then
-    _missing=""
-    grep -qx 'CONFIG_FW_CFG_SYSFS=[ym]' "$_cfg" || _missing="$_missing CONFIG_FW_CFG_SYSFS"
-    grep -qxE 'CONFIG_(VMCORE_INFO|CRASH_CORE|KEXEC_CORE)=y' "$_cfg" \
-        || _missing="$_missing CONFIG_VMCORE_INFO (CONFIG_CRASH_CORE before 6.10)"
-    if [[ -n "$_missing" ]]; then
-        warn "drgn: $(basename "$tree") is built without$_missing, so the guest never
-       writes the vmcoreinfo note that -device vmcoreinfo advertises and drgn
-       cannot tell it is a Linux kernel.  Either build it in --
-       'kbuildlab config $(basename "$tree") --preset && kbuildlab build $(basename "$tree")',
-       which the preset now asks for -- or hand drgn a note yourself with
-       '-- --vmcoreinfo PATH'."
+if [[ "$_ident" == 0 ]]; then
+    # The note is written from qemu_fw_cfg's device initcall, so it does not
+    # exist while the kernel is still inside start_kernel -- which is where an
+    # early-boot session usually is.  Say how far to go, not just "continue".
+    if [[ "$(_qmp_status)" == prelaunch ]]; then
+        warn "drgn: the guest on :$PORT has never been started -- it is frozen at its
+       reset vector, so there is no kernel in memory.  Every symbol lookup in this
+       session raises ObjectNotFoundError, and it will keep doing so: drgn builds
+       its Program when it connects, so continuing the guest afterwards changes
+       nothing here.  Quit this session and run it again once the guest has booted."
+    else
+        warn "drgn: the guest on :$PORT has not published its vmcoreinfo note, so drgn
+       cannot tell it is a Linux kernel and every symbol lookup raises
+       ObjectNotFoundError.
+
+       That note is written by qemu_fw_cfg's device initcall, which runs inside
+       do_initcalls() -- after start_kernel has returned.  A guest stopped at
+       start_kernel is too early: let it reach userspace first.
+
+       This session will not recover on its own.  drgn builds its Program when it
+       connects, so booting the guest further does not re-identify it: quit and
+       run this again."
     fi
+    _cfg="$src/.config"
+    if [[ -r "$_cfg" ]]; then
+        _missing=""
+        grep -qx 'CONFIG_FW_CFG_SYSFS=[ym]' "$_cfg" || _missing="$_missing CONFIG_FW_CFG_SYSFS"
+        grep -qxE 'CONFIG_(VMCORE_INFO|CRASH_CORE|KEXEC_CORE)=y' "$_cfg" \
+            || _missing="$_missing CONFIG_VMCORE_INFO"
+        [[ -n "$_missing" ]] && warn "       This tree is also built without$_missing, so it would not
+       write the note at any point.  'kbuildlab config $(basename "$tree") --preset',
+       then rebuild."
+    fi
+elif [[ "$_ident" == 1 ]]; then
+    say "kernel       identified from vmcoreinfo"
 fi
 
-# 3. drgn reads guest PHYSICAL memory on every architecture it knows, but the
-#    kernel virtual translation it needs on top of that is per-architecture and
-#    riscv64 has none.  Measured on drgn 0.2.0: `prog.read(0x80200000, 8,
-#    physical=True)` returns the Image header while any kernel VA raises
-#    FaultError "could not find memory segment", identically under Sv39 and
-#    under Sv48/Sv57.  Say so here rather than let that error be the first news.
-if [[ "$(kbl_tree_arch "$tree")" == riscv64 ]]; then
+# drgn reads guest PHYSICAL memory on every architecture it knows; the kernel
+# virtual translation on top of it is per-architecture, and riscv64 has none in
+# drgn 0.2.0.  Measured: prog.read(0x80200000, 8, physical=True) returns the
+# Image header while any kernel VA raises FaultError "could not find memory
+# segment", identically under Sv39 and under Sv48/Sv57.  Only worth saying once
+# the guest has been identified; before that the message above is the reason.
+if [[ "$(kbl_tree_arch "$tree")" == riscv64 && "$_ident" != 0 ]]; then
     warn "drgn: $(drgn --version 2>/dev/null | head -1) translates no riscv64 kernel virtual
        address, so reads through symbols raise FaultError even though the guest is
        identified and physical reads work.  Use prog.read(PA, N, physical=True),
@@ -191,7 +208,9 @@ declare -a ARGS=(--qemu "$addr")
 ARGS+=("${PASS[@]+"${PASS[@]}"}")
 
 say "guest        $(basename "$tree") ($arch) on gdb :$PORT"
-say "qmp          $addr"
+# One client per -qmp chardev: a second session queues in the listen backlog and
+# looks like a hang.  Worth saying where the address is already on screen.
+say "qmp          $addr (one drgn at a time; a second waits for this one to quit)"
 [[ $SYMBOLS -eq 1 ]] && say "symbols      $vmlinux" || say "symbols      none (--no-symbols)"
 # No chdir, unlike `attach`: drgn resolves no path relatively, so a script path
 # on this command line means what it says.
