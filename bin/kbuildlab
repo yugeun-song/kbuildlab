@@ -41,6 +41,9 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                                             (attaches the tree's INITRD rootfs;
                                              --run to boot now, --no-initrd for none,
                                              --append to add kernel command-line words)
+  kbuildlab drgn   [TREE] [--qmp-port N]    attach drgn to a running guest over QMP
+                                            (does not pause it, and does not
+                                             displace an attached gdb)
   kbuildlab attach [TREE] [--port N]        attach gdb to a running guest, found by
                                             discovery rather than by the tree's
                                             GDB_PORT; asks which when several of a
@@ -548,6 +551,7 @@ cmd_update() {
 # ---------------------------------------------------------------- run / attach
 cmd_run()    { exec "${KBL_REPO}/lib/run-qemu.sh" "$@"; }
 cmd_attach() { exec "${KBL_REPO}/lib/run-gdb.sh" "$@"; }
+cmd_drgn()   { exec "${KBL_REPO}/lib/run-drgn.sh" "$@"; }
 
 # ---------------------------------------------------------------- containers
 # What the container runtime holds for kbuildlab on this host, and whether any of
@@ -835,6 +839,7 @@ case "$cmd" in
     update) cmd_update "$@" ;;
     run)    cmd_run "$@" ;;
     attach) cmd_attach "$@" ;;
+    drgn)   cmd_drgn "$@" ;;
     trees)  kbl_trees ;;
     containers) cmd_containers "$@" ;;
     doctor) cmd_doctor ;;

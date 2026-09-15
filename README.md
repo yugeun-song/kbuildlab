@@ -33,6 +33,7 @@ kbuildlab config arm64-v6.12 --preset   # defconfig + the debuggability preset
 kbuildlab build  arm64-v6.12
 kbuildlab run    arm64-v6.12            # boot, frozen at the reset vector
 kbuildlab attach arm64-v6.12            # gdb, in another terminal
+kbuildlab drgn   arm64-v6.12            # drgn, once the guest has booted
 ```
 
 `kbuildlab update <tree>` is the one for a tree you already have: it fetches,
@@ -227,15 +228,38 @@ removes the state file only while it still names this launcher.
 
 An explicit `--port` has nowhere to move to and is refused if the port is taken.
 
+### drgn
+
+`run` opens a QMP monitor beside the gdbstub -- a unix socket in the state
+directory and a TCP port the tree states as `QMP_PORT` -- and adds
+`-device vmcoreinfo`. `kbuildlab drgn` finds the guest exactly as `attach` does
+and hands drgn the channel and the tree's `vmlinux`.
+
+QMP is not the gdbstub, and the difference is the point. The gdbstub serves one
+client and pauses the guest the moment anything connects; QMP does neither, so
+drgn can read a running guest while gdb is attached to it, without stopping
+either.
+
+Two halves have to line up and `drgn` names whichever is missing:
+
+- QEMU's `-device vmcoreinfo` advertises where the guest's VMCOREINFO note is.
+- The guest writes that note, which needs `CONFIG_FW_CFG_SYSFS` and
+  `CONFIG_VMCORE_INFO` (`CONFIG_CRASH_CORE` before 6.10) -- both in the preset,
+  and both needing a 4.17 kernel or newer.
+
+drgn identifies the guest by itself only over the unix socket. `--tcp` reaches
+the TCP port instead, from elsewhere on the network, but then the note has to be
+supplied with `-- --vmcoreinfo PATH`.
+
 ### The run state
 
 `run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default
 `/dev/shm`), written whole and renamed into place so a reader never sees half a
-record. `attach` and the editor adapter both read it, so its `KBL_*` key format is
-a contract: keys are added, never renamed. It carries the boot mode, the load
+record. `attach`, `drgn` and the editor adapter all read it, so its `KBL_*` key format
+is a contract: keys are added, never renamed. It carries the boot mode, the load
 address a firmware chain landed the kernel at, the KASLR state, the ssh port, the
 effective kernel command line -- which a firmware chain passes itself and so does
-not appear on qemu's own command line -- and qemu's pid together with its
+not appear on qemu's own command line -- the QMP port and socket, and qemu's pid together with its
 `/proc` start time, which is what lets a file that outlived its guest be told
 apart from one describing the process actually on that port.
 
@@ -271,7 +295,7 @@ puts it back on every exit path, signal or not.
 `templates/` -- the machine description every command reads, never inferred from
 the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
 `UPSTREAM`) and the facts `run` and `attach` consume: `QEMU_BIN`, `MACHINE`,
-`CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, and where they apply `BOOT`,
+`CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply `BOOT`,
 `INITRD`, `PERSIST`, `CPU_PAGING` and the firmware paths (`UBOOT`,
 `OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`), plus two that steer the guest itself:
 `CMDLINE_EXTRA` (words appended to the kernel command line in every boot mode --

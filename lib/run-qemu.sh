@@ -8,6 +8,7 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 source "${KBL_REPO}/lib/common.sh"
 
 RUN=0; PORT=""; PORT_SET=0; MEM=1G; SMP=2; KVM=0; KASLR=0; NET=1
+QMP=1; QMPPORT=""; QMPPORT_SET=0   # QMP monitor: what drgn attaches through
 INITRD=""; INITRD_SET=0; NO_INITRD=0; SSHPORT=""; SSHPORT_SET=0
 BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
 declare -a APPEND_EXTRA=()   # extra kernel command-line words (--append, CMDLINE_EXTRA)
@@ -32,6 +33,10 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
   --ssh-port N       host port forwarded to guest :22 (default 2222, auto-avoids)
   --persist|--no-persist   attach the tree's writable disk (default: tree PERSIST)
   --port|-g N        gdb port (default: the tree's GDB_PORT)
+  --qmp-port N       QMP port (default: the tree's QMP_PORT); this is drgn's
+                     way in -- `kbuildlab drgn` uses it, and unlike the gdbstub
+                     a QMP client does not pause the guest or displace gdb
+  --no-qmp           no QMP monitor and no vmcoreinfo device
   --mem|-m SIZE  --smp N  --bios PATH
   TREE is a name, directory, or kernel source root; omitted, the current tree.
 USAGE
@@ -41,6 +46,9 @@ while [[ $# -gt 0 ]]; do
         -h|--help)   _usage; exit 0 ;;
         --run)       RUN=1; shift ;;
         --port|-g)   PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
+        --qmp-port)  QMPPORT="${2:?--qmp-port needs a number}"; QMPPORT_SET=1; shift 2 ;;
+        --qmp)       QMP=1; shift ;;
+        --no-qmp)    QMP=0; shift ;;
         --mem|-m)    MEM="${2:?}"; shift 2 ;;
         --smp)       SMP="${2:?}"; shift 2 ;;
         --kvm)       KVM=1; shift ;;        # opt in to KVM (x86 only, faster, less deterministic)
@@ -175,6 +183,7 @@ fi
 _state="$(kbl_statedir)/kbl-run-${PORT}.env"
 _loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
 shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""   # per-run scratch
+qmpsock=""                                                 # QMP unix socket, same
 
 # The terminal `-nographic` is about to put into raw mode, saved here so it can be
 # put back.  qemu restores it itself when it exits normally and cannot restore it
@@ -220,7 +229,7 @@ _cleanup() {
         [[ "$_owner" == "$$" ]] && rm -f "$_state"
     fi
     rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} \
-          ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"}
+          ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"}
     # Last, and only once the guest that owns the terminal is gone.  A no-op on
     # every path where qemu put it back itself, and the difference between a
     # usable shell and an apparently dead one where it did not.
@@ -574,6 +583,37 @@ cpu_paging="$(kbl_tree_get "$tree" CPU_PAGING)"
 # the editor adapter) already parse the tcp:HOST:PORT form.
 _gbind="${KBL_GDB_BIND:-$(kbl_tree_get "$tree" GDB_BIND)}"; _gbind="${_gbind:-127.0.0.1}"
 CMD+=(-gdb "tcp:${_gbind}:${PORT}")
+
+# drgn's way in (`kbuildlab drgn`).  Both transports: drgn identifies a Linux
+# guest by itself only over the unix socket, and the TCP port is what makes the
+# guest reachable the way the gdb port is.  Neither pauses the guest nor
+# displaces the one client the gdbstub serves.
+#
+# QMP_PORT is stated by the tree, never derived from GDB_PORT: a computed port is
+# a contract nobody wrote down, and it collides the first time two trees are
+# given adjacent gdb ports.
+if [[ $QMP -eq 1 ]]; then
+    [[ -n "$QMPPORT" ]] || QMPPORT="$(kbl_tree_get "$tree" QMP_PORT)"
+    [[ -n "$QMPPORT" ]] || die "no qmp port: state QMP_PORT in $tree/tree.conf, pass
+       --qmp-port, or run with --no-qmp (which also drops the vmcoreinfo device
+       and leaves drgn no way in)"
+    if _busy "$QMPPORT"; then
+        if [[ $QMPPORT_SET -eq 1 ]]; then
+            die "qmp port $QMPPORT is in use (you asked for it); pick another with --qmp-port"
+        fi
+        _qo="$QMPPORT"; QMPPORT=""
+        for _p in $(seq $((_qo + 1)) $((_qo + 128))); do _busy "$_p" || { QMPPORT="$_p"; break; } done
+        [[ -n "$QMPPORT" ]] || die "no free qmp port in $_qo..$((_qo + 128))"
+        say "qmp          $_qo busy -> using $QMPPORT"
+    fi
+    qmpsock="$(kbl_statedir)/kbl-qmp-${PORT}.sock"
+    rm -f "$qmpsock"
+    CMD+=(-qmp "unix:${qmpsock},server=on,wait=off"
+          -qmp "tcp:127.0.0.1:${QMPPORT},server=on,wait=off"
+          # advertises the guest's VMCOREINFO note; the guest half is
+          # CONFIG_FW_CFG_SYSFS + CONFIG_VMCORE_INFO
+          -device vmcoreinfo)
+fi
 [[ $RUN -eq 1 ]] || CMD+=(-S)
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
@@ -610,6 +650,7 @@ _write_state() {   # _write_state [QEMU_PID]
     )
     [[ -n "$_loadaddr" ]] && rec+=("KBL_LOADADDR=$_loadaddr")
     [[ $NET -eq 1 ]] && rec+=("KBL_SSH_PORT=$SSHPORT")
+    [[ $QMP -eq 1 ]] && rec+=("KBL_QMP_PORT=$QMPPORT" "KBL_QMP_SOCK=$qmpsock")
     [[ $persist_ok -eq 1 ]] && rec+=("KBL_PERSIST=$persist_disk")
     if [[ -n "$qpid" ]]; then
         # pid alone is not an identity: pids are reused.  The process start time
@@ -639,6 +680,8 @@ fi
 [[ $NET -eq 1 ]] && say "net          user/virtio (guest 10.0.2.15); ssh -p $SSHPORT root@localhost (pw: root)" \
                  || say "net          none (--no-net)"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
+[[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock (drgn reads the guest here; it does not pause it)" \
+                 || say "qmp          none (--no-qmp) -- drgn has no way in"
 [[ $KASLR -eq 1 ]] && say "kaslr        on (randomized; 'kearly kaslr auto' calibrates the slide)" \
                    || say "kaslr        off (nokaslr, deterministic)"
 # Copy-pasteable: the name is quoted (it may contain spaces) and the port is
@@ -649,6 +692,14 @@ _atree="$(printf '%q' "$(basename "$tree")")"
     && _acmd="kbuildlab attach $_atree" \
     || _acmd="kbuildlab attach $_atree --port $PORT"
 [[ $RUN -eq 1 ]] || say "frozen       attach with: $_acmd"
+# Printed frozen or not: drgn reads a booted kernel, so this is what to run once
+# the guest is up, not instead of the attach above.
+if [[ $QMP -eq 1 ]]; then
+    [[ "$QMPPORT" == "$(kbl_tree_get "$tree" QMP_PORT)" ]] \
+        && _dcmd="kbuildlab drgn $_atree" \
+        || _dcmd="kbuildlab drgn $_atree --qmp-port $QMPPORT"
+    say "drgn         once booted: $_dcmd"
+fi
 # Run qemu as a child rather than exec'ing it.  Two things need that.  The
 # cleanup trap has to fire in EVERY boot mode -- `exec` replaces this shell and
 # runs no trap, which is why a direct boot used to leave its state file behind

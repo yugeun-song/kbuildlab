@@ -43,6 +43,13 @@ UPSTREAM=stable          # stable | mainline
 # KCFLAGS=-fvar-tracking-assignments
 
 # QEMU.  Filled in by the arch template; edit freely.
+#
+# Two ports, and each is a number this file STATES rather than one the tool
+# derives.  GDB_PORT is where the gdbstub listens; QMP_PORT is where the QEMU
+# Machine Protocol does, which is drgn's way into a running guest.  `run`
+# advances past a busy port and says so, so these are defaults and not
+# reservations -- but an unstated one is an error, not a guess, because a port
+# computed from another port is a contract nobody wrote down.
 
 # The kernel image base is deliberately NOT stated here.
 #
