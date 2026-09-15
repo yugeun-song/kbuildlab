@@ -484,9 +484,10 @@ kbl_prune_state() {
     # All per-run scratch lives in the state directory, so the glob follows it
     # too: half of it under $KBL_STATE_DIR and half hardcoded in /dev/shm meant a
     # moved state directory left the 90-128 MB boot images unreclaimed for ever.
-    for f in "$sd"/kbl-run-*.env "$sd"/kbl-boot-*.img "$sd"/kbl-vars-*.fd; do
+    for f in "$sd"/kbl-run-*.env "$sd"/kbl-boot-*.img "$sd"/kbl-vars-*.fd \
+             "$sd"/kbl-qmp-*.sock; do
         [[ -e "$f" ]] || continue
-        fp="${f##*-}"; fp="${fp%.env}"; fp="${fp%.img}"; fp="${fp%.fd}"
+        fp="${f##*-}"; fp="${fp%.env}"; fp="${fp%.img}"; fp="${fp%.fd}"; fp="${fp%.sock}"
         [[ "$fp" =~ ^[0-9]+$ ]] || continue
         # Two owners, and only these two.  A live qemu carrying that gdb port, or
         # a `run` that has claimed the port and not started qemu yet (its
