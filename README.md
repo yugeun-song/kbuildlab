@@ -278,6 +278,22 @@ drgn identifies the guest by itself only over the unix socket. `--tcp` reaches
 the TCP port instead, from elsewhere on the network, but then the note has to be
 supplied with `-- --vmcoreinfo PATH`.
 
+`scripts/drgn/ops.py` answers the question a handler table is always asked --
+which implementation is in this slot -- from the guest's memory plus the tree's
+DWARF, so the answer is what this kernel holds rather than what the source
+suggests:
+
+```
+kbuildlab drgn upstream-arm64 -- scripts/drgn/ops.py shmem_ops
+  alloc_inode          shmem_alloc_inode     mm/shmem.c:5113:1
+  drop_inode           inode_just_drop       fs/inode.c:1956:1
+  statfs               shmem_statfs          mm/shmem.c:3794:1
+  sync_fs              NULL
+```
+
+`--grep RE` finds the tables, `--limit N` resolves the first few. A NULL slot is
+printed as NULL: in a kernel that is a decision, not an absence.
+
 riscv64 is the exception, and it is drgn's, not this tool's. Measured on drgn
 0.2.0: the guest is identified, its build ID matches, and physical reads return
 real data, but every kernel virtual address raises `FaultError: could not find
