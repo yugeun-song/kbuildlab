@@ -11,6 +11,7 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 source "${KBL_REPO}/lib/common.sh"
 
 PORT=""; PORT_SET=0; QMPPORT=""; QMPPORT_SET=0; LIST=0; FIRST=0; SYMBOLS=1; TCP=0
+WAIT=0
 declare -a REST=() PASS=()
 _usage() {
     cat <<USAGE
@@ -24,6 +25,11 @@ kbuildlab drgn [TREE] [options] [-- DRGN ARGS]
                      Reachable from elsewhere, but drgn cannot read vmcoreinfo
                      over TCP, so the guest is no longer identified as Linux
                      unless you pass --vmcoreinfo yourself
+  --wait [SECONDS]   a guest that has not booted far enough cannot be identified,
+                     and drgn builds its Program once, at connect: wait for the
+                     guest to publish its vmcoreinfo note and attach then, rather
+                     than hand over a session where every symbol fails (default
+                     300s; Ctrl-C stops it)
   --no-symbols       do not pass the tree's vmlinux to drgn
   --list|-l          list live guests and exit; never prompts
   --first            with several matches, take the lowest port instead of asking
@@ -41,6 +47,8 @@ while [[ $# -gt 0 ]]; do
         --port|-p)     PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
         --qmp-port)    QMPPORT="${2:?--qmp-port needs a number}"; QMPPORT_SET=1; shift 2 ;;
         --tcp)         TCP=1; shift ;;
+        --wait)        if [[ "${2:-}" =~ ^[0-9]+$ ]]; then WAIT="$2"; shift 2
+                       else WAIT=300; shift; fi ;;
         --no-symbols)  SYMBOLS=0; shift ;;
         --list|-l)     LIST=1; shift ;;
         --first)       FIRST=1; shift ;;
@@ -132,11 +140,39 @@ fi
 # session is about to ask.  QMP's runstate cannot answer it: measured on
 # upstream-arm64, a guest held at start_kernel and one held at a late breakpoint
 # both read `debug`, and only the second is readable.
-_ident=""
-if [[ $TCP -eq 0 && -S "$qmpsock" ]]; then
-    _ident="$(timeout 30 drgn --qemu "$qmpsock" --no-default-symbols \
-                -e 'import drgn; print(1 if prog.flags & drgn.ProgramFlags.IS_LINUX_KERNEL else 0)' \
-              2>/dev/null | tail -1)"
+# 1, 0, or empty when the monitor could not be reached at all.
+_identify() {
+    [[ $TCP -eq 0 && -S "$qmpsock" ]] || return 0
+    timeout 10 drgn --qemu "$qmpsock" --no-default-symbols \
+        -e 'import drgn; print(1 if prog.flags & drgn.ProgramFlags.IS_LINUX_KERNEL else 0)' \
+        2>/dev/null | tail -1
+}
+_ident="$(_identify)"
+
+# --wait exists because there is no second chance: drgn builds its Program at
+# connect, so a session opened before the note is written never re-identifies,
+# and set_qemu_qmp cannot be called again to fix it -- it opens a second
+# connection while holding the first, and the monitor serves one client, so it
+# blocks for ever (measured: the process sits in unix_stream_read_generic with
+# two socket fds).  Waiting out here is the only place the retry can happen.
+if [[ "$_ident" == 0 && $WAIT -gt 0 ]]; then
+    say "waiting      for the guest to publish its vmcoreinfo note (up to ${WAIT}s, Ctrl-C to stop)"
+    _end=$(( SECONDS + WAIT )); _said=0
+    while [[ $SECONDS -lt $_end ]]; do
+        sleep 2
+        _ident="$(_identify)"
+        [[ "$_ident" == 1 ]] && break
+        if [[ -z "$_ident" ]]; then
+            warn "drgn: the QMP monitor stopped answering -- another drgn is probably holding
+       it, and it serves one client at a time.  Quit that session first."
+            break
+        fi
+        if [[ $(( SECONDS % 15 )) -lt 2 && $_said -ne $SECONDS ]]; then
+            _said=$SECONDS
+            say "waiting      still not published ($(( _end - SECONDS ))s left)"
+        fi
+    done
+    [[ "$_ident" == 1 ]] && say "waiting      published after $(( WAIT - (_end - SECONDS) ))s"
 fi
 
 _qmp_status() {
@@ -162,7 +198,8 @@ if [[ "$_ident" == 0 ]]; then
        reset vector, so there is no kernel in memory.  Every symbol lookup in this
        session raises ObjectNotFoundError, and it will keep doing so: drgn builds
        its Program when it connects, so continuing the guest afterwards changes
-       nothing here.  Quit this session and run it again once the guest has booted."
+       nothing here.  Quit this session and run it again once the guest has booted,
+       or start it with --wait so it attaches by itself when the guest is ready."
     else
         warn "drgn: the guest on :$PORT has not published its vmcoreinfo note, so drgn
        cannot tell it is a Linux kernel and every symbol lookup raises
@@ -174,7 +211,7 @@ if [[ "$_ident" == 0 ]]; then
 
        This session will not recover on its own.  drgn builds its Program when it
        connects, so booting the guest further does not re-identify it: quit and
-       run this again."
+       run this again, or use --wait to have it attach when the guest is ready."
     fi
     _cfg="$src/.config"
     if [[ -r "$_cfg" ]]; then

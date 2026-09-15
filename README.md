@@ -263,9 +263,16 @@ question directly before handing over -- a symbol-less identification probe,
 measured at 0.1s -- and says which of the two it is rather than leaving you with
 `ObjectNotFoundError: could not find 'init_task'`.
 
-QEMU serves one client per monitor, so a second `kbuildlab drgn` waits in the
-listen backlog until the first session quits. That is a hang with no message
-unless you know it.
+`--wait` closes the gap that leaves: it polls the same probe and attaches the
+moment the note appears, instead of handing over a session that cannot work.
+There is no in-session recovery to offer instead -- calling `set_qemu_qmp` again
+on a live `Program` opens a second connection while holding the first, and since
+the monitor serves one client it blocks for ever (measured: the process sits in
+`unix_stream_read_generic` with two socket fds). Retrying has to happen out here.
+
+That one-client rule is also why a second `kbuildlab drgn` waits in the listen
+backlog until the first session quits. It is a hang with no message unless you
+know it, so `run` and `drgn` both say so.
 
 drgn identifies the guest by itself only over the unix socket. `--tcp` reaches
 the TCP port instead, from elsewhere on the network, but then the note has to be
