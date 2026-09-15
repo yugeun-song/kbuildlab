@@ -176,6 +176,18 @@ _state="$(kbl_statedir)/kbl-run-${PORT}.env"
 _loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
 shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""   # per-run scratch
 
+# The terminal `-nographic` is about to put into raw mode, saved here so it can be
+# put back.  qemu restores it itself when it exits normally and cannot restore it
+# at all when it dies of a signal -- and dying of a signal is not hypothetical on a
+# guest being debugged: a debug read that QEMU dispatches into a device model SEGVs
+# it outright (hw/intc/arm_gic.c's gic_get_current_cpu() reads current_cpu->cpu_index,
+# and current_cpu is NULL on the gdbstub's thread, whenever the guest has more than
+# one core).  What that left behind was a shell with no echo, no line editing and no
+# Ctrl-C -- measured on a pty: ECHO, ICANON, ISIG, IEXTEN, ICRNL and IXON all cleared
+# -- and nothing on screen to say why, or that `reset` would undo it.
+_tty_saved=""
+[[ -t 0 ]] && _tty_saved="$(stty -g 2>/dev/null || echo)"
+
 # Installed HERE, before anything below creates any of it.  The boot-disk copy is
 # 88-139 MB in tmpfs and every `die` between its creation and the launch used to
 # leave it there -- a failure path that fills /dev/shm and reports a build error
@@ -209,6 +221,21 @@ _cleanup() {
     fi
     rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} \
           ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"}
+    # Last, and only once the guest that owns the terminal is gone.  A no-op on
+    # every path where qemu put it back itself, and the difference between a
+    # usable shell and an apparently dead one where it did not.
+    #
+    # SIGTTOU is ignored across it because setting terminal attributes from a
+    # BACKGROUND process group raises it, and its default action stops the shell --
+    # so `kbl run &` from an interactive shell would freeze here instead of tidying
+    # up.  With the signal ignored, POSIX lets the call simply complete.  Reading
+    # them with `stty -g` above needs no such guard; only writing them does.
+    if [[ -n "${_tty_saved:-}" ]]; then
+        trap '' TTOU
+        stty "$_tty_saved" 2>/dev/null
+        trap - TTOU
+    fi
+    return 0
 }
 # HUP is here because closing the terminal a guest runs in is a real way for this
 # to end, and the one where an orphan is least likely to be noticed.  INT is
@@ -644,5 +671,29 @@ _atree="$(printf '%q' "$(basename "$tree")")"
 "${CMD[@]}" <&0 &
 _qpid=$!
 _write_state "$_qpid"
-wait "$_qpid"; _rc=$?
+# 2>/dev/null drops bash's own job-termination line, which reports a guest dying as
+# `run-qemu.sh: line NNN: 60816 Segmentation fault (core dumped) "${CMD[@]}" 0<&0`:
+# this script's internal line number, this script's variable name, and not one word
+# about the guest.  The status still carries the signal, so the report below is the
+# launcher's own and says what actually happened.
+wait "$_qpid" 2>/dev/null; _rc=$?
+if [[ $_rc -gt 128 ]]; then
+    _sig="$(kill -l "$((_rc - 128))" 2>/dev/null || echo "$((_rc - 128))")"
+    case "$_sig" in
+        # How a guest is ENDED, not how it dies: Ctrl-C in a foreground run reaches
+        # qemu through the process group, and the cleanup above ends it with TERM
+        # then KILL.  Reporting those as a crash would cry wolf on every exit.
+        INT|TERM|HUP|QUIT|KILL) : ;;
+        *)
+            warn "guest on :$PORT died of SIG$_sig -- it did not shut down."
+            [[ "$_sig" == SEGV ]] && warn \
+"       A debugger can do this from the outside, and on this machine it is the
+       likeliest cause: a debug read of an address that translates to a device
+       region makes qemu dispatch into the device model, and arm_gic.c reads
+       current_cpu->cpu_index there -- NULL on the gdbstub's thread -- whenever the
+       guest has more than one core (--smp $SMP here).  gdbtools' safemem guard keeps
+       a debugger off those addresses; \`kearly safemem status\` says whether it was
+       armed.  The terminal has been restored; the guest and its run state are gone." ;;
+    esac
+fi
 exit $_rc

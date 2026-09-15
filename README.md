@@ -220,6 +220,32 @@ not appear on qemu's own command line -- and qemu's pid together with its
 `/proc` start time, which is what lets a file that outlived its guest be told
 apart from one describing the process actually on that port.
 
+### When a guest dies
+
+A guest that is *ended* -- Ctrl-C, a closed terminal, `kbuildlab` tidying up -- exits
+quietly, as it always has. A guest that *dies* now says so in this tool's own voice:
+
+```
+kbuildlab: guest on :1435 died of SIGSEGV -- it did not shut down.
+```
+
+Before, the only thing on screen was bash's job-control line, which names this
+script's internal line number and the shell variable holding qemu's argument list,
+and not one word about the guest. The exit status still carries the signal; the
+report is built from it.
+
+Two things make this worth saying rather than leaving to the shell. A debugger can
+kill the guest from outside: a debug read of an address that translates into a device
+region makes qemu dispatch into the device model, and `hw/intc/arm_gic.c` reads
+`current_cpu->cpu_index` there -- NULL on the gdbstub's thread -- whenever the guest
+has more than one core, which `--smp 2` means it does by default. gdbtools' `kearly
+safemem` guard exists to keep a debugger off those addresses, so the report points at
+it. And `-nographic` owns the terminal: qemu puts it in raw mode and restores it on a
+normal exit, but a process killed by a signal restores nothing, which left a shell
+with no echo, no line editing and no Ctrl-C -- and nothing on screen to say that
+`reset` would undo it. The launcher now saves the terminal before the guest starts and
+puts it back on every exit path, signal or not.
+
 ## The tree.conf
 
 `kbuildlab init NAME --arch ARCH` writes `<workspace>/NAME/tree.conf` from
