@@ -401,7 +401,7 @@ _clangd_index() {
     ws="$(kbl_workspace)" || return 0
     for d in "$ws"/*/; do kbl_is_tree "${d%/}" && peers+=(--peer "${d%/}"); done
     say "indexing     clangd (compile_commands.json, out of tree)"
-    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" "${peers[@]}" gen --force \
+    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" --workspace "$ws" "${peers[@]}" gen --force \
         || { warn "clangd index failed (ctags/cscope/gtags are still current)"; return 0; }
 
     # And then build clangd's own index, here, rather than leaving it to

@@ -1,0 +1,16 @@
+# Workspace-wide clangd policy, materialised by `kbuildlab tags` into
+# ~/.config/clangd/config.yaml alongside the per-tree blocks.  The PathMatch
+# below is filled in with the workspace path, regex-escaped.
+#
+# Suppress '*' silences every diagnostic in the lab.  The per-tree blocks still
+# supply the compilation database, so navigation, hover and completion are
+# unaffected; only the gutter is.  Narrow or delete this fragment to get real
+# diagnostics back.
+If:
+  PathMatch: @WORKSPACE@/.*
+Diagnostics:
+  Suppress: "*"
+  ClangTidy:
+    Remove: "*"
+  UnusedIncludes: None
+  MissingIncludes: None

@@ -1295,6 +1295,22 @@ def read_user_config() -> str:
     return ""
 
 
+WORKSPACE_FRAGMENT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  os.pardir, "presets", "clangd", "workspace.yaml")
+
+
+def write_workspace_block(workspace: str) -> None:
+    """Materialise presets/clangd/workspace.yaml for this workspace.
+
+    Keyed by the workspace path, so it cannot collide with a tree's own block.
+    """
+    if not os.path.isfile(WORKSPACE_FRAGMENT):
+        return
+    with open(WORKSPACE_FRAGMENT) as f:
+        body = f.read().replace("@WORKSPACE@", re.escape(os.path.abspath(workspace)))
+    write_tree_block(f"workspace {os.path.abspath(workspace)}", [body])
+
+
 def write_tree_block(tree: str, blocks: list[str] | None) -> None:
     """Replace one tree's marked block, leaving every other tree -- and
     anything the operator wrote themselves -- untouched.
@@ -1832,6 +1848,9 @@ def cmd_gen(args) -> int:
                                 header_diagnostics=args.header_diagnostics)
         write_tree_block(tree, blocks)
         print(f"    {len(blocks)} config fragments -> {USER_CONFIG}")
+        if args.workspace:
+            write_workspace_block(args.workspace)
+            print(f"    workspace fragment -> {USER_CONFIG}")
         print(f"    nothing was written inside {kernel_root(tree)}")
     return 0
 
@@ -1943,6 +1962,9 @@ def main() -> int:
                     "directories are named, never searched for.")
     ap.add_argument("--tree", action="append", default=[], metavar="DIR",
                     help="a tree directory to act on (repeatable)")
+    ap.add_argument("--workspace", metavar="DIR", default="",
+                    help="workspace the trees live in; its policy fragment "
+                         "(presets/clangd/workspace.yaml) is written too")
     ap.add_argument("--peer", action="append", default=[], metavar="DIR",
                     help="another tree to know about but not act on; used to "
                          "borrow scripts/clang-tools/gen_compile_commands.py "

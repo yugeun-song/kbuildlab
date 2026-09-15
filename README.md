@@ -108,6 +108,12 @@ user config and therefore editor-neutral: the same blocks apply in Neovim, in
 VS Code and on the command line. An editor only supplies clangd's launch
 arguments.
 
+Both halves of what clangd reads are in this repo. The per-tree blocks are
+generated -- measured against the tree in front of them -- and the workspace-wide
+policy is `presets/clangd/workspace.yaml`, a file you edit, materialised by
+`kbuildlab tags` under its own markers. Nothing in `~/.config/clangd/config.yaml`
+is hand-written, so regenerating never loses a decision.
+
 VS Code needs one thing said out loud, because its default C/C++ extension is
 not clangd: `ms-vscode.cpptools` runs its own parser, does not read this file,
 and on a GCC-built kernel reports hundreds of errors no build ever produced.
