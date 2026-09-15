@@ -503,6 +503,169 @@ kbl_prune_state() {
     done
 }
 
+# --- which guest ------------------------------------------------------------
+# `attach` and `drgn` ask the same question in the same terms, so it is answered
+# once, here.  Nothing below opens the gdb port: a bare TCP connect pauses a
+# running guest and leaves it paused (qemu 11.1.1, via QMP query-status).
+
+kbl_row_fields() {   # sets the _r_* variables from one kbl_instances line
+    # \x1f, not tab: see kbl_instances -- tab collapses empty middle fields.
+    IFS=$'\x1f' read -r _r_port _r_pid _r_start _r_frozen _r_qbin _r_sf \
+                       _r_tree _r_name _r_boot _r_kaslr _r_ssh <<<"$1"
+}
+
+kbl_uptime_of() { ps -o etime= -p "$1" 2>/dev/null | tr -d ' '; }
+
+kbl_guest_table() {   # kbl_guest_table ROW...
+    printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-20s %-8s %s\n' \
+        '#' port ssh tree boot kaslr state dbg pid uptime
+    local i=0 r
+    for r in "$@"; do
+        i=$((i + 1)); kbl_row_fields "$r"
+        printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-20s %-8s %s\n' \
+            "$i" "$_r_port" "${_r_ssh:--}" "${_r_name:-?}" "${_r_boot:-?}" \
+            "$(case "$_r_kaslr" in 1) echo on ;; 0) echo off ;; *) echo '?' ;; esac)" \
+            "$([[ "$_r_frozen" == 1 ]] && echo frozen || echo running)" \
+            "$(kbl_gdb_attached "$_r_port" "$_r_pid" "$(kbl_qemu_gdb_bind "$_r_pid")")" \
+            "$_r_pid" "$(kbl_uptime_of "$_r_pid")"
+    done
+}
+
+# The chosen kbl_instances row lands in KBL_GUEST_ROW; returns 2 when --list has
+# printed its table instead.
+#
+# A global rather than stdout: under command substitution the function would run
+# in a subshell with stdout on a pipe, so `[[ -t 1 ]]` goes false and the
+# interactive chooser never runs, and `die` would exit the subshell only.
+#
+#   CMD        subcommand name, for messages
+#   WANT_TREE  tree directory to filter by, or ""
+#   PORT       gdb port to filter by, or ""
+#   PORT_SET   1 if the caller was GIVEN that port rather than defaulting to it
+#   FIRST      1 to take the lowest port instead of asking
+#   LIST       1 to list and return 2 without choosing
+kbl_pick_guest() {
+    local cmd="$1" _want_tree="$2" PORT="$3" PORT_SET="$4" FIRST="$5" LIST="$6"
+    KBL_GUEST_ROW=""
+    local _r _treeport _n _try _pick _ports
+    local -a _rows=() _byport=() _cand=()
+    mapfile -t _rows < <(kbl_instances)
+
+    # Two passes: "the port matched but the tree did not" and "nothing is on that
+    # port" are different failures and get different messages.
+    for _r in "${_rows[@]+"${_rows[@]}"}"; do
+        kbl_row_fields "$_r"
+        [[ $PORT_SET -eq 1 && "$_r_port" != "$PORT" ]] && continue
+        _byport+=("$_r")
+    done
+    _treeport=""
+    [[ -n "$_want_tree" ]] && _treeport="$(kbl_tree_get "$_want_tree" GDB_PORT)"
+    for _r in "${_byport[@]+"${_byport[@]}"}"; do
+        kbl_row_fields "$_r"
+        if [[ -n "$_want_tree" ]]; then
+            if [[ -n "$_r_tree" ]]; then
+                [[ "$(readlink -f "$_r_tree")" == "$(readlink -f "$_want_tree")" ]] || continue
+            else
+                # A guest this tool did not start records no tree.  Only two
+                # things name it: a tree AND --port given together, which is the
+                # assertion that they go together, or the tree's own GDB_PORT.
+                # Anything else is claimed by no name.
+                if [[ $PORT_SET -eq 1 && "$_r_port" == "$PORT" ]]; then :
+                elif [[ -n "$_treeport" && "$_r_port" == "$_treeport" ]]; then :
+                else continue
+                fi
+                _r_name="${_r_name:-$(basename "$_want_tree")}"
+                _r="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
+                      "$_r_port" "$_r_pid" "$_r_start" "$_r_frozen" "$_r_qbin" "$_r_sf" \
+                      "$_want_tree" "$_r_name" "$_r_boot" "$_r_kaslr" "$_r_ssh")"
+            fi
+        fi
+        _cand+=("$_r")
+    done
+
+    if [[ $LIST -eq 1 ]]; then
+        if [[ ${#_cand[@]} -eq 0 ]]; then
+            echo "no live guest${_want_tree:+ of $(basename "$_want_tree")}"
+        else
+            echo "live guests${_want_tree:+ of $(basename "$_want_tree")}:"
+            kbl_guest_table "${_cand[@]}"
+            # `state` is read from qemu's own -S flag, which says how the guest was
+            # STARTED.  Whether it is stopped right now is a different question, and
+            # the only way to ask it is through the monitor -- i.e. by touching the
+            # stub, which pauses a running guest.  Saying what can be known beats
+            # guessing at what cannot.
+            echo "  state is how the guest was started (-S); whether it is stopped NOW"
+            echo "  cannot be read without touching the stub, which would pause it."
+        fi
+        return 2
+    fi
+
+    case ${#_cand[@]} in
+      0)
+        # A guest IS on the port that was NAMED; it is just not the tree that was
+        # named with it.  Only reachable when --port was given: without it _byport
+        # is every live guest on the host, and taking its first element blamed an
+        # unrelated tree's guest and quoted a --port the caller never typed.
+        if [[ $PORT_SET -eq 1 && ${#_byport[@]} -gt 0 ]]; then
+            kbl_row_fields "${_byport[0]}"
+            if [[ -n "$_r_tree" ]]; then
+                die "$cmd: --port $_r_port is running $(basename "$_r_tree"), not $(basename "$_want_tree")
+       (recorded in $_r_sf when that port was started)"
+            fi
+            die "$cmd: :$_r_port has a live $_r_qbin (pid $_r_pid) but nothing recorded which
+       tree it is, so it cannot be matched against $(basename "$_want_tree").  Name it:
+       kbuildlab $cmd <tree> --port $_r_port"
+        fi
+        if [[ $PORT_SET -eq 1 ]]; then
+            if [[ -n "$(ss -ltnH "sport = :${PORT}" 2>/dev/null)" ]]; then
+                die "$cmd: :$PORT is listening but no readable qemu-system process holds it
+       (another user's, or not a guest).  Refusing to guess which tree that is."
+            fi
+            die "$cmd: nothing on :$PORT -- no qemu-system process carries -gdb for it,
+       and nothing is listening there"
+        fi
+        die "$cmd: no live guest${_want_tree:+ of $(basename "$_want_tree")} -- no qemu-system
+       process carries a gdb port recorded as this tree.  Start one:
+       kbuildlab run ${_want_tree:+$(basename "$_want_tree")}" ;;
+      1) KBL_GUEST_ROW="${_cand[0]}"; return 0 ;;
+      *)
+        if [[ $FIRST -eq 1 ]]; then
+            KBL_GUEST_ROW="${_cand[0]}"; return 0          # kbl_instances sorts by port
+        elif [[ -t 0 && -t 1 ]]; then
+            echo "several live guests${_want_tree:+ of $(basename "$_want_tree")}:"
+            kbl_guest_table "${_cand[@]}"
+            if command -v fzf >/dev/null 2>&1; then
+                _pick="$( { kbl_guest_table "${_cand[@]}"; } | fzf --header-lines=1 --no-multi \
+                            --prompt="$cmd which? " --height=40% --reverse )" || _pick=""
+                [[ -n "$_pick" ]] || die "$cmd: cancelled"
+                _n="$(awk '{print $1}' <<<"$_pick")"
+            else
+                _n=""
+                for _try in 1 2 3; do
+                    read -r -p "  $cmd which? [1-${#_cand[@]}, q to cancel] " _n || _n=q
+                    [[ "$_n" == q || -z "$_n" ]] && die "$cmd: cancelled"
+                    [[ "$_n" =~ ^[0-9]+$ && "$_n" -ge 1 && "$_n" -le ${#_cand[@]} ]] && break
+                    _n=""
+                    echo "  not one of 1-${#_cand[@]}"
+                done
+            fi
+            [[ -n "$_n" ]] || die "$cmd: no choice made"
+            KBL_GUEST_ROW="${_cand[$((_n - 1))]}"; return 0
+        else
+            _ports=""
+            for _r in "${_cand[@]}"; do kbl_row_fields "$_r"; _ports="$_ports --port $_r_port"; done
+            die "$cmd: ${#_cand[@]} live instances${_want_tree:+ of $(basename "$_want_tree")} and stdin
+       is not a terminal, so the chooser cannot run.  Name one:$_ports"
+        fi ;;
+    esac
+}
+
+# One KBL_ key out of a run-state file.  Read, never sourced.
+kbl_state_get() {   # kbl_state_get FILE KEY
+    [[ -r "$1" ]] || return 1
+    sed -n "s/^$2=//p" "$1" | head -1
+}
+
 # --- scratch -----------------------------------------------------------------
 kbl_rundir() {
     local ws h base

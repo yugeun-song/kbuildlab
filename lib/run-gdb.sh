@@ -62,36 +62,9 @@ esac
 # A tree name no longer names ONE guest.  `run` advances to a free port rather
 # than refusing, so a second guest of the same tree is normal and its port is a
 # number that appears nowhere in tree.conf.  Attach therefore discovers instead
-# of assuming, and asks when the answer is genuinely ambiguous.
-#
-# What it must NOT do is probe the gdbstub to find out more.  A bare TCP connect
-# -- not one RSP byte -- pauses a running guest and leaves it paused after the
-# socket closes (measured on qemu 11.1.1 via QMP query-status).  Everything below
-# reads /proc; nothing opens that port.
-_uptime_of() { ps -o etime= -p "$1" 2>/dev/null | tr -d ' '; }
-
-_row_fields() {   # sets the _r_* variables from one kbl_instances line
-    # \x1f, not tab: see kbl_instances -- tab collapses empty middle fields.
-    IFS=$'\x1f' read -r _r_port _r_pid _r_start _r_frozen _r_qbin _r_sf \
-                       _r_tree _r_name _r_boot _r_kaslr _r_ssh <<<"$1"
-}
-
-_print_table() {   # _print_table ROW...
-    printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-20s %-8s %s\n' \
-        '#' port ssh tree boot kaslr state dbg pid uptime
-    local i=0 r
-    for r in "$@"; do
-        i=$((i + 1)); _row_fields "$r"
-        printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-20s %-8s %s\n' \
-            "$i" "$_r_port" "${_r_ssh:--}" "${_r_name:-?}" "${_r_boot:-?}" \
-            "$(case "$_r_kaslr" in 1) echo on ;; 0) echo off ;; *) echo '?' ;; esac)" \
-            "$([[ "$_r_frozen" == 1 ]] && echo frozen || echo running)" \
-            "$(kbl_gdb_attached "$_r_port" "$_r_pid" "$(kbl_qemu_gdb_bind "$_r_pid")")" \
-            "$_r_pid" "$(_uptime_of "$_r_pid")"
-    done
-}
-
-mapfile -t _rows < <(kbl_instances)
+# of assuming, and asks when the answer is genuinely ambiguous.  The discovery
+# itself is kbl_pick_guest in common.sh: `drgn` asks the same question in the
+# same terms, and two copies of it would drift.
 
 # A tree given on the command line filters; a row that recorded no tree is not
 # claimed by any name, because guessing which tree an unlabelled guest belongs to
@@ -104,126 +77,14 @@ elif [[ $PORT_SET -eq 0 ]]; then
     _want_tree="$(kbl_tree "" 2>/dev/null)" || _want_tree=""
 fi
 
-# Two passes, because "the port matched but the tree did not" and "nothing is on
-# that port" are different failures and deserve different messages.  Collapsing
-# them -- which one filter does -- reports a live guest of another tree as an
-# unreadable process, which sends the reader looking for a permissions problem
-# that is not there.
-declare -a _byport=() _cand=()
-for _r in "${_rows[@]+"${_rows[@]}"}"; do
-    _row_fields "$_r"
-    [[ $PORT_SET -eq 1 && "$_r_port" != "$PORT" ]] && continue
-    _byport+=("$_r")
-done
-_treeport=""
-[[ -n "$_want_tree" ]] && _treeport="$(kbl_tree_get "$_want_tree" GDB_PORT)"
-for _r in "${_byport[@]+"${_byport[@]}"}"; do
-    _row_fields "$_r"
-    if [[ -n "$_want_tree" ]]; then
-        if [[ -n "$_r_tree" ]]; then
-            [[ "$(readlink -f "$_r_tree")" == "$(readlink -f "$_want_tree")" ]] || continue
-        else
-            # A guest this tool did not start records nothing.  Two things can
-            # still name it:
-            #   - the user gave BOTH a tree and --port, which IS the assertion
-            #     that the two go together.  Refusing there refuses the only
-            #     instruction available, and it is a regression: before discovery
-            #     existed, `attach TREE --port N` needed nothing but a listener.
-            #   - the port is the tree's own GDB_PORT, the historical link.
-            # Anything else is claimed by no name, because guessing which tree an
-            # unlabelled guest belongs to is how a session comes up with
-            # confident, wrong symbols.
-            if [[ $PORT_SET -eq 1 && "$_r_port" == "$PORT" ]]; then :
-            elif [[ -n "$_treeport" && "$_r_port" == "$_treeport" ]]; then :
-            else continue
-            fi
-            _r_name="${_r_name:-$(basename "$_want_tree")}"
-            _r="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
-                  "$_r_port" "$_r_pid" "$_r_start" "$_r_frozen" "$_r_qbin" "$_r_sf" \
-                  "$_want_tree" "$_r_name" "$_r_boot" "$_r_kaslr" "$_r_ssh")"
-        fi
-    fi
-    _cand+=("$_r")
-done
+# 2 means --list printed its table and there is nothing to attach to.  Not a
+# command substitution: kbl_pick_guest prompts on this terminal and dies on this
+# script, and a subshell would take both away.
+kbl_pick_guest attach "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"; _rc=$?
+[[ $_rc -eq 2 ]] && exit 0
+[[ $_rc -eq 0 ]] || exit $_rc
 
-if [[ $LIST -eq 1 ]]; then
-    if [[ ${#_cand[@]} -eq 0 ]]; then
-        echo "no live guest${_want_tree:+ of $(basename "$_want_tree")}"
-    else
-        echo "live guests${_want_tree:+ of $(basename "$_want_tree")}:"
-        _print_table "${_cand[@]}"
-        # `state` is read from qemu's own -S flag, which says how the guest was
-        # STARTED.  Whether it is stopped right now is a different question, and
-        # the only way to ask it is through the monitor -- i.e. by touching the
-        # stub, which pauses a running guest.  Saying what can be known beats
-        # guessing at what cannot.
-        echo "  state is how the guest was started (-S); whether it is stopped NOW"
-        echo "  cannot be read without touching the stub, which would pause it."
-    fi
-    exit 0
-fi
-
-_chosen=""
-case ${#_cand[@]} in
-  0)
-    # A guest IS on the port that was NAMED; it is just not the tree that was
-    # named with it.  Only reachable when --port was given: without it _byport is
-    # every live guest on the host, and taking its first element blamed an
-    # unrelated tree's guest and quoted a --port the caller never typed.
-    if [[ $PORT_SET -eq 1 && ${#_byport[@]} -gt 0 ]]; then
-        _row_fields "${_byport[0]}"
-        if [[ -n "$_r_tree" ]]; then
-            die "attach: --port $_r_port is running $(basename "$_r_tree"), not $(basename "$_want_tree")
-       (recorded in $_r_sf when that port was started)"
-        fi
-        die "attach: :$_r_port has a live $_r_qbin (pid $_r_pid) but nothing recorded which
-       tree it is, so it cannot be matched against $(basename "$_want_tree").  Name it:
-       kbuildlab attach <tree> --port $_r_port"
-    fi
-    if [[ $PORT_SET -eq 1 ]]; then
-        if [[ -n "$(ss -ltnH "sport = :${PORT}" 2>/dev/null)" ]]; then
-            die "attach: :$PORT is listening but no readable qemu-system process holds it
-       (another user's, or not a guest).  Refusing to guess which tree that is."
-        fi
-        die "attach: nothing on :$PORT -- no qemu-system process carries -gdb for it,
-       and nothing is listening there"
-    fi
-    die "attach: no live guest${_want_tree:+ of $(basename "$_want_tree")} -- no qemu-system
-       process carries a gdb port recorded as this tree.  Start one:
-       kbuildlab run ${_want_tree:+$(basename "$_want_tree")}" ;;
-  1) _chosen="${_cand[0]}" ;;
-  *)
-    if [[ $FIRST -eq 1 ]]; then
-        _chosen="${_cand[0]}"                       # kbl_instances sorts by port
-    elif [[ -t 0 && -t 1 ]]; then
-        echo "several live guests${_want_tree:+ of $(basename "$_want_tree")}:"
-        _print_table "${_cand[@]}"
-        if command -v fzf >/dev/null 2>&1; then
-            _pick="$( { _print_table "${_cand[@]}"; } | fzf --header-lines=1 --no-multi \
-                        --prompt='attach which? ' --height=40% --reverse )" || _pick=""
-            [[ -n "$_pick" ]] || die "attach: cancelled"
-            _n="$(awk '{print $1}' <<<"$_pick")"
-        else
-            _n=""
-            for _try in 1 2 3; do
-                read -r -p "  attach which? [1-${#_cand[@]}, q to cancel] " _n || _n=q
-                [[ "$_n" == q || -z "$_n" ]] && die "attach: cancelled"
-                [[ "$_n" =~ ^[0-9]+$ && "$_n" -ge 1 && "$_n" -le ${#_cand[@]} ]] && break
-                _n=""
-                echo "  not one of 1-${#_cand[@]}"
-            done
-        fi
-        [[ -n "$_n" ]] || die "attach: no choice made"
-        _chosen="${_cand[$((_n - 1))]}"
-    else
-        _ports=""
-        for _r in "${_cand[@]}"; do _row_fields "$_r"; _ports="$_ports --port $_r_port"; done
-        die "attach: ${#_cand[@]} live instances${_want_tree:+ of $(basename "$_want_tree")} and stdin
-       is not a terminal, so the chooser cannot run.  Name one:$_ports"
-    fi ;;
-esac
-
-_row_fields "$_chosen"
+kbl_row_fields "$KBL_GUEST_ROW"
 PORT="$_r_port"
 if [[ -n "$_r_tree" ]]; then
     if [[ -n "$_want_tree" && "$(readlink -f "$_r_tree")" != "$(readlink -f "$_want_tree")" ]]; then
