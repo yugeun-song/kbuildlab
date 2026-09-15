@@ -1781,9 +1781,19 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
             if done:
                 ok = True
                 break
+            if proc.poll() is not None:
+                break           # clangd is gone; nothing will begin now
             if not begun and time.time() - started > grace:
-                ok = True       # nothing to do: the tree is already warm
-                break
+                # "Nothing left to do" and "clangd has not finished reading a
+                # 46 MB compilation database yet" are indistinguishable from
+                # here, and the timer alone called both of them warm -- so the
+                # two largest trees reported success in 45s with an empty index.
+                # The index itself tells them apart.  With no shards there is
+                # nothing to be already warm from, so keep waiting; `timeout`
+                # bounds it, and a dead clangd is caught above.
+                if index_shards(tree):
+                    ok = True
+                    break
             if not quiet and last and time.time() - last_shown > 15:
                 last_shown = time.time()
                 print(f"      indexing {tree}: {last}", flush=True)
@@ -1796,6 +1806,13 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
         except Exception:
             proc.kill()
     return ok
+
+
+def index_shards(tree: str) -> int:
+    d = os.path.join(cache_dir(tree), ".cache", "clangd", "index")
+    if not os.path.isdir(d):
+        return 0
+    return sum(len(names) for _, _, names in os.walk(d))
 
 
 def index_size(tree: str) -> str:
