@@ -1,0 +1,26 @@
+// VS Code: read a kernel tree through clangd, not through cpptools IntelliSense.
+//
+// cpptools does not read ~/.config/clangd/config.yaml, and on a GCC-built kernel
+// its own parser reports hundreds of errors that no build ever produced.  The
+// clangd extension is the same clangd Neovim runs, so it picks up the per-tree
+// blocks `kbuildlab tags` writes and reaches the same near-zero diagnostic count.
+//
+// Merge into ~/.config/Code/User/settings.json.  cpptools keeps its debugger;
+// only its parser is switched off.
+//
+// No -j here on purpose: VS Code settings cannot compute one, and a number that
+// is right on one machine is wrong on the next.  clangd defaults to the host's
+// thread count, and --background-index-priority keeps it out of the way.
+{
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.arguments": [
+        "--background-index",
+        "--clang-tidy",
+        "--completion-style=detailed",
+        "--header-insertion=never",
+        "--pch-storage=disk",
+        "--background-index-priority=background",
+        "--limit-results=200",
+        "--limit-references=2000"
+    ]
+}

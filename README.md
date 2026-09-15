@@ -79,6 +79,10 @@ of it rather than taken from a list:
   build `arch/powerpc`, and no command line makes powerpc source parse through
   an aarch64 one. Those paths keep navigation and lose diagnostics.
 - **Everything named "unused"** is off, compiler and clang-tidy alike.
+- **`-ferror-limit=0`.** `too many errors emitted, stopping now` is a fatal, not
+  a diagnostic, so `Diagnostics.Suppress` never reaches it. On a tree whose
+  diagnostics are otherwise silenced it is the one thing still shown, and
+  lifting the cap removes it at its source.
 
 Two things the build system knows and clangd does not are injected as comments
 on copies of the tree's own headers, put ahead of it on the include path.
@@ -95,6 +99,21 @@ so it happens again. It is the same work either way; done from the command
 line it is finished before the editor opens. clangd keys its shards on file
 contents, so it is incremental by construction: a rebuild that touched forty
 files re-indexes forty files, and an already-warm tree returns in seconds.
+
+#### Editors
+
+Everything above lives in `~/.config/clangd/config.yaml`, which is clangd's own
+user config and therefore editor-neutral: the same blocks apply in Neovim, in
+VS Code and on the command line. An editor only supplies clangd's launch
+arguments.
+
+VS Code needs one thing said out loud, because its default C/C++ extension is
+not clangd: `ms-vscode.cpptools` runs its own parser, does not read this file,
+and on a GCC-built kernel reports hundreds of errors no build ever produced.
+Install `llvm-vs-code-extensions.vscode-clangd` and merge
+`presets/editor/vscode-settings.json` into your user settings; that switches
+cpptools' parser off (its debugger is untouched) and leaves clangd reading the
+same configuration Neovim reads.
 
 Measured on a 3887-file tree with two indexing threads: ten minutes from
 nothing, seven seconds when already warm.

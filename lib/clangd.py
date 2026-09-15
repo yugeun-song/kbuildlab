@@ -698,6 +698,12 @@ def generalize(flags) -> list[str]:
 # config fragments
 # ---------------------------------------------------------------------------
 
+# "too many errors emitted, stopping now" is a fatal, not a diagnostic, so
+# Diagnostics.Suppress never reaches it -- it is the one thing still shown on a
+# tree whose diagnostics are otherwise fully suppressed.  Lifting the cap removes
+# it at its source.
+ERROR_LIMIT = ["-ferror-limit=0"]
+
 # Warning classes that only ever fire because clangd is reading a GCC command
 # line, never because of anything in the source.
 DRIVER_QUIET = [
@@ -1062,7 +1068,7 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool,
     missing_isystem = {p for p in isystem if not os.path.isdir(p)}
 
     remove = generalize(bad)
-    add = list(DRIVER_QUIET + UNUSED_QUIET) + CLANG_ONLY_NOISE
+    add = list(ERROR_LIMIT + DRIVER_QUIET + UNUSED_QUIET) + CLANG_ONLY_NOISE
     own_opinions = kernel_warning_opinions(tree, triple)
     add += [w for w in own_opinions if w not in add]
     if verbose:
@@ -1124,7 +1130,7 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool,
             "CompileFlags:",
             "  Add:",
             f"    - --target={sub_triple}",
-            indent(DRIVER_QUIET + UNUSED_QUIET, "    ").rstrip("\n"),
+            indent(ERROR_LIMIT + DRIVER_QUIET + UNUSED_QUIET, "    ").rstrip("\n"),
         ]
         if sub_bad:
             sub += ["  Remove:", indent(generalize(sub_bad), "    ").rstrip("\n")]
