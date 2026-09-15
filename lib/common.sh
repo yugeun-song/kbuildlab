@@ -517,16 +517,36 @@ kbl_row_fields() {   # sets the _r_* variables from one kbl_instances line
 
 kbl_uptime_of() { ps -o etime= -p "$1" 2>/dev/null | tr -d ' '; }
 
+# The guest's own runstate, read from QMP.  This is the question the -S flag
+# cannot answer -- how the guest was STARTED is not how it is now -- and until
+# there was a QMP monitor the only way to ask was to touch the gdbstub, which
+# pauses a running guest.  Empty when the run recorded no QMP port.
+kbl_qmp_runstate() {   # kbl_qmp_runstate STATEFILE
+    local port; port="$(kbl_state_get "$1" KBL_QMP_PORT 2>/dev/null)"
+    [[ -n "$port" ]] && command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$port" <<'KBLQMP' 2>/dev/null
+import json, socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2)
+    s.recv(65536); s.sendall(b'{"execute":"qmp_capabilities"}\n'); s.recv(65536)
+    s.sendall(b'{"execute":"query-status"}\n')
+    print(json.loads(s.recv(65536).splitlines()[0])["return"]["status"])
+except Exception:
+    pass
+KBLQMP
+}
+
 kbl_guest_table() {   # kbl_guest_table ROW...
-    printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-20s %-8s %s\n' \
-        '#' port ssh tree boot kaslr state dbg pid uptime
+    printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-10s %-20s %-8s %s\n' \
+        '#' port ssh tree boot kaslr started now dbg pid uptime
     local i=0 r
     for r in "$@"; do
         i=$((i + 1)); kbl_row_fields "$r"
-        printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-20s %-8s %s\n' \
+        printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-10s %-20s %-8s %s\n' \
             "$i" "$_r_port" "${_r_ssh:--}" "${_r_name:-?}" "${_r_boot:-?}" \
             "$(case "$_r_kaslr" in 1) echo on ;; 0) echo off ;; *) echo '?' ;; esac)" \
             "$([[ "$_r_frozen" == 1 ]] && echo frozen || echo running)" \
+            "$(kbl_qmp_runstate "$_r_sf" || echo)" \
             "$(kbl_gdb_attached "$_r_port" "$_r_pid" "$(kbl_qemu_gdb_bind "$_r_pid")")" \
             "$_r_pid" "$(kbl_uptime_of "$_r_pid")"
     done
@@ -590,13 +610,12 @@ kbl_pick_guest() {
         else
             echo "live guests${_want_tree:+ of $(basename "$_want_tree")}:"
             kbl_guest_table "${_cand[@]}"
-            # `state` is read from qemu's own -S flag, which says how the guest was
-            # STARTED.  Whether it is stopped right now is a different question, and
-            # the only way to ask it is through the monitor -- i.e. by touching the
-            # stub, which pauses a running guest.  Saying what can be known beats
-            # guessing at what cannot.
-            echo "  state is how the guest was started (-S); whether it is stopped NOW"
-            echo "  cannot be read without touching the stub, which would pause it."
+            # `started` is qemu's own -S flag; `now` is the live runstate, read
+            # from QMP, which reaches it without touching the stub.  A guest that
+            # is `paused` with no debugger on it is one a dead gdb left behind:
+            # kbuildlab resume gets it back.
+            echo "  started = how it was launched (-S); now = live runstate from QMP."
+            echo "  paused with no dbg means a debugger died holding it: kbuildlab resume"
         fi
         return 2
     fi

@@ -51,6 +51,8 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                                             --first to take the lowest port)
                                             (defaults to stopping at head.S _text;
                                              --no-bootbreak to attach raw)
+  kbuildlab resume [TREE] [--port N]        resume a guest a dead debugger left
+                                            paused (QMP; the gdbstub cannot)
   kbuildlab trees                           what is in the workspace
   kbuildlab containers [status|clean]       what the container runtime holds for
                                             kbuildlab, and whether it can collide
@@ -552,6 +554,7 @@ cmd_update() {
 cmd_run()    { exec "${KBL_REPO}/lib/run-qemu.sh" "$@"; }
 cmd_attach() { exec "${KBL_REPO}/lib/run-gdb.sh" "$@"; }
 cmd_drgn()   { exec "${KBL_REPO}/lib/run-drgn.sh" "$@"; }
+cmd_resume() { exec "${KBL_REPO}/lib/resume.sh" "$@"; }
 
 # ---------------------------------------------------------------- containers
 # What the container runtime holds for kbuildlab on this host, and whether any of
@@ -840,6 +843,7 @@ case "$cmd" in
     run)    cmd_run "$@" ;;
     attach) cmd_attach "$@" ;;
     drgn)   cmd_drgn "$@" ;;
+    resume) cmd_resume "$@" ;;
     trees)  kbl_trees ;;
     containers) cmd_containers "$@" ;;
     doctor) cmd_doctor ;;

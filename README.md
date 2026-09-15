@@ -285,6 +285,30 @@ memory segment` -- identically with the tree's Sv39 pin and with Sv48/Sv57
 allowed, so it is not a paging-mode question. `drgn` says so before handing over.
 x86_64 and arm64 read symbols normally.
 
+### gdb and drgn together
+
+They need no channel between them, because QEMU already is one. gdb drives the
+guest through the gdbstub, drgn reads it through QMP, and both see one machine.
+Measured on upstream-arm64 booted to userspace:
+
+| | QMP runstate | what drgn reads |
+| --- | --- | --- |
+| drgn alone | `running` | jiffies advance -- QMP reads do not stop the guest |
+| gdb attached | `paused` | jiffies identical across reads: exactly the state gdb stopped, and still `paused` afterwards |
+| gdb SIGKILLed | `paused`, stub free within 2s | unchanged; a fresh gdb attaches after `resume` |
+| drgn SIGKILLed | unchanged | the monitor is released; the next session connects |
+| guest killed | unreachable | run state and socket reclaimed by the launcher |
+
+The one thing that does not heal is the middle of that list: a debugger killed
+while it holds the guest releases the gdbstub at once -- qemu notices the closed
+socket -- but leaves the guest **paused**, and nothing on the gdbstub side will
+start it again. Measured still paused at +2s, +10s, +30s and +60s. `kbuildlab
+resume` is the way back, over QMP, and it refuses while a debugger is attached
+because a guest paused by a live gdb is paused on purpose.
+
+`attach --list` shows both: `started` is qemu's `-S` flag, `now` is the live
+runstate. A row that is `paused` with no `dbg` is the stranded case.
+
 ### The run state
 
 `run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default
