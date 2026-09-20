@@ -76,6 +76,14 @@ of it rather than taken from a list:
   `asm/atomic_lse.h` has no idea what `atomic_t` is, because in a real build
   `asm/atomic.h` got there first. Each header gets a database entry
   reproducing the includes that precede it in a source that uses it.
+- **Inactive regions of a header.** clangd greys out an `#if` group from the
+  macros its reconstructed preamble leaves defined; the build decides from the
+  macros defined where a source first reaches the header. `kernel/sched/core.c`
+  defines `CREATE_TRACE_POINTS` before it includes `trace/events/sched.h`, and
+  an arch header defines its overrides before it includes the `asm-generic` one.
+  Each header's context source is replayed through the preprocessor, and the
+  macros its conditionals depend on are restored to their state at that point
+  by a forced include holding only the difference.
 - **Source the tree never compiles.** A tree configured for arm64 does not
   build `arch/powerpc`, and no command line makes powerpc source parse through
   an aarch64 one. Those paths keep navigation and lose diagnostics.
@@ -84,6 +92,11 @@ of it rather than taken from a list:
   a diagnostic, so `Diagnostics.Suppress` never reaches it. On a tree whose
   diagnostics are otherwise silenced it is the one thing still shown, and
   lifting the cap removes it at its source.
+
+`counted_by` naming a member declared later is accepted by GCC and rejected by
+this clang. The macros that expand to it are found by preprocessing the build's
+forced includes and redefined empty in a shim included right behind them, so
+`linux/compiler_types.h` itself is never copied.
 
 Two things the build system knows and clangd does not are injected as comments
 on copies of the tree's own headers, put ahead of it on the include path.
@@ -142,6 +155,24 @@ python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check -n 80
 python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 \
         --journal /tmp/scan --resume     # every file, resumable
 ```
+
+Inactive regions are measured the same way, against the build rather than
+against an expectation. Every `#if` group of a file is marked, the real
+translation unit is preprocessed, and the groups that survive are compared with
+the regions clangd reports; a header is judged in the translation unit of the
+source its entry was derived from. The exit status is non-zero when any differ.
+
+```sh
+python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions            # a sample
+python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions --all -S 60
+python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions include/linux/compiler_types.h
+```
+
+Neither step starts over. A source's trace and a file's verdict are kept under
+a digest of the command, the code that computed them, clangd, the tree's part
+of the config and every file kbuild recorded that source as reading, so a
+rebuild that touched forty files repeats the work for what includes those
+forty. `regions --fresh` asks again regardless.
 
 Every command takes `-h`/`--help`; `run` and `attach` carry the options worth
 knowing.

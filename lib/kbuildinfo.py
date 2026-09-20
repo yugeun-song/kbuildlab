@@ -353,9 +353,17 @@ def _config_comment(name: str, value: str, syms: list[KconfigSymbol],
 _DEFINE = re.compile(r"^#define\s+(CONFIG_[A-Za-z0-9_]+)\s*(.*)$")
 
 
+_INTEGER = re.compile(r"-?(?:0[xX][0-9a-fA-F]+|\d+)$")
+
+
 def write_autoconf_overlay(ksrc: str, out_path: str, kconfig, makefiles,
                            help_lines: int = 14) -> tuple[int, int]:
-    """Copy generated/autoconf.h, attaching a doc comment to every #define."""
+    """Document generated/autoconf.h without taking over its values.
+
+    The tree's file is included first, so a configuration changed since this
+    was written still reaches clangd as it is.  A symbol is redefined under its
+    description only while it holds the value described.
+    """
     src = os.path.join(ksrc, "include", "generated", "autoconf.h")
     if not os.path.isfile(src):
         return 0, 0
@@ -364,13 +372,14 @@ def write_autoconf_overlay(ksrc: str, out_path: str, kconfig, makefiles,
     with open(src, encoding="utf-8", errors="replace") as f, \
             open(out_path, "w", encoding="utf-8") as w:
         w.write("/*\n * Overlay of the tree's generated/autoconf.h.\n"
-                " *\n * Same definitions, with what Kconfig and the Makefiles know about each\n"
-                " * symbol attached as a comment so clangd can show it on hover.\n"
-                " * Written by setup-clangd.py; the kernel tree is unchanged.\n */\n")
+                " *\n * The tree's own file is read first, so the values are its current ones.\n"
+                " * Each symbol still holding the value described here is then redefined\n"
+                " * under what Kconfig and the Makefiles know about it, which is where\n"
+                " * go-to-definition lands.  Written by kbuildinfo.py; the tree is unchanged.\n */\n")
+        w.write(f'#include "{src}"\n')
         for line in f:
             m = _DEFINE.match(line)
             if not m:
-                w.write(line)
                 continue
             total += 1
             name, value = m.group(1), m.group(2).strip()
@@ -381,9 +390,13 @@ def write_autoconf_overlay(ksrc: str, out_path: str, kconfig, makefiles,
             if syms:
                 documented += 1
             builds = makefiles.get("CONFIG_" + lookup, [])
+            w.write(f"#if defined({name}) && {name} == {value}\n" if _INTEGER.match(value)
+                    else f"#ifdef {name}\n")
+            w.write(f"#undef {name}\n")
             for c in _config_comment(name, value or "(defined)", syms, builds, help_lines):
                 w.write(c + "\n")
-            w.write(line)
+            w.write(line if line.endswith("\n") else line + "\n")
+            w.write("#endif\n")
     return total, documented
 
 
@@ -425,13 +438,8 @@ def write_sections_overlay(ksrc: str, out_path: str, lds) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# compiler_types.h: attributes this clang cannot parse
+# attributes this clang cannot parse (clangd.py turns the answer into a shim)
 # ---------------------------------------------------------------------------
-
-_COUNTED_BY_DEFINE = re.compile(
-    r"^(#\s*define\s+__counted_by(?:_ptr|_le|_be)?\s*\(\s*member\s*\)\s+)"
-    r"__attribute__\s*\(\s*\(\s*__counted_by__\s*\(\s*member\s*\)\s*\)\s*\)\s*$")
-
 
 def clang_handles_forward_counted_by(clang: str = "clang") -> bool:
     """Does this clang accept counted_by naming a member declared later?
@@ -458,47 +466,6 @@ def clang_handles_forward_counted_by(clang: str = "clang") -> bool:
             os.unlink(src)
         except OSError:
             pass
-
-
-def write_compiler_types_overlay(ksrc: str, out_path: str) -> int:
-    """Copy linux/compiler_types.h with the counted_by attributes defined away.
-
-    This overlay changes meaning, unlike the other two, so it is worth being
-    plain about what it costs: nothing this build cares about.  The tree is
-    compiled by GCC, which understands the attribute; the copy exists only for
-    the clang that reads the tree, and all the attribute does for a reader is
-    let clang bounds-check accesses it cannot bounds-check anyway once the
-    struct has failed to parse.  The kernel already spells the fallback
-    itself -- `#define __counted_by(member)` with an empty body, for compilers
-    without the attribute -- so this is that branch, taken deliberately.
-
-    Done here rather than with -D because the header defines these macros
-    itself: a command-line definition is simply overwritten a few lines later.
-
-    Returns the number of definitions neutralised.
-    """
-    src = os.path.join(ksrc, "include", "linux", "compiler_types.h")
-    if not os.path.isfile(src):
-        return 0
-    changed = 0
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(src, encoding="utf-8", errors="replace") as f, \
-            open(out_path, "w", encoding="utf-8") as w:
-        w.write("/*\n * Overlay of the tree's linux/compiler_types.h.\n"
-                " *\n * Identical except that the counted_by attributes are defined empty:\n"
-                " * this clang cannot resolve one that names a member declared later in\n"
-                " * the same struct, which GCC -- the compiler that builds this tree --\n"
-                " * does.  Written by setup via kbuildinfo.py.\n */\n")
-        for line in f:
-            m = _COUNTED_BY_DEFINE.match(line.rstrip("\n"))
-            if m:
-                changed += 1
-                w.write(f"{m.group(1).rstrip()}   /* emptied: see overlay header */\n")
-                continue
-            w.write(line)
-    if not changed:
-        os.unlink(out_path)
-    return changed
 
 
 def verify_comments(path: str) -> list[str]:
@@ -543,17 +510,19 @@ def build_overlay(ksrc: str, overlay_dir: str, arch: str, verbose: bool = False)
     kconfig = index_kconfig(ksrc)
     makefiles = index_makefiles(ksrc)
     lds = index_linker_scripts(ksrc, arch)
-    ac_total, ac_doc = write_autoconf_overlay(
-        ksrc, os.path.join(overlay_dir, "generated", "autoconf.h"), kconfig, makefiles)
-    se_total, se_doc = write_sections_overlay(
-        ksrc, os.path.join(overlay_dir, "asm-generic", "sections.h"), lds)
-    counted = 0
-    if not clang_handles_forward_counted_by():
-        counted = write_compiler_types_overlay(
-            ksrc, os.path.join(overlay_dir, "linux", "compiler_types.h"))
+    autoconf = os.path.join(overlay_dir, "generated", "autoconf.h")
+    sections = os.path.join(overlay_dir, "asm-generic", "sections.h")
+    ac_total, ac_doc = write_autoconf_overlay(ksrc, autoconf, kconfig, makefiles)
+    se_total, se_doc = write_sections_overlay(ksrc, sections, lds)
+    # Whatever an earlier layout of the overlay left behind would still shadow
+    # the tree, so only what this run wrote may stay.  Written first and pruned
+    # after: a clangd reading the tree meanwhile never finds the overlay empty.
+    for root, _, names in os.walk(overlay_dir):
+        for n in names:
+            if os.path.join(root, n) not in (autoconf, sections):
+                os.unlink(os.path.join(root, n))
     problems: list[str] = []
-    for rel in ("generated/autoconf.h", "asm-generic/sections.h"):
-        p = os.path.join(overlay_dir, rel)
+    for p in (autoconf, sections):
         if os.path.isfile(p):
             problems += verify_comments(p)
     if problems:
@@ -566,10 +535,8 @@ def build_overlay(ksrc: str, overlay_dir: str, arch: str, verbose: bool = False)
               f"Makefiles: {len(makefiles)} config-gated build rules, "
               f"linker script: {len(lds)} symbols")
         print(f"    overlay: {ac_doc}/{ac_total} CONFIG defines documented, "
-              f"{se_doc}/{se_total} section declarations documented"
-              + (f", {counted} counted_by attribute(s) defined away" if counted else ""))
+              f"{se_doc}/{se_total} section declarations documented")
     return {"kconfig": len(kconfig), "makefile_rules": len(makefiles),
-            "counted_by_neutralised": counted,
             "lds_symbols": len(lds), "config_defines": ac_total,
             "config_documented": ac_doc, "section_decls": se_total,
             "section_documented": se_doc}
