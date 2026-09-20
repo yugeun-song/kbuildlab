@@ -495,8 +495,13 @@ case "$BOOT" in
         # names, so leaving it in under --no-initrd would boot a root filesystem
         # the caller asked not to have, and the flag would look like it did
         # nothing.
+        # OVMF's console leaves SGR 40 in force, which bands every kernel line on a
+        # palette whose color0 is not the background.  On its own serial terminal
+        # grub answers a color_normal write with ESC[m, which clears it.
         _gc="$(mktemp -p "$(kbl_statedir)")"
-        { printf 'search --no-floppy --set=root --file /vmlinuz\n'
+        { [[ "$console" =~ ^ttyS([0-9]+)$ ]] \
+              && printf 'serial --unit=%s\nterminal_output serial\nset color_normal=$color_normal\n' "${BASH_REMATCH[1]}"
+          printf 'search --no-floppy --set=root --file /vmlinuz\n'
           printf 'linux /vmlinuz %s\n' "$append"
           [[ -n "$INITRD" ]] && printf 'initrd /rootfs.cpio.gz\n'
           printf 'boot\n'; } > "$_gc"
