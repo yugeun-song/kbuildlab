@@ -130,6 +130,8 @@ _busy() {
 # run made its port permanently unusable: `--port N` was refused as "in use" with
 # nothing on it, and the default port silently shifted by one for ever.  The
 # retry is exactly one, and only after the owner has been shown to be gone.
+# Two runs can see the same dead owner at once, so the check and the rm run
+# under flock: without it the second rm removed the first run's fresh claim.
 _claim_port() {
     local port="$1" f lp; f="$(kbl_statedir)/kbl-run-${port}.env"
     # The launcher's start time goes in beside its pid, for the same reason
@@ -139,10 +141,13 @@ _claim_port() {
                printf 'KBL_SCHEMA=2\nKBL_GDB_PORT=%s\nKBL_LAUNCHER_PID=%s\nKBL_LAUNCHER_START=%s\nKBL_SETTING_UP=1\n' \
                    "$port" "$$" "$(kbl_proc_starttime $$ || echo)" > "$f" ) 2>/dev/null; }
     _try && return 0
-    lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$f" 2>/dev/null | head -1)"
-    [[ -n "$lp" ]] && kill -0 "$lp" 2>/dev/null && return 1      # a live owner
-    rm -f "$f" 2>/dev/null
-    _try
+    (
+        flock -w 10 9 || exit 1
+        lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$f" 2>/dev/null | head -1)"
+        [[ -n "$lp" ]] && kill -0 "$lp" 2>/dev/null && exit 1      # a live owner
+        rm -f "$f" 2>/dev/null
+        _try
+    ) 9>>"$(kbl_statedir)/kbl-claim.lock"
 }
 # Prune per-run scratch whose guest is gone.  The rule (a live qemu carries that
 # gdb port, AND something is listening on it) lives in common.sh so `attach`
@@ -420,14 +425,15 @@ case "$BOOT" in
         [[ -f "$ub" ]] || die "u-boot not found: $ub"
         bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="${bd:-boot/uboot.img}"
         [[ "$bd" == /* ]] || bd="$tree/$bd"
-        [[ -f "$bd" ]] || die "no boot disk: $bd -- pre-build it (firmware/build-bootdisk.sh)"
+        [[ -f "$bd" ]] || die "no boot disk: $bd -- build it first with your workspace's firmware/build-bootdisk.sh (not shipped with kbuildlab; see README)"
         la="$(kbl_tree_get "$tree" UBOOT_LOADADDR)"; la="${la:-0x40200000}"
         ra="$(kbl_tree_get "$tree" UBOOT_RDADDR)";   ra="${ra:-0x48000000}"
         command -v mkimage >/dev/null 2>&1 || die "mkimage (uboot-tools) required for boot uboot"
         command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
         _loadaddr="$la"                                 # attach's HW-bp goes here
         _shm_room_for "$bd"
-        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
+        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"
+        cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
         # u-boot ignores QEMU -append, so this run's bootargs ride in boot.scr.
         # The initrd is loaded, and named to booti, only when there is one: `-`
         # in its place is how booti is told there is none.  Loading it anyway
@@ -447,7 +453,8 @@ case "$BOOT" in
         _mka="$arch"; [[ "$arch" == riscv64 ]] && _mka="riscv"
         mkimage -A "$_mka" -O linux -T script -C none -d "$_bc" "$_bs" >/dev/null 2>&1 \
             || die "mkimage failed to build boot.scr"
-        mcopy -o -i "${shmdisk}@@1M" "$_bs" ::/boot.scr
+        mcopy -o -i "${shmdisk}@@1M" "$_bs" ::/boot.scr \
+            || die "could not write boot.scr into the boot-disk copy $shmdisk"
         rm -f "$_bc" "$_bs"; _bc=""; _bs=""
         # The boot disk carries the kernel and the initramfs as files, put there
         # by firmware/build-bootdisk.sh on the day it ran.  Copy today's in over
@@ -483,13 +490,15 @@ case "$BOOT" in
         [[ -f "$code" && -f "$vars" ]] || die "OVMF firmware not found: $code / $vars"
         bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="${bd:-boot/esp.img}"
         [[ "$bd" == /* ]] || bd="$tree/$bd"
-        [[ -f "$bd" ]] || die "no ESP disk: $bd -- pre-build it (firmware/build-esp.sh)"
+        [[ -f "$bd" ]] || die "no ESP disk: $bd -- build it first with your workspace's firmware/build-esp.sh (not shipped with kbuildlab; see README)"
         la="$(kbl_tree_get "$tree" UEFI_ENTRY)"; la="${la:-0x1000000}"
         _loadaddr="$la"
         command -v mcopy >/dev/null 2>&1 || die "mtools (mcopy) required for boot uefi"
         _shm_room_for "$bd"
-        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"; cp -f "$bd" "$shmdisk"
-        shmvars="$(kbl_statedir)/kbl-vars-${PORT}.fd"; cp -f "$vars" "$shmvars"
+        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"
+        cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
+        shmvars="$(kbl_statedir)/kbl-vars-${PORT}.fd"
+        cp -f "$vars" "$shmvars" || die "could not copy $vars to $shmvars"
         # Rewrite grub.cfg with this run's bootargs (kaslr/console).  The initrd
         # line is written only when there is one: grub loads what the config
         # names, so leaving it in under --no-initrd would boot a root filesystem
@@ -505,7 +514,9 @@ case "$BOOT" in
           printf 'linux /vmlinuz %s\n' "$append"
           [[ -n "$INITRD" ]] && printf 'initrd /rootfs.cpio.gz\n'
           printf 'boot\n'; } > "$_gc"
-        mcopy -o -i "${shmdisk}@@1M" "$_gc" ::/grub.cfg; rm -f "$_gc"; _gc=""
+        mcopy -o -i "${shmdisk}@@1M" "$_gc" ::/grub.cfg \
+            || die "could not write grub.cfg into the ESP copy $shmdisk"
+        rm -f "$_gc"; _gc=""
         # The ESP carries the kernel and the initramfs as files, and
         # firmware/build-esp.sh put whatever was current the day it ran into
         # them.  Copy today's in over them.  What this writes to is the per-run
