@@ -197,7 +197,8 @@ kbl_tree() {
 kbl_tree_get() {
     local tree="$1" key="$2" v
     v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$tree/tree.conf" | head -1)"
-    v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; v="${v%\"}"; v="${v#\"}"
+    if [[ "$v" == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+    else v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
     printf '%s\n' "$v"
 }
 
@@ -429,7 +430,7 @@ kbl_gdb_attached() {
 # truncated to its first line, which then matches nothing and leaves the operator
 # unable to attach to their own guest by any name.  Refused where it is written,
 # not discovered where it is read.
-kbl_state_safe() {   # kbl_state_safe VALUE WHAT
+kbl_state_safe() {   # kbl_state_safe WHAT VALUE
     case "$2" in *$'\n'*|*$'\r'*)
         die "$1 contains a newline, which the run-state file cannot carry: ${2//$'\n'/\\n}" ;;
     esac
@@ -684,15 +685,4 @@ kbl_pick_guest() {
 kbl_state_get() {   # kbl_state_get FILE KEY
     [[ -r "$1" ]] || return 1
     sed -n "s/^$2=//p" "$1" | head -1
-}
-
-# --- scratch -----------------------------------------------------------------
-kbl_rundir() {
-    local ws h base
-    ws="$(kbl_workspace 2>/dev/null || echo "$PWD")"
-    h="$(printf '%s' "$ws" | cksum | cut -d' ' -f1)"
-    base="${XDG_RUNTIME_DIR:-/tmp}/kbuildlab/$(id -u)/$h"
-    mkdir -p "$base" 2>/dev/null || base="/tmp/kbuildlab-$(id -u)-$h"
-    mkdir -p "$base" 2>/dev/null || die "cannot create a scratch directory"
-    printf '%s\n' "$base"
 }

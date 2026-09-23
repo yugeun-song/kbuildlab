@@ -143,7 +143,8 @@ while IFS='=' read -r k v; do
     # was missing -- and this is the parser whose output goes straight into gdb's
     # environment, so `GDBTOOLS_ENTRY_PA="0x40080000"` reached the debugger with
     # its quotes attached and did not parse as a number.
-    v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; v="${v%\"}"; v="${v#\"}"
+    if [[ "$v" == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
+    else v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
     [[ "$k" == GDBTOOLS_ENTRY_PA ]] && { _tree_entry="$v"; continue; }
     [[ -n "${!k:-}" ]] || export "$k=$v"
 done < <(sed -n 's/^[[:space:]]*\(GDBTOOLS_[A-Z0-9_]*\)[[:space:]]*=[[:space:]]*\(.*\)/\1=\2/p' "$tree/tree.conf")

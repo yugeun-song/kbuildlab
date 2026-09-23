@@ -124,8 +124,9 @@ cmd_init() {
     mkdir -p "$root"
     local tpl="${KBL_REPO}/templates/tree.conf.${arch}"
     [[ -r "$tpl" ]] || die "init: no QEMU template for $arch"
-    { sed -e "s/@ARCH@/$arch/" -e "s/@VERSION@/$version/" -e "s/@NAME@/$name/" \
-          "${KBL_REPO}/templates/tree.conf.in"
+    local body; body="$(<"${KBL_REPO}/templates/tree.conf.in")"
+    body="${body//@ARCH@/"$arch"}"; body="${body//@VERSION@/"$version"}"; body="${body//@NAME@/"$name"}"
+    { printf '%s\n' "$body"
       cat "$tpl"
     } > "$root/tree.conf"
     # tree.conf is the name; qemu.conf was the older one, and an editor adapter
