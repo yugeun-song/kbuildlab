@@ -200,6 +200,14 @@ kbuildlab attach [tree] [options] [-- GDB ARGS]
 The gdb-port flag differs by command: `run` names it `-g` (QEMU's own spelling),
 `attach` names it `-p`.
 
+`--boot uboot` and `--boot uefi` need a pre-built disk image (`BOOTDISK`, default
+`boot/uboot.img` or `boot/esp.img`); `--persist` needs an `S45persist` init script
+inside the guest rootfs. kbuildlab does not ship the scripts that build these:
+`firmware/build-bootdisk.sh`, `firmware/build-esp.sh` and `rootfs/post-build.sh`
+named in this document are hand-written files of the workspace kbuildlab was
+developed in. Without them a firmware boot stops with a message naming the missing
+disk, and `--persist` attaches a disk the guest never mounts.
+
 `attach` puts gdb's working directory in the kernel source, because the kernel's
 own `scripts/gdb` commands need it there -- `lx-symbols` reloads the image with a
 bare `symbol-file vmlinux`, and `lx-dmesg`/`lx-lsmod` resolve module paths the
@@ -240,9 +248,9 @@ guess.
 ```
 $ kbuildlab attach v4.6-arm64 --list
 live guests of v4.6-arm64:
-  #   port   ssh    tree             boot    kaslr  state    dbg          pid      uptime
-  1   1435   2222   v4.6-arm64       uboot   off    frozen   -            86359    00:41
-  2   14991  2223   v4.6-arm64       uboot   off    running  attached     89478    00:12
+  #   port   ssh    tree             boot    kaslr  started  now        dbg                  pid      uptime
+  1   1435   2222   v4.6-arm64       uboot   off    frozen   prelaunch  -                    86359    00:41
+  2   14991  2223   v4.6-arm64       uboot   off    running  running    attached             89478    00:12
 ```
 
 The stub serves exactly one client, and a second `attach` on the same port does
