@@ -13,6 +13,7 @@ INITRD=""; INITRD_SET=0; NO_INITRD=0; SSHPORT=""; SSHPORT_SET=0
 BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
 declare -a APPEND_EXTRA=()   # extra kernel command-line words (--append, CMDLINE_EXTRA)
 PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot)
+EMULATE=""; EMULATE_SET=0   # emulated controllers for the preset's drivers to bind
 declare -a EXTRA=()
 declare -a REST=()
 _usage() {
@@ -32,6 +33,12 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
   --net|--no-net     user/virtio NIC with ssh forward, or none
   --ssh-port N       host port forwarded to guest :22 (default 2222, auto-avoids)
   --persist|--no-persist   attach the tree's writable disk (default: tree PERSIST)
+  --emulate|--no-emulate   attach the emulated controllers the soft presets build
+                     drivers for: NVMe, AHCI, virtio-scsi and USB disks, USB and
+                     virtio input, virtio-gpu, HDA and virtio sound, virtio
+                     crypto/balloon/console, a PCI UART, an i6300esb watchdog
+                     that does nothing when it fires, Kvaser and CTU CAN on one
+                     bus, and an e1000e (default: the tree's EMULATE)
   --port|-g N        gdb port (default: the tree's GDB_PORT)
   --qmp-port N       QMP port (default: the tree's QMP_PORT); this is drgn's
                      way in -- `kbuildlab drgn` uses it, and unlike the gdbstub
@@ -65,6 +72,8 @@ while [[ $# -gt 0 ]]; do
         --bios)      BIOS="${2:?--bios needs a path}"; shift 2 ;;
         --persist)    PERSIST=1; PERSIST_SET=1; shift ;;  # attach the tree's writable disk
         --no-persist) PERSIST=0; PERSIST_SET=1; shift ;;  # boot without it (volatile rootfs)
+        --emulate)    EMULATE=1; EMULATE_SET=1; shift ;;
+        --no-emulate) EMULATE=0; EMULATE_SET=1; shift ;;
         --) shift; EXTRA=("$@"); break ;;
         -*) die "run: unknown option '$1' (pass QEMU arguments after --)" ;;
         *)  REST+=("$1"); shift ;;
@@ -630,6 +639,35 @@ if [[ $QMP -eq 1 ]]; then
           # CONFIG_FW_CFG_SYSFS + CONFIG_VMCORE_INFO
           -device vmcoreinfo)
 fi
+# Hardware the guest can have without owning any: controllers QEMU emulates,
+# each driven by its real driver (presets/soft/emulated.config builds them), so
+# probe, DMA and interrupt paths are all there to trace.  Disks are null-co --
+# reads return zeros, writes vanish -- so nothing is created on the host; the
+# watchdog is told to do nothing when it fires; the three CAN controllers share
+# one bus and hear each other.  All PCI, which every machine here has.
+[[ $EMULATE_SET -eq 1 ]] || EMULATE="$(kbl_tree_get "$tree" EMULATE)"
+if [[ "$EMULATE" == 1 ]]; then
+    CMD+=(-blockdev node-name=kblnvme,driver=null-co -device nvme,serial=kblnvme,drive=kblnvme
+          -device ich9-ahci,id=kblahci -blockdev node-name=kblsata,driver=null-co
+          -device ide-hd,bus=kblahci.0,drive=kblsata
+          -device virtio-scsi-pci,id=kblscsi -blockdev node-name=kblscsid,driver=null-co
+          -device scsi-hd,bus=kblscsi.0,drive=kblscsid
+          -device qemu-xhci,id=kblxhci -device usb-kbd,bus=kblxhci.0 -device usb-tablet,bus=kblxhci.0
+          -blockdev node-name=kblusb,driver=null-co -device usb-storage,bus=kblxhci.0,drive=kblusb
+          -device virtio-keyboard-pci -device virtio-tablet-pci -device virtio-gpu-pci
+          -audiodev none,id=kblhda -audiodev none,id=kblvsnd
+          -device intel-hda -device hda-duplex,audiodev=kblhda
+          -device virtio-sound-pci,audiodev=kblvsnd
+          -object cryptodev-backend-builtin,id=kblcrypto -device virtio-crypto-pci,cryptodev=kblcrypto
+          -device virtio-balloon-pci
+          -chardev null,id=kblvcon -device virtio-serial-pci -device virtconsole,chardev=kblvcon
+          -chardev null,id=kbluart -device pci-serial,chardev=kbluart
+          -device i6300esb -action watchdog=none
+          -object can-bus,id=kblcan -device kvaser_pci,canbus=kblcan
+          -device ctucan_pci,canbus0=kblcan,canbus1=kblcan)
+    # A second NIC only where the first is wanted: --no-net means no NIC at all.
+    [[ $NET -eq 1 ]] && CMD+=(-netdev user,id=kblnet1 -device e1000e,netdev=kblnet1)
+fi
 [[ $RUN -eq 1 ]] || CMD+=(-S)
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
@@ -696,6 +734,7 @@ fi
 [[ $NET -eq 1 ]] && say "net          user/virtio (guest 10.0.2.15); ssh -p $SSHPORT root@localhost (pw: root)" \
                  || say "net          none (--no-net)"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
+[[ "$EMULATE" == 1 ]] && say "emulate      nvme, ahci, virtio-scsi, usb, virtio input/gpu/sound/crypto/balloon/console, hda, pci uart, i6300esb, can x3$([[ $NET -eq 1 ]] && echo ', e1000e')"
 [[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock (drgn reads the guest here; it does not pause it)" \
                  || say "qmp          none (--no-qmp) -- drgn has no way in"
 [[ $KASLR -eq 1 ]] && say "kaslr        on (randomized; 'kearly kaslr auto' calibrates the slide)" \

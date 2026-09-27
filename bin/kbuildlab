@@ -40,7 +40,8 @@ kbuildlab -- containerised Linux kernel build, boot and debug
   kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
                                             (attaches the tree's INITRD rootfs;
                                              --run to boot now, --no-initrd for none,
-                                             --append to add kernel command-line words)
+                                             --append to add kernel command-line words,
+                                             --emulate for emulated controllers)
   kbuildlab drgn   [TREE] [--qmp-port N]    attach drgn to a running guest over QMP
                                             (does not pause it, and does not
                                              displace an attached gdb)

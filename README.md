@@ -234,6 +234,12 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --initrd PATH | --no-initrd
   --net | --no-net           user NIC with an ssh forward (default on); --ssh-port N
   --persist | --no-persist   attach the tree's writable /persist disk
+  --emulate | --no-emulate   attach emulated controllers for the soft presets' drivers:
+                             NVMe, AHCI, virtio-scsi and USB disks (QEMU null-co, nothing
+                             on the host), USB and virtio input, virtio-gpu, HDA and
+                             virtio sound, virtio crypto/balloon/console, a PCI UART, an
+                             i6300esb that does nothing when it fires, three CAN
+                             controllers on one bus, an e1000e (default: the tree's EMULATE)
   --append WORDS             extra kernel command-line words, repeatable
   --port|-g N                gdb port (default: the tree's GDB_PORT); --mem|-m, --smp, --bios
 
@@ -457,7 +463,7 @@ puts it back on every exit path, signal or not.
 the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
 `UPSTREAM`) and the facts `run` and `attach` consume: `QEMU_BIN`, `MACHINE`,
 `CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply `BOOT`,
-`INITRD`, `PERSIST`, `CPU_PAGING` and the firmware paths (`UBOOT`,
+`INITRD`, `PERSIST`, `EMULATE`, `CPU_PAGING` and the firmware paths (`UBOOT`,
 `OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`), plus two that steer the guest itself:
 `CMDLINE_EXTRA` (words appended to the kernel command line in every boot mode --
 `-append` for a direct boot, `setenv bootargs` in the u-boot script, the `linux`

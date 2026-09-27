@@ -87,6 +87,15 @@ UPSTREAM=stable          # stable | mainline
 # do_ni_syscall answers each one with a full register dump to the console.
 # CMDLINE_EXTRA=GLIBC_TUNABLES=glibc.pthread.rseq=0
 
+# --- emulated controllers ------------------------------------------------------
+# EMULATE=1 makes `kbuildlab run` attach, unless told otherwise, the controllers
+# QEMU emulates that presets/soft builds drivers for: NVMe, AHCI, virtio-scsi and
+# USB disks backed by nothing on the host, USB and virtio input, virtio-gpu, HDA
+# and virtio sound, virtio crypto/balloon/console, a PCI UART, a watchdog that
+# does nothing when it fires, three CAN controllers on one bus, and an e1000e.
+# --emulate and --no-emulate decide for one run.
+# EMULATE=1
+
 # --- where the gdbstub listens -----------------------------------------------
 # Default 127.0.0.1.  qemu's own `-gdb tcp::N` spelling binds 0.0.0.0 AND [::],
 # and a gdbstub is an unauthenticated read/write channel into the guest's memory,
