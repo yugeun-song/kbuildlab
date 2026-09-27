@@ -153,7 +153,9 @@ cmd_image() {
 }
 
 # ---------------------------------------------------------------- helpers
-_in_container() {   # _in_container WORKDIR CMD...
+# The command prefix that runs a program in the active image with WORKDIR as
+# its working directory, left in _KBL_RUN; RUN-OPTIONs go to `run` itself.
+_container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     local c ws wd img; c="$(kbl_container)"; wd="$1"; shift
     local _ws_raw; _ws_raw="$(kbl_workspace)" || exit 1
     ws="$(kbl_assert_mountable "$_ws_raw")" || exit 1
@@ -184,8 +186,14 @@ _in_container() {   # _in_container WORKDIR CMD...
         "${ws}"/*) : ;;
         *) _repomnt=(-v "${KBL_REPO}:${KBL_REPO}:ro") ;;
     esac
-    "$c" run --rm "${_idopt[@]+"${_idopt[@]}"}" "${_repomnt[@]+"${_repomnt[@]}"}" \
-        -v "${ws}:${ws}" -w "$wd" "$img" "$@"
+    _KBL_RUN=("$c" run --rm "$@" "${_idopt[@]+"${_idopt[@]}"}" "${_repomnt[@]+"${_repomnt[@]}"}"
+              -v "${ws}:${ws}" -w "$wd" "$img")
+}
+
+_in_container() {   # _in_container WORKDIR CMD...
+    local wd="$1"; shift
+    _container_run "$wd" || exit 1
+    "${_KBL_RUN[@]}" "$@"
 }
 
 _cross() {
@@ -375,10 +383,11 @@ cmd_build() {
 # The fourth index is clangd's, and it is the odd one out in three ways worth
 # stating, because each is why it is done here rather than somewhere else.
 #
-# It needs no container.  ctags, cscope and gtags run inside the build image
-# because they are the kernel's own make targets; clangd's input is the .cmd
-# files kbuild has already written, and the clangd that will read the result is
-# the one on the host, so the host is where it has to be computed.
+# It is computed on the host.  ctags, cscope and gtags run inside the build
+# image because they are the kernel's own make targets; clangd's input is the
+# .cmd files kbuild has already written, and the clangd that will read the
+# result is the one on the host.  The image is only asked what the build
+# compiler answers where clang would answer differently.
 #
 # It writes nothing into the tree.  A compilation database in the source root
 # would show up in `git status`, and `make mrproper` would take it away again;
@@ -403,23 +412,35 @@ _clangd_index() {
     local ws d; local -a peers=()
     ws="$(kbl_workspace)" || return 0
     for d in "$ws"/*/; do kbl_is_tree "${d%/}" && peers+=(--peer "${d%/}"); done
+    # The build image answers what clangd's clang would answer differently --
+    # __clang__, __GNUC__, the __has_* tests -- and later measures the result,
+    # so the generator is told how to reach it.  -i: both read their questions
+    # from stdin.
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    _container_run "$(kbl_tree_src "$tree")" -i || return 0
+    # KBL_CLANGD_JOBS caps the parallel work of both steps, for a machine that
+    # has other things to do; unset, each sizes itself to what is free.
+    local -a jobs=()
+    [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
     say "indexing     clangd (compile_commands.json, out of tree)"
-    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" --workspace "$ws" "${peers[@]}" gen --force \
-        || { warn "clangd index failed (ctags/cscope/gtags are still current)"; return 0; }
+    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" --workspace "$ws" "${peers[@]}" \
+        --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force "${jobs[@]+"${jobs[@]}"}" \
+        || { warn "clangd index failed (ctags/cscope/gtags are still current)"; return 1; }
 
     # And then build clangd's own index, here, rather than leaving it to
     # whichever clangd an editor starts later.  It is the same work; done here
     # it is finished before the editor opens, instead of competing with the
     # reading you opened the editor to do.  clangd keys its shards on file
     # contents, so a rebuild that touched forty files re-indexes forty files
-    # and an already-warm tree returns in seconds.
+    # and an already-warm tree costs only the minutes clangd takes to read the
+    # project back.
     #
     # Synchronous on purpose.  A background daemon this command started and did
     # not mention would be a process the operator has to discover; `tags` is
     # already the slow command, and the wait is visible and interruptible.
     [[ "${KBL_CLANGD_WARM:-1}" == "0" ]] && { say "clangd       index left cold (KBL_CLANGD_WARM=0)"; return 0; }
     say "indexing     clangd background index"
-    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" warm \
+    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" warm "${jobs[@]+"${jobs[@]}"}" \
         || warn "clangd index warming did not finish (the editor will resume it)"
 }
 
@@ -453,7 +474,10 @@ cmd_tags() {
         fi
         _in_container "$src" sh -c 'ls -la tags cscope.out GTAGS 2>/dev/null || true'
     fi
-    [[ $clangd -ne 0 ]] && _clangd_index "$tree"
+    # Asked for clangd alone, its failure is the command's.
+    if [[ $clangd -ne 0 ]]; then
+        _clangd_index "$tree" || [[ $clangd -ne 2 ]] || exit 1
+    fi
     return 0
 }
 

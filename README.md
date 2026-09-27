@@ -65,17 +65,35 @@ of it rather than taken from a list:
 
 - **GCC-only flags.** `-fconserve-stack`, `-mabi=lp64` on arm64,
   `-mindirect-branch=…`: clang answers each with a driver error, and one it
-  cannot parse at all kills the whole file. Every unique flag in the database
-  is probed against the real clang for that tree's target, and only what clang
-  rejects is removed — which is what keeps it right across trees, since
-  `-mabi=lp64` is wrong on arm64 and correct on riscv64.
-- **Sub-builds for another machine.** x86_64 compiles its boot stub and
-  realmode trampoline as i386; riscv64 builds a 32-bit compat vDSO. Those get a
-  fragment naming their real target, so the code parses as what it is.
+  cannot parse at all kills the whole file. Every option a unit uses is probed
+  against the real clang for the target that unit compiles for, and only what
+  clang rejects is dropped from its entry — which is what keeps it right across
+  trees, since `-mabi=lp64` is wrong on arm64 and correct on riscv64.
+- **Units for another machine.** x86_64 compiles its boot stub as i386, riscv64
+  builds a 32-bit compat vDSO, and every tree builds host tools. Each entry
+  names the build compiler's own target, as the build image reports it, and
+  keeps the options that move it (`-m16`, `-march=rv32ima`); clang is asked
+  which options those are, so no directory is named anywhere.
+- **Files built more than once.** riscv64 compiles `lib/string.c` for the
+  kernel, again for its early-boot stub with `-D__DISABLE_EXPORTS`, and again
+  for the purgatory; clangd reads one entry per file. The entry is the build
+  that reads the file itself the way most units do, then the largest share of
+  everything else it reads that way. kbuild's generator lists them only in
+  the order it walked the tree.
 - **Headers opened on their own.** A kernel header is not self-contained —
   `asm/atomic_lse.h` has no idea what `atomic_t` is, because in a real build
   `asm/atomic.h` got there first. Each header gets a database entry
-  reproducing the includes that precede it in a source that uses it.
+  reproducing the includes that precede it in a source that uses it. A quoted
+  include is looked up beside the file that names it first, as the compiler
+  does, so `kernel/sched/sched.h` gets one too, and so does a `.c` file that
+  another includes, such as `kernel/locking/rtmutex.c`. The source is one whose
+  unit compiled the header the way that shows the most of what the units
+  compile, read off the build compiler's own output: `arch/x86/boot/boot.h`
+  takes a setup-code source, not the decompressor that defines its guard away.
+  A unit that undefines a Kconfig symbol compiles against a config of its own
+  -- the 32-bit vDSO passing for a 32-bit kernel, the decompressor leaving
+  paravirt out -- so it decides how a file reads only where nothing else reads
+  that file; `include/linux/bitops.h` reads as the kernel compiles it.
 - **Inactive regions of a header.** clangd greys out an `#if` group from the
   macros its reconstructed preamble leaves defined; the build decides from the
   macros defined where a source first reaches the header. `kernel/sched/core.c`
@@ -84,6 +102,17 @@ of it rather than taken from a list:
   Each header's context source is replayed through the preprocessor, and the
   macros its conditionals depend on are restored to their state at that point
   by a forced include holding only the difference.
+- **clang answering for itself.** `__clang__`, `__GNUC__` and the `__has_*`
+  tests are the compiler's identity: clangd would take `compiler-clang.h` where
+  the build took `compiler-gcc.h`, and grey `__attribute__((__copy__))` because
+  clang has no such attribute. The build compiler is asked, inside the build
+  image and once per flag set, the questions the tree's conditionals ask, and
+  its answers lead every command line wherever clang can follow them. Only
+  what a condition evaluates is answered: a name an `#ifdef` checks, and the
+  macros an `#if` expands. A macro reached only from code keeps clang's
+  definition, since clang spells GCC keywords such as `__seg_gs` as macros. A
+  builtin only the build compiler has keeps clang's answer, since code calling
+  it would not parse.
 - **Source the tree never compiles.** A tree configured for arm64 does not
   build `arch/powerpc`, and no command line makes powerpc source parse through
   an aarch64 one. Those paths keep navigation and lose diagnostics.
@@ -92,6 +121,12 @@ of it rather than taken from a list:
   a diagnostic, so `Diagnostics.Suppress` never reaches it. On a tree whose
   diagnostics are otherwise silenced it is the one thing still shown, and
   lifting the cap removes it at its source.
+
+Nothing in the generator names a directory, header or macro of a particular
+tree. The include paths, the arch directory, the header floor (what most
+sources include first), each unit's target and the compiler's own headers are
+read from the build's units and the build compiler on every run, so after a
+config or option change the next `kbuildlab tags` follows it.
 
 `counted_by` naming a member declared later is accepted by GCC and rejected by
 this clang. The macros that expand to it are found by preprocessing the build's
@@ -112,7 +147,8 @@ you are trying to read — and after every rebuild there is something new to do,
 so it happens again. It is the same work either way; done from the command
 line it is finished before the editor opens. clangd keys its shards on file
 contents, so it is incremental by construction: a rebuild that touched forty
-files re-indexes forty files, and an already-warm tree returns in seconds.
+files re-indexes forty files, and an already-warm tree costs only the minutes
+clangd takes to read the project back.
 
 #### Editors
 
@@ -136,13 +172,16 @@ cpptools' parser off (its debugger is untouched) and leaves clangd reading the
 same configuration Neovim reads.
 
 Measured on a 3887-file tree with two indexing threads: ten minutes from
-nothing, seven seconds when already warm.
+nothing. Reading an already-warm project back is not free either: on
+v4.6-arm64's 5237 entries and one shared core, clangd began after 70 seconds
+and was done after 216. `warm` waits for clangd to say so, not for a timer.
 
 ```
 kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
                       [--clangd-only]   just the clangd parts
                       [--no-warm]       database and config, leave the index cold
 KBL_CLANGD=0 / KBL_CLANGD_WARM=0        the same two, from the environment
+KBL_CLANGD_JOBS=N                       cap the parallel work of both steps
 
 python3 lib/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
 ```
@@ -157,10 +196,16 @@ python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 \
 ```
 
 Inactive regions are measured the same way, against the build rather than
-against an expectation. Every `#if` group of a file is marked, the real
-translation unit is preprocessed, and the groups that survive are compared with
-the regions clangd reports; a header is judged in the translation unit of the
-source its entry was derived from. The exit status is non-zero when any differ.
+against an expectation. Every unit goes through the build compiler inside the
+build image with `-fdirectives-only`, which copies each surviving line
+verbatim, so what each unit compiled is read off its output. A file compiled
+under different macros by different units, or twice by one, has several
+readings; one parse can show only one of them. A file clangd shows exactly as
+the reading that shows the most of what the units compile is reported with the
+lines only another reading compiles. A file shown as a less common reading, or
+as no reading at all, is reported as differing, and the exit status is
+non-zero when any differ. `regions` reaches the build image the way the last
+`kbuildlab tags` did.
 
 ```sh
 python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions            # a sample
@@ -168,11 +213,14 @@ python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions --all -S 60
 python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions include/linux/compiler_types.h
 ```
 
-Neither step starts over. A source's trace and a file's verdict are kept under
-a digest of the command, the code that computed them, clangd, the tree's part
-of the config and every file kbuild recorded that source as reading, so a
-rebuild that touched forty files repeats the work for what includes those
-forty. `regions --fresh` asks again regardless.
+Neither step starts over. A source's trace, a unit's reading and what clangd
+shades in a file are kept under a digest of the command, the code that computed
+them, clangd, the tree's part of the config and every file kbuild recorded as
+read, so a rebuild that touched forty files repeats the work for what includes
+those forty. What kbuild recorded includes the file Kconfig touches for each
+symbol a unit tests, which fixdep lists in place of `autoconf.h`: a config
+change that edits no header still reaches every result that depends on it.
+`regions --fresh` asks clangd again regardless.
 
 Every command takes `-h`/`--help`; `run` and `attach` carry the options worth
 knowing.
