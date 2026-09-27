@@ -516,11 +516,23 @@ per-arch split fails on a specific class of option.
 | --- | --- |
 | `common.config` | what all three architectures can set identically |
 | `arch/<arch>.config` | what looks shared but is not, plus each architecture's own |
+| `soft/*.config`, `arch/<arch>.soft.config` | simulated devices, emulated controllers' drivers, and what traces them -- applied softly |
 | `verify.sh` | reads the built `.config` back and fails on anything that did not survive |
 
 When a tree tracks `UPSTREAM=mainline`, `arch/<arch>-mainline.config` stands in
 for `arch/<arch>.config` where mainline has moved past the pinned release --
 riscv64 already ships one.
+
+The soft half is applied after the rest by `lib/softconfig.py`, and it never
+moves an answer the `.config` already has. A line that would build in a
+subsystem the config holds as a module -- directly, or through a `select` --
+is taken as a module, or left off; a line for a symbol a kernel does not define,
+or defines without a prompt, is skipped. So one list serves every kernel
+version and every arch defconfig, and what each tree got is printed: on,
+lowered, as a module, or off for want of a dependency. A kernel older than the
+one `common.config` says it was verified against takes the hard half softly as
+well, since it names symbols that kernel lacks or restricts -- which is how
+v4.6 shares the presets instead of keeping its own.
 
 Every line was checked against the 6.12 source. Promptless symbols are
 deliberately absent: `make olddefconfig` recomputes them from their selecters,
@@ -561,8 +573,9 @@ instead.
   `__pa()`/`virt_to_phys()` given an address outside the linear map, which is
   exactly what handing it a fixmap or vmalloc address does; `MEMTEST` reports
   bad ranges through memblock. v4.6 predates the generic ptdump and restricts
-  both `DEBUG_WX` and `DEBUG_VIRTUAL` to x86, so that tree states the arm64
-  equivalent it does have, `ARM64_PTDUMP`, in its own `config-fragment`.
+  both `DEBUG_WX` and `DEBUG_VIRTUAL` to x86; the arm64 equivalent it does
+  have, `ARM64_PTDUMP`, is in `arch/arm64.soft.config`, taken by any kernel
+  that still has the symbol.
 
   `ARCH_KEEP_MEMBLOCK` -- which keeps the memblock arrays past `mem_init()`, so
   `/sys/kernel/debug/memblock` exists -- is *not* set. It is promptless; arm64
@@ -575,6 +588,23 @@ instead.
   `memblock=debug`, `early_ioremap_debug` and `mminit_loglevel=4` are
   `early_param()` in all seven trees, so `CMDLINE_EXTRA=` in `tree.conf` or a
   one-off `kbuildlab run --append` reaches them.
+- **Devices without the hardware.** `soft/simulators.config` turns on what the
+  kernel can stand in for: the interrupt simulator (`IRQ_SIM`, promptless,
+  reached through gpio-sim and its kin), IIO, I2C, null_blk, scsi_debug, NAND,
+  NVMe loop, netdevsim, wireless, 802.15.4, Bluetooth, NFC, V4L2, CEC and DVB
+  test devices, virtual KMS, dummy sound cards, a dummy USB controller pair,
+  uinput/uhid, test power supplies and a virtual TPM. `soft/emulated.config`
+  builds the drivers for what `kbuildlab run --emulate` has QEMU emulate --
+  NVMe, AHCI, virtio-scsi, xHCI, HDA, e1000e, an i6300esb, Kvaser and CTU CAN,
+  and the virtio family -- so real drivers probe real controller models. Built
+  in wherever the tree's answers allow, so a simulator is there at boot; what a
+  config holds as a module reaches the guest appended to its initramfs.
+- **Seeing them work.** `soft/observability.config` adds what ftrace and perf
+  need on top of the tracers: `DYNAMIC_DEBUG` for any driver's `pr_debug`,
+  `GENERIC_IRQ_DEBUGFS` (every irq domain, irq_sim's included, and interrupt
+  injection by hand), `SCHEDSTATS` for the `sched_stat_*` tracepoints `perf sched`
+  reads, usbmon, the drop monitor, pktgen, mac80211's messages as trace events,
+  and the debugfs views of USB gadgets, block, NVMe, SCSI, V4L2 and ALSA.
 
 ### What it does not
 
