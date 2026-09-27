@@ -14,6 +14,7 @@ BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
 declare -a APPEND_EXTRA=()   # extra kernel command-line words (--append, CMDLINE_EXTRA)
 PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot)
 EMULATE=""; EMULATE_SET=0   # emulated controllers for the preset's drivers to bind
+MODULES=1                   # append the modules kbuildlab build staged to the initramfs
 declare -a EXTRA=()
 declare -a REST=()
 _usage() {
@@ -39,6 +40,9 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      crypto/balloon/console, a PCI UART, an i6300esb watchdog
                      that does nothing when it fires, Kvaser and CTU CAN on one
                      bus, and an e1000e (default: the tree's EMULATE)
+  --modules|--no-modules   append the modules `kbuildlab build` staged to the
+                     initramfs, those the devices present ask for loaded at
+                     boot (default: on whenever the build has modules)
   --port|-g N        gdb port (default: the tree's GDB_PORT)
   --qmp-port N       QMP port (default: the tree's QMP_PORT); this is drgn's
                      way in -- `kbuildlab drgn` uses it, and unlike the gdbstub
@@ -74,6 +78,8 @@ while [[ $# -gt 0 ]]; do
         --no-persist) PERSIST=0; PERSIST_SET=1; shift ;;  # boot without it (volatile rootfs)
         --emulate)    EMULATE=1; EMULATE_SET=1; shift ;;
         --no-emulate) EMULATE=0; EMULATE_SET=1; shift ;;
+        --modules)    MODULES=1; shift ;;
+        --no-modules) MODULES=0; shift ;;
         --) shift; EXTRA=("$@"); break ;;
         -*) die "run: unknown option '$1' (pass QEMU arguments after --)" ;;
         *)  REST+=("$1"); shift ;;
@@ -196,7 +202,7 @@ fi
 # behind and make that port unusable until something pruned it.
 _state="$(kbl_statedir)/kbl-run-${PORT}.env"
 _loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
-shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""   # per-run scratch
+shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""; _ird=""   # per-run scratch
 qmpsock=""                                                 # QMP unix socket, same
 
 # The terminal `-nographic` is about to put into raw mode, saved here so it can be
@@ -242,7 +248,7 @@ _cleanup() {
         _owner="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$_state" | head -1)"
         [[ "$_owner" == "$$" ]] && rm -f "$_state"
     fi
-    rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} \
+    rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} ${_ird:+"$_ird"} \
           ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"}
     # Last, and only once the guest that owns the terminal is gone.  A no-op on
     # every path where qemu put it back itself, and the difference between a
@@ -279,6 +285,23 @@ if [[ $NO_INITRD -eq 0 ]]; then
         [[ "$INITRD" == /* ]] || INITRD="$tree/$INITRD"
         [[ -f "$INITRD" ]] || die "initrd not found: $INITRD
        build the rootfs, fix INITRD in $tree/tree.conf, or pass --no-initrd"
+    fi
+fi
+
+# The build's modules, staged beside the tree by `kbuildlab build`, follow the
+# rootfs as a second archive: the kernel unpacks concatenated archives as one.
+# An archive older than the build's own modules would not load into this
+# kernel, so it is left out and said so.
+rootfs="$INITRD"; mods=""
+if [[ -n "$INITRD" && $MODULES -eq 1 && -f "$tree/modules.cpio.gz" ]]; then
+    if [[ "$src/modules.order" -nt "$tree/modules.cpio.gz" \
+          || -n "$(find "$src" -name '*.ko' -newer "$tree/modules.cpio.gz" -print -quit 2>/dev/null)" ]]; then
+        warn "$tree/modules.cpio.gz is older than the build's modules; booting without them
+       (kbuildlab build $(basename "$tree") stages them again)"
+    else
+        _ird="$(kbl_statedir)/kbl-initrd-${PORT}.cpio.gz"
+        cat "$INITRD" "$tree/modules.cpio.gz" > "$_ird" || die "could not write $_ird"
+        INITRD="$_ird"; mods="$tree/modules.cpio.gz"
     fi
 fi
 
@@ -726,11 +749,12 @@ _write_state
 say "guest        $(basename "$tree") ($arch) on :$PORT"
 if [[ "$BOOT" == direct ]]; then
     say "boot         direct (-kernel; head.S _text immediately)"
-    [[ -n "$INITRD" ]] && say "initrd       $INITRD" \
+    [[ -n "$INITRD" ]] && say "initrd       $rootfs" \
                        || say "initrd       none -- kernel panics at mount-root if continued (early-boot only)"
 else
     say "boot         $BOOT firmware chain; rootfs on boot disk"
 fi
+[[ -n "$mods" ]] && say "modules      $mods appended; loaded at boot for the devices present"
 [[ $NET -eq 1 ]] && say "net          user/virtio (guest 10.0.2.15); ssh -p $SSHPORT root@localhost (pw: root)" \
                  || say "net          none (--no-net)"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"

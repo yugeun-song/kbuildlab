@@ -378,6 +378,50 @@ cmd_build() {
         "${cc[@]+"${cc[@]}"}" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
     [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
     say "vmlinux      $src/vmlinux"
+    _stage_modules "$tree"
+}
+
+# The guests boot a rootfs that carries none of this build's modules, so the
+# build leaves them beside the tree as a cpio archive that run appends to the
+# initramfs; the kernel unpacks concatenated archives as one.  Stripped, since
+# the guest only loads them and gdb reads the build's own copies.  With them
+# goes an init script that loads what the devices present at boot ask for, as
+# udev would, so an emulated controller whose driver is a module binds.  Only
+# lib/modules and that script are named, never a directory the rootfs already
+# has: the kernel replaces a path whose type differs, so a rootfs whose /lib
+# is a symlink would lose it.
+_stage_modules() {   # _stage_modules TREE
+    local tree="$1" src arch out stage hook=etc/init.d/S10kbuildlab-coldplug
+    src="$(kbl_tree_src "$tree")"; out="$tree/modules.cpio.gz"
+    if [[ ! -s "$src/modules.order" ]]; then rm -f "$out"; return 0; fi
+    [[ -f "$out" && ! "$src/modules.order" -nt "$out" \
+       && -z "$(find "$src" -name '*.ko' -newer "$out" -print -quit)" ]] && return 0
+    arch="$(kbl_tree_arch "$tree")"; stage="$tree/.modules-stage"
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
+    rm -rf "$stage" && mkdir -p "$stage/$(dirname "$hook")" \
+        || { warn "modules: cannot write $stage"; return 0; }
+    cat > "$stage/$hook" <<'EOF'
+#!/bin/sh
+[ "$1" = start ] || exit 0
+printf 'Loading modules for the devices present: '
+find /sys/devices -name modalias | while read -r f; do cat "$f"; done 2>/dev/null \
+    | sort -u | xargs -r modprobe -a -q 2>/dev/null
+echo OK
+EOF
+    chmod 755 "$stage/$hook"
+    if _in_container "$src" make ARCH="$(_karch "$arch")" CROSS_COMPILE="$(_cross "$arch")" \
+           "${cc[@]+"${cc[@]}"}" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install \
+           >/dev/null \
+       && _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | gzip -9" \
+           > "$out.tmp"; then
+        mv -f "$out.tmp" "$out"
+        say "modules      $out ($(grep -c . "$src/modules.order") for the guest, $(du -h "$out" | cut -f1))"
+    else
+        rm -f "$out.tmp"
+        warn "modules: not staged for the guest (see above)"
+    fi
+    rm -rf "$stage"
 }
 
 # ---------------------------------------------------------------- tags

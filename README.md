@@ -240,6 +240,8 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
                              virtio sound, virtio crypto/balloon/console, a PCI UART, an
                              i6300esb that does nothing when it fires, three CAN
                              controllers on one bus, an e1000e (default: the tree's EMULATE)
+  --modules | --no-modules   append the modules `kbuildlab build` staged to the initramfs
+                             (default on whenever the build has modules)
   --append WORDS             extra kernel command-line words, repeatable
   --port|-g N                gdb port (default: the tree's GDB_PORT); --mem|-m, --smp, --bios
 
@@ -253,6 +255,16 @@ kbuildlab attach [tree] [options] [-- GDB ARGS]
 
 The gdb-port flag differs by command: `run` names it `-g` (QEMU's own spelling),
 `attach` names it `-p`.
+
+The rootfs carries none of the build's modules, so `kbuildlab build` stages them
+beside the tree as `modules.cpio.gz`, stripped, since gdb reads the build's own
+copies, and `run` appends it to the initramfs in every boot mode: the kernel
+unpacks concatenated archives as one. An init script in the same archive loads
+what the devices present at boot ask for, as udev would, so an emulated
+controller whose driver is a module binds; `modprobe vivid` and the like load
+the rest. The archive names only `lib/modules` and that script, never a
+directory the rootfs already has, because the kernel replaces a path whose type
+differs. An archive older than the build's modules is left out, and `run` says so.
 
 `--boot uboot` and `--boot uefi` need a pre-built disk image (`BOOTDISK`, default
 `boot/uboot.img` or `boot/esp.img`); `--persist` needs an `S45persist` init script
