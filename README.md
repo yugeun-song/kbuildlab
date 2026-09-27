@@ -718,13 +718,23 @@ belongs in the config, where the read-back check can see it.
 `KCFLAGS` is the kernel's own append-to-`KBUILD_CFLAGS` variable, so what is put
 there lands *after* everything the tree's Makefile set and wins where the two
 conflict. That is how a flag the kernel hard-codes gets undone without editing
-the kernel. v4.6 is the case that needs it: its `Makefile:719` adds
+the kernel. v4.6 is the case that showed it: its `Makefile:719` adds
 `-fno-var-tracking-assignments` unconditionally, a 2013 decision about gcc build
 times, and variable-tracking assignments are most of what keeps an optimised
-local from printing as `<optimized out>`. Keep this to flags that change debug
+local from printing as `<optimized out>`. kbuildlab now adds
+`-fvar-tracking-assignments` itself to any kernel whose Makefile turns it off,
+so no tree has to remember to. Keep this to flags that change debug
 information only -- gcc guarantees those do not change code generation -- because
 a flag that changes the objects belongs in the config, where the read-back check
-can see it.
+can see it. The one exception is read off the Makefile too: a kernel that never
+turns PIE off was written for compilers that did not default to it, and under
+one that does, its arm64 modules do not build at all (`-mcmodel=large` has no PIC
+form), so it gets the `-fno-PIE` later kernels give themselves. One make variable
+is read off the tree the same way: a kernel whose `scripts/Kbuild.include` escapes
+`#` in its `.cmd` files the way make 4.2 wanted has every command read back cut
+short by make 4.3 and later, so every build found every command changed and
+compiled everything again. kbuildlab passes the `make-cmd` later kernels fixed,
+with its `$(pound)`, on the command line, and v4.6 builds incrementally again.
 
 Measured ceilings, one build per rung, newest first:
 

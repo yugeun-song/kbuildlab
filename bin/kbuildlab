@@ -280,9 +280,31 @@ _tree_gcc()   { kbl_tree_get "$1" GCC; }
 # editing the kernel.  Keep it to flags that change only debug information --
 # gcc guarantees those do not change code generation -- because anything that
 # changes the objects belongs in the config, where the read-back check sees it.
+# One such flag needs no tree to ask for it: a kernel whose Makefile turns off
+# var-tracking-assignments, as older ones did for compilers long gone, gets it
+# back, since it is what lets gdb say where a local lives after optimisation.
+# The one exception to the rule above is also read off the Makefile: a kernel
+# that never turns PIE off was written for compilers that did not default to
+# it, and under one that does its arm64 modules cannot build at all
+# (-mcmodel=large has no PIC form).  It gets the -fno-PIE later kernels give
+# themselves, which puts back the code generation it was written for.
+#
+# One make variable is read off the tree the same way.  A kernel whose
+# Kbuild.include escapes '#' in .cmd files as make 4.2 wanted has every command
+# read back cut short by make 4.3 and later, so each build finds every command
+# changed and compiles everything again.  Later kernels fixed make-cmd with a
+# $(pound); given on the command line, that definition fixes this kernel too.
 _cc_args() {   # _cc_args TREE ARCH
-    local g pre hf kf; g="$(_tree_gcc "$1")"
+    local g pre hf kf mk; g="$(_tree_gcc "$1")"
     kf="$(kbl_tree_get "$1" KCFLAGS)"; hf="$(kbl_tree_get "$1" HOSTCC_FLAGS)"
+    mk="$(kbl_tree_src "$1")/Makefile"
+    if grep -q -- '-fno-var-tracking-assignments' "$mk" 2>/dev/null \
+       && [[ " $kf " != *" -fvar-tracking-assignments "* ]]; then
+        kf="${kf:+$kf }-fvar-tracking-assignments"
+    fi
+    if [[ -f "$mk" ]] && ! grep -q -- '-fno-PIE' "$mk" && [[ " $kf " != *" -fno-PIE "* ]]; then
+        kf="${kf:+$kf }-fno-PIE"
+    fi
     # Each key stands on its own.  HOSTCC_FLAGS in particular must not need GCC= to
     # take effect: a tree can want -fcommon on the image's own compiler without
     # naming a version, and a flag that is read, accepted and then dropped is worse
@@ -294,6 +316,11 @@ _cc_args() {   # _cc_args TREE ARCH
         printf '%s\n' "HOSTCC=gcc $hf"
     fi
     [[ -n "$kf" ]] && printf '%s\n' "KCFLAGS=$kf"
+    local inc; inc="$(kbl_tree_src "$1")/scripts/Kbuild.include"
+    if grep -qF 'subst \#,\\\#,' "$inc" 2>/dev/null && ! grep -q '^pound' "$inc"; then
+        printf '%s\n' 'pound=#' \
+            'make-cmd=$(call escsq,$(subst $(pound),$$(pound),$(subst $$,$$$$,$(cmd_$(1)))))'
+    fi
     return 0
 }
 
