@@ -43,6 +43,27 @@ cscope, gtags where the image ships GNU GLOBAL, and the clangd index. It never
 re-applies the preset, because your local answers to new Kconfig symbols are
 yours.
 
+Every `config` and `update` also records the tree in this repository, under
+`lab/trees/NAME/`: its `tree.conf`, any `config-fragment` of its own, and its
+`.config` as `savedefconfig` writes it -- only what differs from the arch
+defconfig. Beside them, `lab/workspace/` keeps the workspace's own files -- the
+text files at its top and at the top of every directory a `tree.conf` points
+into, which is where the rootfs and the firmware are built -- and `sources`,
+the path, URL and commit of each source checkout the workspace builds from
+(buildroot, u-boot), read off the checkouts themselves. A file GitHub would
+refuse (over 100 MiB) is generated, not written, and is left out by name. A
+record spells the workspace's own path as `@KBL_WORKSPACE@`, so it names no
+machine, and comes back naming wherever the workspace is then.
+
+So the workspace can be deleted, or kbuildlab cloned onto another machine:
+
+```sh
+kbuildlab init --workspace ~/kernels --restore   # files, checkouts, every tree
+kbuildlab sync NAME && kbuildlab config NAME     # config starts from the record
+```
+
+`init --restore` never overwrites a file that is there. Commit `lab/` to keep it.
+
 ### The clangd index
 
 `kbuildlab tags` builds a fourth index, for clangd, alongside the other three.
@@ -268,11 +289,12 @@ differs. An archive older than the build's modules is left out, and `run` says s
 
 `--boot uboot` and `--boot uefi` need a pre-built disk image (`BOOTDISK`, default
 `boot/uboot.img` or `boot/esp.img`); `--persist` needs an `S45persist` init script
-inside the guest rootfs. kbuildlab does not ship the scripts that build these:
-`firmware/build-bootdisk.sh`, `firmware/build-esp.sh` and `rootfs/post-build.sh`
-named in this document are hand-written files of the workspace kbuildlab was
-developed in. Without them a firmware boot stops with a message naming the missing
-disk, and `--persist` attaches a disk the guest never mounts.
+inside the guest rootfs. The scripts that build these --
+`firmware/build-bootdisk.sh`, `firmware/build-esp.sh`, `rootfs/post-build.sh` --
+belong to the workspace, not to kbuildlab; the records under `lab/workspace/`
+keep a copy, and `init --restore` puts them back. Without them a firmware boot
+stops with a message naming the missing disk, and `--persist` attaches a disk
+the guest never mounts.
 
 `attach` puts gdb's working directory in the kernel source, because the kernel's
 own `scripts/gdb` commands need it there -- `lx-symbols` reloads the image with a
