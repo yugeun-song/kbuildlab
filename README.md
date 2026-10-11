@@ -1,14 +1,10 @@
 # kbuildlab
 
-Build a Linux kernel in a container, boot it in QEMU, debug it with gdb.
+Build a Linux kernel in a container, boot it in QEMU, debug it with gdb or drgn.
 
-The container is the point. A rolling-release host moves its toolchain whenever
-it likes, and while the kernel itself usually survives that, buildroot and the
-rest of the userspace tooling do not. Pinning the build environment to a stable
-base separates *what my machine has today* from *what this kernel was built
-with*, and makes a tree reproducible on a different machine a year later.
-
-Targets **arm64**, **riscv64** and **x86_64**.
+The container pins the build environment to a stable base, so *what my machine has
+today* stays separate from *what this kernel was built with* and a tree rebuilds
+on another machine a year later. Targets **arm64**, **riscv64** and **x86_64**.
 
 ## Install
 
@@ -17,9 +13,8 @@ git clone https://github.com/yugeun-song/kbuildlab
 kbuildlab/bin/kbuildlab doctor          # what is missing, by name
 ```
 
-Put `bin/kbuildlab` on your PATH however you prefer. Nothing here installs
-packages, edits sysctls or touches anything outside the workspace you name: if a
-prerequisite is absent, the tool says which one and stops.
+Put `bin/kbuildlab` on your PATH. Nothing here installs packages or changes a
+system setting: a missing prerequisite is named, and the tool stops.
 
 ## Use
 
@@ -36,24 +31,24 @@ kbuildlab attach arm64-v6.12            # gdb, in another terminal
 kbuildlab drgn   arm64-v6.12            # drgn, once the guest has booted
 ```
 
-`kbuildlab update <tree>` is the one for a tree you already have: it fetches,
-fast-forwards if the tracked version is a moving branch rather than a pinned
-tag, rebuilds with **the .config you already had**, and refreshes ctags,
-cscope, gtags where the image ships GNU GLOBAL, and the clangd index. It never
-re-applies the preset, because your local answers to new Kconfig symbols are
-yours.
+`kbuildlab update <tree>` is for a tree you already have: it syncs
+(fast-forwarding a tracked branch, never a pinned tag), rebuilds with **the
+.config you already had**, runs `olddefconfig` so new Kconfig symbols take their
+defaults, and refreshes the indexes (ctags, cscope, gtags where the image ships
+GNU GLOBAL, and clangd). It never re-applies the preset; it only reports what
+olddefconfig changed and any preset line the newer source dropped, and repairs
+neither.
 
-Every `config` and `update` also records the tree in this repository, under
-`lab/trees/NAME/`: its `tree.conf`, any `config-fragment` of its own, and its
-`.config` as `savedefconfig` writes it -- only what differs from the arch
-defconfig. Beside them, `lab/workspace/` keeps the workspace's own files -- the
-text files at its top and at the top of every directory a `tree.conf` points
-into, which is where the rootfs and the firmware are built -- and `sources`,
-the path, URL and commit of each source checkout the workspace builds from
-(buildroot, u-boot), read off the checkouts themselves. A file GitHub would
-refuse (over 100 MiB) is generated, not written, and is left out by name. A
-record spells the workspace's own path as `@KBL_WORKSPACE@`, so it names no
-machine, and comes back naming wherever the workspace is then.
+### The lab/ record
+
+Every `config` and `update` records the tree in this repository under
+`lab/trees/NAME/`: its `tree.conf`, any `config-fragment`, and its `.config` as
+`savedefconfig` writes it (only what differs from the arch defconfig).
+`lab/workspace/` keeps the workspace's own files (those at its top and at the top
+of each directory a `tree.conf` points into, where the rootfs and firmware are
+built) and `sources` (path, URL and commit of each non-kernel checkout, such as
+buildroot and u-boot). A file over GitHub's 100 MiB limit is left out by name. A
+record spells the workspace path as `@KBL_WORKSPACE@`, so it names no machine.
 
 So the workspace can be deleted, or kbuildlab cloned onto another machine:
 
@@ -66,168 +61,71 @@ kbuildlab sync NAME && kbuildlab config NAME     # config starts from the record
 
 ### ctags, cscope and gtags
 
-None of the three evaluates a conditional, so run over the source as it is
-they index every branch of every `#if` and every file the configuration never
-builds. `kbuildlab tags` hands them the tree as its build compiled it instead.
-Every compile a `.cmd` file records -- C, assembly, linker scripts, host
-programs -- goes through the build compiler with `-fdirectives-only`, by the
-collector and memo the clangd index uses; a line no unit compiled is blanked,
-and a file `scripts/tags.sh` lists that no unit read is emptied, every line
-number kept. The copies live in `$XDG_CACHE_HOME/kbuildlab/view/<tree>/` and
-podman mounts them over the tree as an overlay, so the kernel's own
-`make tags cscope gtags` run unchanged and record the tree's own paths and
-lines; the finished indexes are then moved into the tree.
-
-A copy changes on disk only when its content does, so cscope and gtags stay
-incremental. ctags has no incremental mode and is merged instead: the previous
-`tags` loses the lines of every file that is gone, new to the lists or newer
-than it, those files are indexed again with the options `scripts/tags.sh`
-passed, and the result goes back through `scripts/tags.sh` for its own
-post-processing, which gives the bytes a full run gives. Each ctags entry is
-then addressed by line number, as cscope and gtags address theirs: an editor
-follows a search pattern to the first line it matches, which can lie in a
-branch the configuration leaves out, so the line is found by that same search
-run over the view, where such branches are blank. The top of the tree
-is staged in the layer before each run, reflinked where the filesystem allows:
-a file overlayfs copies up while another descriptor has it open for reading
-stays split in two, and gtags updates its database in place. The first run
-over indexes built from the plain tree changes nearly every file, which GNU
-global's incremental update handles more slowly than a fresh build, once. Other
-container runtimes have no overlay volumes and index the tree as it is on disk,
-as `KBL_TAGS_VIEW=0` does.
+None of the three evaluates `#if`, so run over the source as it is they index
+every branch and every file the configuration never builds. `kbuildlab tags`
+instead hands them the tree **as its build compiled it**: each compile a `.cmd`
+file records is replayed with `-fdirectives-only`, a line no unit compiled is
+blanked and a file no unit read is emptied (line numbers kept). The copies live in
+`$XDG_CACHE_HOME/kbuildlab/view/<tree>/`; podman overlays them on the tree so the
+kernel's own `make tags cscope gtags` run unchanged, and the finished indexes move
+into the tree. cscope and gtags stay incremental; ctags is merged. Other runtimes
+have no overlay volumes and index the tree as it is on disk, as `KBL_TAGS_VIEW=0`
+does.
 
 ### The clangd index
 
-`kbuildlab tags` builds a fourth index, for clangd, alongside the other three.
-It answers the same question they do — where is this symbol — so a tree
-reindexed for three of them and not the fourth is a tree whose editor is
-quietly describing the previous build.
+`kbuildlab tags` builds a fourth index, for clangd, so an editor is not left
+describing the previous build. It runs on the host (its input is the
+`.cmd` files kbuild wrote, and the clangd that reads it is the host's) and writes
+nothing into the tree: the database lives in
+`$XDG_CACHE_HOME/kbuildlab/clangd/<tree>/`, and clangd is pointed there from
+`~/.config/clangd/config.yaml`.
 
-It is the odd one out in two ways. It runs on the host, not in the build image:
-its input is the `.cmd` files kbuild has already written, and the clangd that
-will read the result is the host's. And it writes nothing into the tree — a
-`compile_commands.json` in the source root would show up in `git status` and
-`make mrproper` would take it away again, so the database lives in
-`$XDG_CACHE_HOME/kbuildlab/clangd/<tree>/` and clangd is pointed there from
-`~/.config/clangd/config.yaml`. clangd's background index follows the database,
-so that lands beside it rather than in your source.
+A GCC-built kernel is not a project clangd reads as-is. The generated config
+closes each gap, measured against the tree rather than taken from a list:
 
-A kernel built by GCC is not a project clangd can read as-is, and the config it
-gets is what closes each gap — every one of them measured on the tree in front
-of it rather than taken from a list:
+- GCC-only flags (`-fconserve-stack`, `-mabi=lp64`, ...) are probed against clang
+  for each unit's target and only the rejected ones dropped, so `-mabi=lp64` stays
+  for riscv64 and goes for arm64.
+- Each entry keeps the build compiler's own target (x86's i386 boot stub, riscv's
+  32-bit vDSO, host tools) and, for a file built more than once, the reading most
+  units share.
+- Headers opened on their own get the includes that precede them in a real source
+  (so `asm/atomic_lse.h` sees `atomic_t`), and their inactive `#if` regions come
+  from the build, not from clang's own `__clang__`/`__GNUC__`/`__has_*` answers.
+- Source the tree never compiles (`arch/powerpc` on an arm64 tree) keeps
+  navigation and loses diagnostics; everything "unused" is off; `-ferror-limit=0`
+  stops the fatal `too many errors` line surviving a silenced tree.
 
-- **GCC-only flags.** `-fconserve-stack`, `-mabi=lp64` on arm64,
-  `-mindirect-branch=…`: clang answers each with a driver error, and one it
-  cannot parse at all kills the whole file. Every option a unit uses is probed
-  against the real clang for the target that unit compiles for, and only what
-  clang rejects is dropped from its entry — which is what keeps it right across
-  trees, since `-mabi=lp64` is wrong on arm64 and correct on riscv64.
-- **Units for another machine.** x86_64 compiles its boot stub as i386, riscv64
-  builds a 32-bit compat vDSO, and every tree builds host tools. Each entry
-  names the build compiler's own target, as the build image reports it, and
-  keeps the options that move it (`-m16`, `-march=rv32ima`); clang is asked
-  which options those are, so no directory is named anywhere.
-- **Files built more than once.** riscv64 compiles `lib/string.c` for the
-  kernel, again for its early-boot stub with `-D__DISABLE_EXPORTS`, and again
-  for the purgatory; clangd reads one entry per file. The entry is the build
-  that reads the file itself the way most units do, then the largest share of
-  everything else it reads that way. kbuild's generator lists them only in
-  the order it walked the tree.
-- **Headers opened on their own.** A kernel header is not self-contained —
-  `asm/atomic_lse.h` has no idea what `atomic_t` is, because in a real build
-  `asm/atomic.h` got there first. Each header gets a database entry
-  reproducing the includes that precede it in a source that uses it. A quoted
-  include is looked up beside the file that names it first, as the compiler
-  does, so `kernel/sched/sched.h` gets one too, and so does a `.c` file that
-  another includes, such as `kernel/locking/rtmutex.c`. The source is one whose
-  unit compiled the header the way that shows the most of what the units
-  compile, read off the build compiler's own output: `arch/x86/boot/boot.h`
-  takes a setup-code source, not the decompressor that defines its guard away.
-  A unit that undefines a Kconfig symbol compiles against a config of its own
-  -- the 32-bit vDSO passing for a 32-bit kernel, the decompressor leaving
-  paravirt out -- so it decides how a file reads only where nothing else reads
-  that file; `include/linux/bitops.h` reads as the kernel compiles it.
-- **Inactive regions of a header.** clangd greys out an `#if` group from the
-  macros its reconstructed preamble leaves defined; the build decides from the
-  macros defined where a source first reaches the header. `kernel/sched/core.c`
-  defines `CREATE_TRACE_POINTS` before it includes `trace/events/sched.h`, and
-  an arch header defines its overrides before it includes the `asm-generic` one.
-  Each header's context source is replayed through the preprocessor, and the
-  macros its conditionals depend on are restored to their state at that point
-  by a forced include holding only the difference.
-- **clang answering for itself.** `__clang__`, `__GNUC__` and the `__has_*`
-  tests are the compiler's identity: clangd would take `compiler-clang.h` where
-  the build took `compiler-gcc.h`, and grey `__attribute__((__copy__))` because
-  clang has no such attribute. The build compiler is asked, inside the build
-  image and once per flag set, the questions the tree's conditionals ask, and
-  its answers lead every command line wherever clang can follow them. Only
-  what a condition evaluates is answered: a name an `#ifdef` checks, and the
-  macros an `#if` expands. A macro reached only from code keeps clang's
-  definition, since clang spells GCC keywords such as `__seg_gs` as macros. A
-  builtin only the build compiler has keeps clang's answer, since code calling
-  it would not parse.
-- **Source the tree never compiles.** A tree configured for arm64 does not
-  build `arch/powerpc`, and no command line makes powerpc source parse through
-  an aarch64 one. Those paths keep navigation and lose diagnostics.
-- **Everything named "unused"** is off, compiler and clang-tidy alike.
-- **`-ferror-limit=0`.** `too many errors emitted, stopping now` is a fatal, not
-  a diagnostic, so `Diagnostics.Suppress` never reaches it. On a tree whose
-  diagnostics are otherwise silenced it is the one thing still shown, and
-  lifting the cap removes it at its source.
+Nothing in the generator names a directory, header or macro of a particular tree:
+the include paths, the arch directory, each unit's target and the compiler's own
+headers are re-read on every run, so the next `kbuildlab tags` follows a config or
+option change.
 
-Nothing in the generator names a directory, header or macro of a particular
-tree. The include paths, the arch directory, the header floor (what most
-sources include first), each unit's target and the compiler's own headers are
-read from the build's units and the build compiler on every run, so after a
-config or option change the next `kbuildlab tags` follows it.
+Two facts the build knows and clangd does not are injected as header comments:
+go-to-definition on a `CONFIG_` symbol lands on its `#define` with Kconfig's
+prompt, type, dependencies and help; on `_text` or `__init_begin`, on the
+declaration with its `vmlinux.lds.S` line. clangd's hover card omits these — jump,
+don't hover.
 
-`counted_by` naming a member declared later is accepted by GCC and rejected by
-this clang. The macros that expand to it are found by preprocessing the build's
-forced includes and redefined empty in a shim included right behind them, so
-`linux/compiler_types.h` itself is never copied.
-
-Two things the build system knows and clangd does not are injected as comments
-on copies of the tree's own headers, put ahead of it on the include path.
-Go-to-definition on a `CONFIG_` symbol lands on its `#define` with Kconfig's
-prompt, type, dependencies, help text and the Makefile rule that makes it build
-something; on `_text` or `__init_begin`, on the declaration with the
-`vmlinux.lds.S` line that places it. (Hover does not show these — clangd's
-hover card leaves the comment out. Jump, don't hover.)
-
-The index is built here rather than left to the editor. Without that, the
-first clangd an editor starts after a rebuild spends its time indexing while
-you are trying to read — and after every rebuild there is something new to do,
-so it happens again. It is the same work either way; done from the command
-line it is finished before the editor opens. clangd keys its shards on file
-contents, so it is incremental by construction: a rebuild that touched forty
-files re-indexes forty files, and an already-warm tree costs only the minutes
-clangd takes to read the project back.
+The index is built here rather than left to the editor, so it is finished before
+the editor opens; clangd keys its shards on file contents, so a rebuild re-indexes
+only the files that changed.
 
 #### Editors
 
-Everything above lives in `~/.config/clangd/config.yaml`, which is clangd's own
-user config and therefore editor-neutral: the same blocks apply in Neovim, in
-VS Code and on the command line. An editor only supplies clangd's launch
-arguments.
+Everything above lives in `~/.config/clangd/config.yaml`, clangd's editor-neutral
+user config, so the same blocks apply in Neovim, VS Code and on the command line;
+an editor only supplies clangd's launch arguments. The per-tree blocks are
+generated; the workspace-wide policy is `presets/clangd/workspace.yaml`, which you
+edit and `kbuildlab tags` materialises under its own markers. Nothing in the
+config is hand-written, so regenerating loses no decision.
 
-Both halves of what clangd reads are in this repo. The per-tree blocks are
-generated -- measured against the tree in front of them -- and the workspace-wide
-policy is `presets/clangd/workspace.yaml`, a file you edit, materialised by
-`kbuildlab tags` under its own markers. Nothing in `~/.config/clangd/config.yaml`
-is hand-written, so regenerating never loses a decision.
-
-VS Code needs one thing said out loud, because its default C/C++ extension is
-not clangd: `ms-vscode.cpptools` runs its own parser, does not read this file,
-and on a GCC-built kernel reports hundreds of errors no build ever produced.
+VS Code's default C/C++ extension (`ms-vscode.cpptools`) runs its own parser,
+ignores this file, and reports hundreds of phantom errors on a GCC-built kernel.
 Install `llvm-vs-code-extensions.vscode-clangd` and merge
 `presets/editor/vscode-settings.json` into your user settings; that switches
-cpptools' parser off (its debugger is untouched) and leaves clangd reading the
-same configuration Neovim reads.
-
-Measured on a 3887-file tree with two indexing threads: ten minutes from
-nothing. Reading an already-warm project back is not free either: on
-v4.6-arm64's 5237 entries and one shared core, clangd began after 70 seconds
-and was done after 216. `warm` waits for clangd to say so, not for a timer.
+cpptools' parser off (its debugger is untouched).
 
 ```
 kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
@@ -239,44 +137,22 @@ KBL_CLANGD_JOBS=N                       cap the parallel work of both steps
 python3 lib/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
 ```
 
-To see what an editor would actually report, `lib/clangd.py` can measure it —
-a real clangd session, one `didOpen` per file, counting published diagnostics:
+`lib/clangd.py` can also report what an editor would see: `check` runs a real
+clangd session (one `didOpen` per file, counting diagnostics) and `regions`
+verifies clangd's inactive `#if` shading against the build.
 
 ```sh
-python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check -n 80
-python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 \
-        --journal /tmp/scan --resume     # every file, resumable
-```
-
-Inactive regions are measured the same way, against the build rather than
-against an expectation. Every unit goes through the build compiler inside the
-build image with `-fdirectives-only`, which copies each surviving line
-verbatim, so what each unit compiled is read off its output. A file compiled
-under different macros by different units, or twice by one, has several
-readings; one parse can show only one of them. A file clangd shows exactly as
-the reading that shows the most of what the units compile is reported with the
-lines only another reading compiles. A file shown as a less common reading, or
-as no reading at all, is reported as differing, and the exit status is
-non-zero when any differ. `regions` reaches the build image the way the last
-`kbuildlab tags` did.
-
-```sh
-python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions            # a sample
+python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 --journal /tmp/scan --resume
 python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions --all -S 60
-python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions include/linux/compiler_types.h
 ```
 
-Neither step starts over. A source's trace, a unit's reading and what clangd
-shades in a file are kept under a digest of the command, the code that computed
-them, clangd, the tree's part of the config and every file kbuild recorded as
-read, so a rebuild that touched forty files repeats the work for what includes
-those forty. What kbuild recorded includes the file Kconfig touches for each
-symbol a unit tests, which fixdep lists in place of `autoconf.h`: a config
-change that edits no header still reaches every result that depends on it.
-`regions --fresh` asks clangd again regardless.
+Both steps are incremental, keyed on the command, the code, clangd, the config and
+every file kbuild recorded as read, so a rebuild repeats only what the change
+touches; `regions --fresh` asks clangd again regardless.
 
-Every command takes `-h`/`--help`; `run` and `attach` carry the options worth
-knowing.
+## run and attach
+
+Every command takes `-h`/`--help`.
 
 ```
 kbuildlab run [tree] [options] [-- QEMU ARGS]
@@ -287,15 +163,14 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --initrd PATH | --no-initrd
   --net | --no-net           user NIC with an ssh forward (default on); --ssh-port N
   --persist | --no-persist   attach the tree's writable /persist disk
-  --emulate | --no-emulate   attach emulated controllers for the soft presets' drivers:
-                             NVMe, AHCI, virtio-scsi and USB disks (QEMU null-co, nothing
-                             on the host), USB and virtio input, virtio-gpu, HDA and
-                             virtio sound, virtio crypto/balloon/console, a PCI UART, an
-                             i6300esb that does nothing when it fires, three CAN
-                             controllers on one bus, an e1000e (default: the tree's EMULATE)
+  --emulate | --no-emulate   attach emulated controllers for the soft presets' drivers
+                             (NVMe, AHCI, virtio-scsi, USB, input, GPU, sound, CAN,
+                             e1000e, ...; default: the tree's EMULATE)
   --modules | --no-modules   append the modules `kbuildlab build` staged to the initramfs
                              (default on whenever the build has modules)
   --append WORDS             extra kernel command-line words, repeatable
+  --qmp-port N | --no-qmp    drgn's channel (default: the tree's QMP_PORT);
+                             --no-qmp drops it and the vmcoreinfo device
   --port|-g N                gdb port (default: the tree's GDB_PORT); --mem|-m, --smp, --bios
 
 kbuildlab attach [tree] [options] [-- GDB ARGS]
@@ -306,64 +181,49 @@ kbuildlab attach [tree] [options] [-- GDB ARGS]
   --first                    with several matches take the lowest port (for scripts)
 ```
 
-The gdb-port flag differs by command: `run` names it `-g` (QEMU's own spelling),
+The gdb-port flag differs by command: `run` names it `-g` (QEMU's spelling),
 `attach` names it `-p`.
 
 The rootfs carries none of the build's modules, so `kbuildlab build` stages them
-beside the tree as `modules.cpio.gz`, stripped, since gdb reads the build's own
-copies, and `run` appends it to the initramfs in every boot mode: the kernel
-unpacks concatenated archives as one. An init script in the same archive loads
-what the devices present at boot ask for, as udev would, so an emulated
-controller whose driver is a module binds; `modprobe vivid` and the like load
-the rest. The archive names only `lib/modules` and that script, never a
-directory the rootfs already has, because the kernel replaces a path whose type
-differs. An archive older than the build's modules is left out, and `run` says so.
+beside the tree as `modules.cpio.gz` (stripped), and `run` appends it to the
+initramfs in every boot mode. An init script in the archive loads what the devices
+present at boot ask for, as udev would, so an emulated controller whose driver is a
+module binds. An archive older than the build's modules is left out, and `run` says
+so.
 
 `--boot uboot` and `--boot uefi` need a pre-built disk image (`BOOTDISK`, default
 `boot/uboot.img` or `boot/esp.img`); `--persist` needs an `S45persist` init script
-inside the guest rootfs. The scripts that build these --
-`firmware/build-bootdisk.sh`, `firmware/build-esp.sh`, `rootfs/post-build.sh` --
-belong to the workspace, not to kbuildlab; the records under `lab/workspace/`
-keep a copy, and `init --restore` puts them back. Without them a firmware boot
-stops with a message naming the missing disk, and `--persist` attaches a disk
-the guest never mounts.
+in the guest rootfs. The scripts that build these (`firmware/build-bootdisk.sh`,
+`firmware/build-esp.sh`, `rootfs/post-build.sh`) belong to the workspace, not
+kbuildlab; the records under `lab/workspace/` keep a copy, and `init --restore`
+puts them back. Without them a firmware boot stops with a message naming the disk.
 
-`attach` puts gdb's working directory in the kernel source, because the kernel's
-own `scripts/gdb` commands need it there -- `lx-symbols` reloads the image with a
-bare `symbol-file vmlinux`, and `lx-dmesg`/`lx-lsmod` resolve module paths the
-same relative way. Arguments you pass after `--` are unaffected: a relative path
-in the positions gdb's syntax defines as paths (`-x`, `--command`, `-s`, `-c`,
-`-d`, `-e`, and the first positional) is made absolute against the directory you
-typed the command in first, and `set logging` writes there too. Only the
-interactive session that follows sees the kernel tree as its cwd.
+`attach` runs gdb with its working directory in the kernel source, because the
+kernel's own `scripts/gdb` commands resolve `vmlinux` and module paths relative to
+it. A relative path you pass after `--` in a gdb path position (`-x`, `-s`, `-c`,
+`-d`, `-e`, the first positional) is made absolute against your original directory
+first, so the chdir does not re-root it.
 
 ### Several guests of one tree
 
 `run` advances to a free port rather than refusing, so a second guest of the same
-tree is normal -- and its port is a number that appears nowhere in `tree.conf`.
-`attach` therefore discovers rather than assumes:
+tree is normal — and its port appears nowhere in `tree.conf`. `attach` therefore
+discovers rather than assumes:
 
-- one live guest of that tree -> exactly as before, no prompt and no extra output;
-- several -> a chooser (fzf when present, else a numbered prompt), or a refusal
+- one live guest of that tree → attaches with no prompt;
+- several → a chooser (fzf when present, else a numbered prompt), or a refusal
   naming the ports when stdin is not a terminal;
-- `--port N` alone -> the tree is recovered from that guest's own run state, so
-  the right `vmlinux` is still loaded;
-- both, disagreeing -> refused, saying what is actually on that port.
+- `--port N` alone → the tree is recovered from that guest's own run state;
+- a tree and `--port` that disagree → refused, saying what is on that port.
 
-The tree's `GDB_PORT` stays `run`'s default and is no longer `attach`'s: once a
-second guest exists, that number identifies one of them at best.
+So `GDB_PORT` is `run`'s default, not `attach`'s. An explicit `--port` is refused
+if the port is taken; a busy tree default auto-advances.
 
-The listing says whether each guest already has a debugger, and works that out
-**without touching the gdbstub**. A bare TCP connect -- not one RSP byte -- pauses
-a running guest and leaves it paused after the socket closes (measured on qemu
-11.1.1 through QMP `query-status`), so a probe that asked by connecting would stop
-the guest it was asked about. The answer instead comes from `/proc`: the socket
-inodes qemu's own fds hold, intersected with the ESTABLISHED rows on that port in
-`/proc/net/tcp` and `/proc/net/tcp6`. Ownership is the point -- the stub keeps
-listening after it accepts, so a second client finishes its handshake and shows as
-ESTABLISHED while queued behind the first, and counting rows alone would call that
-attached. An unreadable fd table (another user's process) reads `unknown`, never a
-guess.
+`attach --list` prints a table of live guests, including whether each already has
+a debugger — read from `/proc`, never by connecting, since a bare TCP connect
+pauses a running guest and leaves it paused. A second `attach` on an in-use port
+does not usefully queue (the stub serves one client); `attach` says so rather than
+appearing to hang.
 
 ```
 $ kbuildlab attach v4.6-arm64 --list
@@ -373,74 +233,34 @@ live guests of v4.6-arm64:
   2   14991  2223   v4.6-arm64       uboot   off    running  running    attached             89478    00:12
 ```
 
-The stub serves exactly one client, and a second `attach` on the same port does
-not usefully queue: the kernel completes the handshake, qemu never accepts that
-socket, and the packets sit unread until gdb's timeout -- after which, if the
-first client leaves, the late replies arrive one packet out of step and the
-session fails with a protocol error. `attach` says so rather than appearing to
-hang. Start a second guest instead; that is what the port allocator is for.
-
-### Choosing a port
-
-`run` claims its port by creating the run-state file with `O_EXCL`, and the
-claim IS the test: an unclaimed, unlistened port is taken by whoever creates the
-file first, and a run that loses moves to the next number. Testing for a free
-port and claiming it later would leave a window -- and it is not a small one,
-since a firmware chain spends seconds on `mkimage`, `mcopy` and a 90-128 MB copy
-before anything listens. Two runs started together used to land on the same port
-and the loser's cleanup then deleted the winner's live boot disk. Cleanup now
-removes the state file only while it still names this launcher.
-
-An explicit `--port` has nowhere to move to and is refused if the port is taken.
-
 ### drgn
 
-`run` opens a QMP monitor beside the gdbstub -- a unix socket in the state
-directory and a TCP port the tree states as `QMP_PORT` -- and adds
-`-device vmcoreinfo`. `kbuildlab drgn` finds the guest exactly as `attach` does
-and hands drgn the channel and the tree's `vmlinux`.
+`run` opens a QMP monitor beside the gdbstub (a unix socket in the state directory
+and a TCP port the tree states as `QMP_PORT`) and adds `-device vmcoreinfo`.
+`kbuildlab drgn` finds the guest as `attach` does and hands drgn the channel and
+the tree's `vmlinux`. Unlike the gdbstub, QMP neither pauses the guest
+nor displaces an attached gdb, so drgn can read a running, gdb-attached guest.
 
-QMP is not the gdbstub, and the difference is the point. The gdbstub serves one
-client and pauses the guest the moment anything connects; QMP does neither, so
-drgn can read a running guest while gdb is attached to it, without stopping
-either.
-
-Two halves have to line up and `drgn` names whichever is missing:
+Two halves have to line up, and `drgn` names whichever is missing:
 
 - QEMU's `-device vmcoreinfo` advertises where the guest's VMCOREINFO note is.
 - The guest writes that note, which needs `CONFIG_FW_CFG_SYSFS` and
-  `CONFIG_VMCORE_INFO` (`CONFIG_CRASH_CORE` before 6.10) -- both in the preset,
+  `CONFIG_VMCORE_INFO` (`CONFIG_CRASH_CORE` before 6.10) — both in the preset,
   and both needing a 4.17 kernel or newer.
 
-**When to attach matters more than it looks.** The note is written by
-`qemu_fw_cfg`'s device initcall, inside `do_initcalls()`, which is after
-`start_kernel` has returned -- so a guest frozen at reset or stopped at
-`start_kernel` has no note, and drgn cannot tell it is a Linux kernel. drgn also
-builds its `Program` when it connects, so a session opened too early never
-recovers: booting the guest further does not re-identify it. `drgn` asks the
-question directly before handing over -- a symbol-less identification probe,
-measured at 0.1s -- and says which of the two it is rather than leaving you with
-`ObjectNotFoundError: could not find 'init_task'`.
+The note is written from `qemu_fw_cfg`'s device initcall, after `start_kernel`
+returns, so a guest frozen at reset or stopped at `start_kernel` has none — and
+drgn builds its `Program` at connect, so a session opened too early never
+recovers. `drgn` probes for the note before handing over, and `--wait` polls and
+attaches the moment it appears.
 
-`--wait` closes the gap that leaves: it polls the same probe and attaches the
-moment the note appears, instead of handing over a session that cannot work.
-There is no in-session recovery to offer instead -- calling `set_qemu_qmp` again
-on a live `Program` opens a second connection while holding the first, and since
-the monitor serves one client it blocks for ever (measured: the process sits in
-`unix_stream_read_generic` with two socket fds). Retrying has to happen out here.
+drgn identifies the guest by itself only over the unix socket. `--tcp` reaches the
+TCP port from elsewhere, but the note must then be supplied with
+`-- --vmcoreinfo PATH`. A second `kbuildlab drgn` waits in the listen backlog until
+the first quits (the monitor serves one client).
 
-That one-client rule is also why a second `kbuildlab drgn` waits in the listen
-backlog until the first session quits. It is a hang with no message unless you
-know it, so `run` and `drgn` both say so.
-
-drgn identifies the guest by itself only over the unix socket. `--tcp` reaches
-the TCP port instead, from elsewhere on the network, but then the note has to be
-supplied with `-- --vmcoreinfo PATH`.
-
-`scripts/drgn/ops.py` answers the question a handler table is always asked --
-which implementation is in this slot -- from the guest's memory plus the tree's
-DWARF, so the answer is what this kernel holds rather than what the source
-suggests:
+`scripts/drgn/ops.py` answers which implementation fills each slot of a handler
+table, read from the guest's memory plus the tree's DWARF:
 
 ```
 kbuildlab drgn upstream-arm64 -- scripts/drgn/ops.py shmem_ops
@@ -453,121 +273,108 @@ kbuildlab drgn upstream-arm64 -- scripts/drgn/ops.py shmem_ops
 `--grep RE` finds the tables, `--limit N` resolves the first few. A NULL slot is
 printed as NULL: in a kernel that is a decision, not an absence.
 
-riscv64 is the exception, and it is drgn's, not this tool's. Measured on drgn
-0.2.0: the guest is identified, its build ID matches, and physical reads return
-real data, but every kernel virtual address raises `FaultError: could not find
-memory segment` -- identically with the tree's Sv39 pin and with Sv48/Sv57
-allowed, so it is not a paging-mode question. `drgn` says so before handing over.
-x86_64 and arm64 read symbols normally.
+**riscv64 is drgn's exception, not this tool's.** As of drgn 0.2.0 the guest is
+identified and physical reads work, but every kernel virtual address raises
+`FaultError: could not find memory segment` (under Sv39 and Sv48/Sv57 alike, so not
+a paging-mode question). `drgn` says so before handing over; x86_64 and arm64 read
+symbols normally.
 
 ### gdb and drgn together
 
-They need no channel between them, because QEMU already is one. gdb drives the
-guest through the gdbstub, drgn reads it through QMP, and both see one machine.
-Measured on upstream-arm64 booted to userspace:
+They need no channel between them: gdb drives the guest through the gdbstub, drgn
+reads it through QMP, and both see one machine.
 
 | | QMP runstate | what drgn reads |
 | --- | --- | --- |
-| drgn alone | `running` | jiffies advance -- QMP reads do not stop the guest |
-| gdb attached | `paused` | jiffies identical across reads: exactly the state gdb stopped, and still `paused` afterwards |
-| gdb SIGKILLed | `paused`, stub free within 2s | unchanged; a fresh gdb attaches after `resume` |
+| drgn alone | `running` | jiffies advance — QMP reads do not stop the guest |
+| gdb attached | `paused` | identical across reads: the state gdb stopped, still `paused` afterwards |
+| gdb SIGKILLed | `paused`, stub free within ~2s | unchanged; a fresh gdb attaches after `resume` |
 | drgn SIGKILLed | unchanged | the monitor is released; the next session connects |
 | guest killed | unreachable | run state and socket reclaimed by the launcher |
 
-The one thing that does not heal is the middle of that list: a debugger killed
-while it holds the guest releases the gdbstub at once -- qemu notices the closed
-socket -- but leaves the guest **paused**, and nothing on the gdbstub side will
-start it again. Measured still paused at +2s, +10s, +30s and +60s. `kbuildlab
-resume` is the way back, over QMP, and it refuses while a debugger is attached
-because a guest paused by a live gdb is paused on purpose.
-
-`attach --list` shows both: `started` is qemu's `-S` flag, `now` is the live
-runstate. A row that is `paused` with no `dbg` is the stranded case.
+The one case that does not self-heal is the middle: a debugger killed while it
+holds the guest releases the gdbstub at once but leaves the guest **paused**, and
+nothing on the gdbstub side restarts it. `kbuildlab resume [tree]` is the way back,
+over QMP; it refuses while a debugger is attached (`--force` overrides) and takes
+the same `--port`/`--list`/`--first` discovery as `attach`. In `attach --list` a
+row that is `paused` with no `dbg` is this stranded case (`started` is qemu's `-S`
+flag, `now` is the live runstate).
 
 ### The run state
 
 `run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default
-`/dev/shm`), written whole and renamed into place so a reader never sees half a
-record. `attach`, `drgn` and the editor adapter all read it, so its `KBL_*` key format
-is a contract: keys are added, never renamed. It carries the boot mode, the load
-address a firmware chain landed the kernel at, the KASLR state, the ssh port, the
-effective kernel command line -- which a firmware chain passes itself and so does
-not appear on qemu's own command line -- the QMP port and socket, and qemu's pid together with its
-`/proc` start time, which is what lets a file that outlived its guest be told
-apart from one describing the process actually on that port.
+`/dev/shm`), written whole and renamed into place. `attach`, `drgn`, `resume` and
+the editor adapter read it, so its `KBL_*` key format is a contract: keys are
+added, never renamed. It carries the boot mode, the firmware load address, the
+KASLR state, the ssh port, the effective kernel command line (which a firmware
+chain passes itself, so it is nowhere on qemu's command line), the QMP port and
+socket, and qemu's pid with its `/proc` start time — which tells a file that
+outlived its guest from the process now on that port.
 
 ### When a guest dies
 
-A guest that is *ended* -- Ctrl-C, a closed terminal, `kbuildlab` tidying up -- exits
-quietly, as it always has. A guest that *dies* now says so in this tool's own voice:
+A guest that is *ended* (Ctrl-C, a closed terminal, kbuildlab tidying up) exits
+quietly. A guest that *dies* is reported in this tool's own voice:
 
 ```
 kbuildlab: guest on :1435 died of SIGSEGV -- it did not shut down.
 ```
 
-Before, the only thing on screen was bash's job-control line, which names this
-script's internal line number and the shell variable holding qemu's argument list,
-and not one word about the guest. The exit status still carries the signal; the
-report is built from it.
-
-Two things make this worth saying rather than leaving to the shell. A debugger can
-kill the guest from outside: a debug read of an address that translates into a device
-region makes qemu dispatch into the device model, and `hw/intc/arm_gic.c` reads
-`current_cpu->cpu_index` there -- NULL on the gdbstub's thread -- whenever the guest
-has more than one core, which `--smp 2` means it does by default. gdbtools' `kearly
-safemem` guard exists to keep a debugger off those addresses, so the report points at
-it. And `-nographic` owns the terminal: qemu puts it in raw mode and restores it on a
-normal exit, but a process killed by a signal restores nothing, which left a shell
-with no echo, no line editing and no Ctrl-C -- and nothing on screen to say that
-`reset` would undo it. The launcher now saves the terminal before the guest starts and
-puts it back on every exit path, signal or not.
+A guest dies rather than exits most often when a debugger read of an address QEMU
+dispatches into a device model SIGSEGVs it, which gdbtools' `kearly safemem` guard
+exists to prevent. The launcher reports the signal in its own voice (bash's
+job-control line names only this script's internals) and restores the terminal on
+every exit path, since `-nographic`'s raw mode is not put back on a signal death.
 
 ## The tree.conf
 
 `kbuildlab init NAME --arch ARCH` writes `<workspace>/NAME/tree.conf` from
-`templates/` -- the machine description every command reads, never inferred from
+`templates/` — the machine description every command reads, never inferred from
 the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
-`UPSTREAM`) and the facts `run` and `attach` consume: `QEMU_BIN`, `MACHINE`,
-`CPU`, `CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply `BOOT`,
-`INITRD`, `PERSIST`, `EMULATE`, `CPU_PAGING` and the firmware paths (`UBOOT`,
-`OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`), plus two that steer the guest itself:
-`CMDLINE_EXTRA` (words appended to the kernel command line in every boot mode --
-`-append` for a direct boot, `setenv bootargs` in the u-boot script, the `linux`
-line in `grub.cfg`) and `GDB_BIND` (the address the gdbstub listens on, default
-`127.0.0.1`, because a gdbstub is an unauthenticated read/write channel into guest
-memory and qemu's own `tcp::N` spelling binds every interface).
+`UPSTREAM`) and the facts the commands consume: `QEMU_BIN`, `MACHINE`, `CPU`,
+`CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply
+`SRC_DIR`, `BOOT`, `INITRD`, `PERSIST`, `EMULATE`, `CPU_PAGING` and the firmware
+paths (`UBOOT`, `BOOTDISK`, `OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`), plus two that
+steer the guest itself:
 
-Every value in it is read with one grammar: `KEY`, optional blanks, `=`, optional
-blanks, the value; the first line for a key wins; a value that opens with `"` runs
-to the next `"`, any other ends at the first `#` with trailing blanks dropped.
-`kbl_tree_get` in `lib/common.sh` is the reference; `clangd.py`, the editor adapter
-and the workspace's firmware scripts read it too, and `tests/tree-conf-vectors.json`
-holds the cases they must all answer alike (`tests/tree-conf.py` checks kbuildlab's
-two).
+- `CMDLINE_EXTRA` — words appended to the kernel command line in every boot mode
+  (`-append` for a direct boot, `setenv bootargs` in the u-boot script, the
+  `linux` line in `grub.cfg`); `run --append` adds more on top.
+- `GDB_BIND` — the address the gdbstub listens on, default `127.0.0.1`, because a
+  gdbstub is an unauthenticated read/write channel into guest memory and qemu's
+  own `tcp::N` spelling binds every interface.
 
-`attach` also hands the debugger every
-`GDBTOOLS_*` line verbatim, with one exception: `GDBTOOLS_ENTRY_PA` -- a kernel
-image base pinned for a target that cannot report it -- describes the mode the
-tree DEFAULTS to, so it is applied only when that is the mode this port is
-actually running, and x86 KASLR takes it back again because the base moves per
-run. A `qemu.conf` symlink points at the same file, for older editor configs
-that looked for that name; the debug adapter reads `tree.conf` itself.
+`CPU_PAGING` sets paging as CPU features without a rebuild: `CPU_PAGING="la57=off"`
+pins x86 to 4-level, `"sv48=off,sv57=off"` pins riscv to Sv39.
+
+**Grammar.** Every value is read with one rule: `KEY`, optional blanks, `=`,
+optional blanks, the value; the first line for a key wins; a value that opens with
+`"` runs to the next `"`, any other ends at the first `#` with trailing blanks
+dropped. `kbl_tree_get` in `lib/common.sh` is the reference; `clangd.py`, the
+editor adapter and the workspace's firmware scripts read it too, and
+`tests/tree-conf-vectors.json` holds the cases they must all answer alike
+(`tests/tree-conf.py` checks kbuildlab's two).
+
+`attach` also hands the debugger every `GDBTOOLS_*` line verbatim, except
+`GDBTOOLS_ENTRY_PA` (a kernel image base pinned for a target that cannot report
+it): it describes the tree's DEFAULT boot mode, so it applies only when that is
+what this port runs, and x86 KASLR takes it back since the base moves per run. A
+`qemu.conf` symlink points at the same file for older editor configs.
 
 Per-machine settings live outside the repo. `kbuildlab init --workspace DIR`
 records the workspace path in `~/.config/kbuildlab/workspace`, which is never
-committed; `$KBL_WORKSPACE` overrides it. Everything else per machine is a
-`KBL_*` variable (`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`, `KBL_DOCKER_USER`,
-...), read from the environment -- keep them in an untracked file your shell
-sources, not in the tree. `sync` clones with `--depth 1` unless
-`KBL_FULL_HISTORY=1` asks for the whole history, borrowed from a local
-`KBL_MIRROR` when one is named; a shallow tree advances only while it carries no
-commit of its own.
+committed; `$KBL_WORKSPACE` overrides it. Everything else per machine is a `KBL_*`
+environment variable (`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`,
+`KBL_DOCKER_USER`, ...) — keep them in an untracked file your shell sources.
+`sync` clones with `--depth 1` unless `KBL_FULL_HISTORY=1` asks for the whole
+history, borrowed from a local `KBL_MIRROR` when one is named; a shallow tree
+advances only while it carries no commit of its own.
 
 ## The debuggability preset
 
 `presets/` holds a kernel configuration for one purpose: seeing as much as the
-kernel can be made to show. It is split three ways because a naive shared/
-per-arch split fails on a specific class of option.
+kernel can be made to show. It is split three ways because a naive
+shared/per-arch split fails on a specific class of option.
 
 | file | what it holds |
 | --- | --- |
@@ -577,125 +384,87 @@ per-arch split fails on a specific class of option.
 | `verify.sh` | reads the built `.config` back and fails on anything that did not survive |
 
 When a tree tracks `UPSTREAM=mainline`, `arch/<arch>-mainline.config` stands in
-for `arch/<arch>.config` where mainline has moved past the pinned release --
-riscv64 already ships one.
+for `arch/<arch>.config` where mainline has moved past the pinned release
+(riscv64 ships one).
 
-The soft half is applied after the rest by `lib/softconfig.py`, and it never
-moves an answer the `.config` already has. A line that would build in a
-subsystem the config holds as a module -- directly, or through a `select` --
-is taken as a module, or left off; a line for a symbol a kernel does not define,
-or defines without a prompt, is skipped. So one list serves every kernel
-version and every arch defconfig, and what each tree got is printed: on,
-lowered, as a module, or off for want of a dependency. A kernel older than the
-one `common.config` says it was verified against takes the hard half softly as
-well, since it names symbols that kernel lacks or restricts -- which is how
-v4.6 shares the presets instead of keeping its own.
+The soft half is applied after the rest by `lib/softconfig.py` and never moves an
+answer the `.config` already has: a line that would build in a module subsystem is
+taken as a module or left off, and a line for a symbol a kernel lacks or has
+promptless is skipped. So one list serves every kernel version and arch defconfig,
+and what each tree got is printed (on, lowered, as a module, or off for a missing
+dependency). A kernel older than the one `common.config` was verified against takes
+the hard half softly too, which is how v4.6 shares the presets.
 
 Every line was checked against the 6.12 source. Promptless symbols are
-deliberately absent: `make olddefconfig` recomputes them from their selecters,
-so a hand-written line for one is discarded and the fragment quietly claims
-something it did not do.
-
-`verify.sh` exists for the same reason. A Kconfig fragment whose `depends on` is
-unmet is not rejected — it is dropped, the build succeeds, and the feature is
-missing at runtime. `kbuildlab config --preset` runs the check and fails loudly
-instead.
+deliberately absent: `make olddefconfig` recomputes them from their selecters, so
+a hand-written line for one is discarded. `verify.sh` exists because a fragment
+whose `depends on` is unmet is dropped silently, the build succeeds, and the
+feature is missing at runtime; `kbuildlab config --preset` runs the check and
+fails loudly instead.
 
 ### What it buys
 
-- **Debug information kept whole.** DWARF5, not reduced, not split, not
-  compressed. `CONFIG_DEBUG_INFO_REDUCED` in particular adds `-fno-var-tracking`,
-  which stops the compiler describing where a variable lives after optimisation —
-  it is the direct cause of `<optimized out>` on locals that were otherwise
-  recoverable.
+- **Debug information kept whole.** DWARF5, not reduced, split or compressed.
+  `CONFIG_DEBUG_INFO_REDUCED` adds `-fno-var-tracking`, the direct cause of
+  `<optimized out>` on locals that were otherwise recoverable.
 - **Symbols kept whole.** `KALLSYMS_ALL`, no `STRIP_ASM_SYMS`, no
   `TRIM_UNUSED_KSYMS`, a linker map, and BTF for drgn, bpftrace and CO-RE.
-- **Tracing.** ftrace and function_graph with return values, the latency
-  tracers, histogram and synthetic events, kprobes and uprobes with BTF-named
-  arguments, blktrace, perf. Enough for ftrace, trace-cmd, kernelshark,
-  bpftrace, uftrace, blktrace and `perf trace`.
+- **Tracing.** ftrace and function_graph with return values, the latency tracers,
+  histogram and synthetic events, kprobes and uprobes with BTF-named arguments,
+  blktrace, perf — enough for trace-cmd, kernelshark, bpftrace, uftrace and
+  `perf trace`.
 - **eBPF and XDP.** Syscall, JIT, LSM, BTF, and the attach points the tooling
   expects.
-- **The early memory map.** `PTDUMP_DEBUGFS` exports every kernel mapping with
-  its permissions, split by the address markers that name each region --
-  "Fixmap start" and "Fixmap end" among them, which is the only in-kernel view
-  that says where the fixmap *is* rather than what a header computes it to be.
-  One symbol, two layouts: arm64 and riscv call `ptdump_debugfs_register(...,
-  "kernel_page_tables")` and get `/sys/kernel/debug/kernel_page_tables`, while
-  the same symbol builds `arch/x86/mm/debug_pagetables.c` on x86 and that
-  creates a `page_tables/` directory holding `kernel`, `current_kernel`,
-  `current_user` and `efi`. Reading one absence as a missing feature is the
-  mistake to avoid here. `DEBUG_WX` walks the same tables
-  at boot and warns on a W+X mapping; `DEBUG_VIRTUAL` reports a
-  `__pa()`/`virt_to_phys()` given an address outside the linear map, which is
-  exactly what handing it a fixmap or vmalloc address does; `MEMTEST` reports
-  bad ranges through memblock. v4.6 predates the generic ptdump and restricts
-  both `DEBUG_WX` and `DEBUG_VIRTUAL` to x86; the arm64 equivalent it does
-  have, `ARM64_PTDUMP`, is in `arch/arm64.soft.config`, taken by any kernel
-  that still has the symbol.
-
-  `ARCH_KEEP_MEMBLOCK` -- which keeps the memblock arrays past `mem_init()`, so
-  `/sys/kernel/debug/memblock` exists -- is *not* set. It is promptless; arm64
-  and riscv select it outright, and on x86_64 the only symbol that selects it in
-  either 6.12 or mainline is `INTEL_TDX_HOST`, which is the whole TDX host stack
-  for one debugfs file. Before `mem_init()` the arrays are live on every
-  architecture, and gdbtools' `kmemblock` reads them there.
-
-  memblock's own running commentary is a boot parameter rather than a symbol.
-  `memblock=debug`, `early_ioremap_debug` and `mminit_loglevel=4` are
-  `early_param()` in all seven trees, so `CMDLINE_EXTRA=` in `tree.conf` or a
-  one-off `kbuildlab run --append` reaches them.
+- **The early memory map.** `PTDUMP_DEBUGFS` exports every kernel mapping with its
+  permissions — `/sys/kernel/debug/kernel_page_tables` on arm64 and riscv, a
+  `page_tables/` directory (`kernel`, `current_kernel`, `current_user`, `efi`) on
+  x86. `DEBUG_WX` warns on a W+X mapping, `DEBUG_VIRTUAL` catches `__pa()` on an
+  address outside the linear map, `MEMTEST` reports bad ranges. `ARCH_KEEP_MEMBLOCK`
+  is deliberately *not* set (promptless; on x86_64 only `INTEL_TDX_HOST` selects
+  it), but the arrays are live before `mem_init()` and gdbtools' `kmemblock` reads
+  them there. memblock's own commentary is boot-parameter, not config
+  (`memblock=debug`, `early_ioremap_debug`, `mminit_loglevel=4` via `CMDLINE_EXTRA`).
+  v4.6 restricts `DEBUG_WX`/`DEBUG_VIRTUAL` to x86; its `ARM64_PTDUMP` equivalent is
+  in `arch/arm64.soft.config`.
 - **Devices without the hardware.** `soft/simulators.config` turns on what the
-  kernel can stand in for: the interrupt simulator (`IRQ_SIM`, promptless,
-  reached through gpio-sim and its kin), IIO, I2C, null_blk, scsi_debug, NAND,
-  NVMe loop, netdevsim, wireless, 802.15.4, Bluetooth, NFC, V4L2, CEC and DVB
-  test devices, virtual KMS, dummy sound cards, a dummy USB controller pair,
-  uinput/uhid, test power supplies and a virtual TPM. `soft/emulated.config`
-  builds the drivers for what `kbuildlab run --emulate` has QEMU emulate --
-  NVMe, AHCI, virtio-scsi, xHCI, HDA, e1000e, an i6300esb, Kvaser and CTU CAN,
-  and the virtio family -- so real drivers probe real controller models. Built
-  in wherever the tree's answers allow, so a simulator is there at boot; what a
-  config holds as a module reaches the guest appended to its initramfs.
-- **Seeing them work.** `soft/observability.config` adds what ftrace and perf
-  need on top of the tracers: `DYNAMIC_DEBUG` for any driver's `pr_debug`,
-  `GENERIC_IRQ_DEBUGFS` (every irq domain, irq_sim's included, and interrupt
-  injection by hand), `SCHEDSTATS` for the `sched_stat_*` tracepoints `perf sched`
-  reads, usbmon, the drop monitor, pktgen, mac80211's messages as trace events,
-  and the debugfs views of USB gadgets, block, NVMe, SCSI, V4L2 and ALSA.
+  kernel can stand in for (`IRQ_SIM`, IIO, null_blk, scsi_debug, netdevsim,
+  wireless/Bluetooth/NFC, V4L2/CEC/DVB test devices, virtual KMS, dummy sound and
+  USB, uinput/uhid, a virtual TPM, ...); `soft/emulated.config` builds the drivers
+  for what `run --emulate` emulates, so real drivers probe real controller models.
+- **Seeing them work.** `soft/observability.config` adds `DYNAMIC_DEBUG`,
+  `GENERIC_IRQ_DEBUGFS`, `SCHEDSTATS` (for `perf sched`), usbmon, the drop monitor,
+  pktgen, mac80211 trace events, and the debugfs views of block, NVMe, SCSI, V4L2
+  and ALSA.
 
 ### What it does not
 
-The kernel cannot be built at `-O0` or `-Og`; 6.12 offers `-O2` or `-Os` and
-nothing else. At `-O2`, with everything above:
+6.12 offers only `-O2` or `-Os`, no `-O0`/`-Og`. At `-O2`, even with everything
+above:
 
-- locals whose lifetime has ended have had their registers reused, and gdb
-  saying `<optimized out>` there is accurate rather than a defect
-- `static inline` in headers is gone from `nm`, `readelf`, kallsyms, ftrace and
-  BTF alike; it survives only as `DW_TAG_inlined_subroutine` in DWARF
-- `.isra.N` clones survive — no flag the kernel offers removes them
+- a local whose lifetime has ended has had its register reused, so gdb saying
+  `<optimized out>` there is accurate rather than a defect;
+- `static inline` in headers is gone from `nm`, kallsyms, ftrace and BTF,
+  surviving only as `DW_TAG_inlined_subroutine` in DWARF;
+- `.isra.N` clones survive — no flag the kernel offers removes them;
 - hand-written assembly entry paths keep no frame-pointer discipline, so a
-  backtrace still ends at the kernel entry boundary
+  backtrace ends at the kernel entry boundary.
 
-Self-tests and profilers are off on purpose. `FTRACE_STARTUP_TEST` exercises
-every configured tracer on every boot and pulls `EVENT_TRACE_STARTUP_TEST` with
-it; `RING_BUFFER_STARTUP_TEST` promises ten seconds and disables every ring
-buffer if it dislikes what it sees. "As many features as possible" means the
-capability is present and idle, not that every diagnostic is armed.
+Self-tests and profilers are off on purpose (`FTRACE_STARTUP_TEST` and
+`RING_BUFFER_STARTUP_TEST` would run on every boot): the capability is present and
+idle, not every diagnostic armed.
 
 ### Architecture differences that are not preferences
 
-- **riscv64 has no *in-guest* hardware breakpoints.** `HAVE_HW_BREAKPOINT` is
-  absent, so the guest's own `perf record -e mem:...` is refused and an in-guest
-  ptrace watchpoint has no debug register to program. Debugging over the QEMU
-  gdbstub is a separate path and is unaffected -- QEMU enforces the watchpoint in
-  the emulator, so `watch` (and gdbtools' `kw`) from `kbuildlab attach` stop the
-  guest the instant the address is written, not by single-stepping.
-- **riscv64 ftrace and preemption are mutually exclusive.** `HAVE_FUNCTION_TRACER`
-  is selected `if !XIP_KERNEL && !PREEMPTION`, so a preemptible riscv64 kernel
-  has no ftrace at all — and Kconfig does not warn, it simply stops offering it.
+- **riscv64 has no *in-guest* hardware breakpoints** (`HAVE_HW_BREAKPOINT` is
+  absent), so in-guest `perf record -e mem:...` and ptrace watchpoints are
+  refused. Debugging over the QEMU gdbstub is unaffected: QEMU enforces `watch`
+  (and gdbtools' `kw`) in the emulator.
+- **riscv64 ftrace and preemption are mutually exclusive** — `HAVE_FUNCTION_TRACER`
+  is selected `if !XIP_KERNEL && !PREEMPTION`, and Kconfig does not warn, it simply
+  stops offering it.
 - **arm64 and riscv64 have no `DYNAMIC_FTRACE_WITH_REGS`**, so `FPROBE`,
   `KPROBES_ON_FTRACE` and BPF `kprobe_multi` are unreachable on both.
-- **arm64 loses BPF trampolines under CFI.** `DYNAMIC_FTRACE_WITH_DIRECT_CALLS`
+- **arm64 loses BPF trampolines under CFI** — `DYNAMIC_FTRACE_WITH_DIRECT_CALLS`
   sits behind `DYNAMIC_FTRACE_WITH_CALL_OPS` behind `!CFI_CLANG`.
 
 Each arch fragment states these where you will read them.
@@ -703,27 +472,22 @@ Each arch fragment states these where you will read them.
 ## Containers
 
 `containers/Containerfile` is plain OCI with no builder extensions, so **docker,
-podman, buildah and nerdctl all read it unchanged**. `Dockerfile` beside it is a
+podman, buildah and nerdctl all read it unchanged**; `Dockerfile` beside it is a
 symlink for tools that look for that name first. `kbuildlab` picks a runtime in
-the order podman, docker, nerdctl -- buildah reads the `Containerfile` but cannot
-run a guest, so it is not auto-selected -- or takes `$KBL_CONTAINER`, which wins.
-podman comes first because rootless podman needs no daemon: a machine that keeps
-dockerd off builds without starting a service or asking for root.
+the order podman, docker, nerdctl (buildah reads the `Containerfile` but cannot
+run a guest, so it is not auto-selected), or takes `$KBL_CONTAINER`, which wins.
+podman comes first because rootless podman needs no daemon.
 
-`kbuildlab image` builds the default Ubuntu-26.04 image. `kbuildlab image legacy`
-builds an Ubuntu-24.04 image (`containers/Containerfile.legacy`) carrying gcc-9
-through gcc-13; **no tree here uses it**. It is kept for two reasons: it is where
-the unaided ceiling below was measured, and it is the answer for anyone who would
-rather build a 2016 kernel with an era-appropriate compiler than with a 2026 one
-plus a flag. `containers/Containerfile.legacy-gcc6` goes further back still --
-Debian 9, gcc-6.3 -- but `kbuildlab image` does not build it, and it has no
-python3, which the clangd index and the tags view run inside the build image: a
-tree on it needs `KBL_CLANGD=0 KBL_TAGS_VIEW=0` for `tags`.
+`kbuildlab image` builds the default Ubuntu 26.04 image. `kbuildlab image legacy`
+builds an Ubuntu 24.04 image (`containers/Containerfile.legacy`, gcc-9 through
+gcc-13, aarch64 cross only) — **no tree here uses it**, but it is the answer for
+building a 2016 kernel with an era-appropriate compiler. `containers/Containerfile.legacy-gcc6`
+(Debian 9, gcc-6.3) goes back further; `kbuildlab image` does not build it, and it
+has no python3, so a tree on it needs `KBL_CLANGD=0 KBL_TAGS_VIEW=0` for `tags`.
 
-Each image carries **several compiler generations, not one** -- 14, 15 and 16 in
-the default image, 9 through 13 in the legacy one, each with the aarch64 and
-riscv64 cross compilers to match. A tree names the one it builds with, in its own
-`tree.conf`:
+Each image carries several compiler generations: 14, 15 and 16 in the default
+image (with aarch64 and riscv64 cross compilers), 9 through 13 in the legacy one
+(aarch64 only). A tree names the one it builds with, in its own `tree.conf`:
 
 ```
 IMAGE=kbuildlab-legacy:latest   # which image; unset means the default one
@@ -732,131 +496,69 @@ HOSTCC_FLAGS=-fcommon           # appended to HOSTCC only; usually unset
 KCFLAGS=-fvar-tracking-assignments   # appended after the kernel's own CFLAGS
 ```
 
-The reason for the range is that *"the newest toolchain"* is not one answer across
-seven kernels. gcc-10 turned `-fno-common` on by default, and a kernel from before
-5.6 has tentative definitions that then collide at link -- v4.6 stops in its own
-host tools, `scripts/dtc`, on a duplicate `yylloc`. Mainline tracks compiler trunk;
-a stable series was validated against what shipped with it. So the ceiling belongs
-to the tree, is found by building rather than assumed, and is written where the
-rest of that tree's build is described instead of in an environment variable
-somebody has to remember. `kbuildlab build` reports which compiler it used.
+"The newest toolchain" is not one answer across these trees: gcc-10 turned
+`-fno-common` on by default and a pre-5.6 kernel's host tools then collide at link;
+mainline tracks compiler trunk, a stable series was validated against what shipped
+with it. So the compiler belongs to the tree, is found by building, and `kbuildlab
+build` reports which it used. The unversioned `gcc` in the default image is **15**;
+**16** is installed but is a dated development snapshot (`16-2026MMDD`), so opting
+into it is deliberate.
 
-`HOSTCC_FLAGS` is the narrow escape hatch for exactly that `-fno-common` case: it
-is appended to `HOSTCC`, not set as `HOSTCFLAGS` (which would *replace* the
-kernel's own `-O2` and warning set rather than add to it), and it reaches the
-host tools only. That distinction is the whole reason it is acceptable, and it
-turns out to be worth a lot: **v4.6's ceiling is gcc-9 unaided and gcc-16 with
-`-fcommon` on the host compiler**, seven generations apart, with the kernel's own
-code generation identical either way. It also decides that tree's debug-info
-format, since v4.6 has no Kconfig choice for one and gcc-11 and later default to
-DWARF5. Use `HOSTCC_FLAGS` for that; a flag that changes the kernel's own objects
-belongs in the config, where the read-back check can see it.
+- `HOSTCC_FLAGS` is appended to `HOSTCC` (not set as `HOSTCFLAGS`, which would
+  replace the kernel's own flags) and reaches host tools only. That is how **v4.6
+  builds on gcc-16 with `HOSTCC_FLAGS=-fcommon`**, with the kernel's own code
+  generation identical to its gcc-9 unaided build.
+- `KCFLAGS` is appended after everything the kernel's Makefile set, so it wins —
+  the way to undo a flag the kernel hard-codes without editing it; keep it to
+  debug-information flags. kbuildlab also adds a few off the Makefile itself:
+  `-fvar-tracking-assignments` to a kernel that turns it off (v4.6, so optimised
+  locals stay printable), `-fno-PIE` to one that never turns PIE off (whose arm64
+  modules otherwise fail to build), and the `make-cmd` `$(pound)` fix so a
+  make-4.2-era kernel builds incrementally under make 4.3+.
 
-`KCFLAGS` is the kernel's own append-to-`KBUILD_CFLAGS` variable, so what is put
-there lands *after* everything the tree's Makefile set and wins where the two
-conflict. That is how a flag the kernel hard-codes gets undone without editing
-the kernel. v4.6 is the case that showed it: its `Makefile:719` adds
-`-fno-var-tracking-assignments` unconditionally, a 2013 decision about gcc build
-times, and variable-tracking assignments are most of what keeps an optimised
-local from printing as `<optimized out>`. kbuildlab now adds
-`-fvar-tracking-assignments` itself to any kernel whose Makefile turns it off,
-so no tree has to remember to. Keep this to flags that change debug
-information only -- gcc guarantees those do not change code generation -- because
-a flag that changes the objects belongs in the config, where the read-back check
-can see it. The one exception is read off the Makefile too: a kernel that never
-turns PIE off was written for compilers that did not default to it, and under
-one that does, its arm64 modules do not build at all (`-mcmodel=large` has no PIC
-form), so it gets the `-fno-PIE` later kernels give themselves. One make variable
-is read off the tree the same way: a kernel whose `scripts/Kbuild.include` escapes
-`#` in its `.cmd` files the way make 4.2 wanted has every command read back cut
-short by make 4.3 and later, so every build found every command changed and
-compiled everything again. kbuildlab passes the `make-cmd` later kernels fixed,
-with its `$(pound)`, on the command line, and v4.6 builds incrementally again.
+| tree | builds with | note |
+| --- | --- | --- |
+| `upstream-*`, `v6.12-*` | gcc-16 | nothing found |
+| `v4.6-arm64` | gcc-16 + `HOSTCC_FLAGS=-fcommon` | gcc-9 unaided; host tools only |
 
-Measured ceilings, one build per rung, newest first:
+Only the compiler is versioned: `CROSS_COMPILE` still supplies `ld`, `as` and
+`objcopy` (one version per target), and `HOSTCC` moves with `CC` so the host tools
+that parse the kernel's output are not a generation apart from it.
 
-| tree | builds with | limited by |
-|---|---|---|
-| `upstream-*` (7.3-rc1) | gcc-16 | nothing found |
-| `v6.12-*` | gcc-16 | nothing found |
-| `v4.6-arm64` | gcc-16 + `HOSTCC_FLAGS=-fcommon` | host tools only; gcc-9 unaided |
+`kbuildlab containers` (`containers status`) reports what the runtime holds and
+the four ways an Ubuntu container can collide with the host, each checked rather
+than assumed:
 
-gcc-16 is a development snapshot rather than a release. Every tree here names it
-explicitly, which is the point of the pin being per tree: moving one back is
-editing one line of its `tree.conf`, and `kbuildlab containers` then reports the
-tree as `MIXED` until it is rebuilt.
-
-The unversioned `gcc` in the default image is **15**, the newest release 26.04
-offers; **16** is installed but is a dated development snapshot
-(`16-2026MMDD`, no `.0`), so a tree opting into it is opting into a prerelease
-compiler deliberately. On the legacy image only the *cross* names are repointed --
-`aarch64-linux-gnu-gcc` is **9**, the highest rung v4.6 builds on unaided -- while
-the native `gcc` there stays 24.04's own **13**, which is what builds the host tools.
-
-Only the compiler is versioned. `CROSS_COMPILE` still supplies `ld`, `as` and
-`objcopy`, which the distribution ships in one version per target, and `HOSTCC`
-moves with `CC` so the host tools that parse the kernel's own output are not a
-generation apart from it.
-
-The note at the top of the `Containerfile` is not idle -- buildroot breaks on new
-compilers well before the kernel does -- so a failing rootfs build gets
-`HOSTCC=gcc-14` rather than the whole image moved back.
-
-`kbuildlab containers` reports what the runtime holds for kbuildlab and the four
-ways an Ubuntu container on a host with its own package manager can collide with
-it, each checked rather than assumed:
-
-- **The environment.** A build must not depend on the shell it was started from,
-  so the image is asked what it actually receives and the answer is compared
-  against the variables that would steer a kernel build (`CC`, `CFLAGS`,
-  `MAKEFLAGS`, `CROSS_COMPILE`, `LD_LIBRARY_PATH` and the rest). Both runtimes
-  start a container with a fresh environment, so the expected answer is *clean*;
-  this says so from the container's own `env`, not from the documentation.
-- **The toolchain.** The host compiles with its distribution's gcc and the image
-  with Ubuntu's, and one build tree cannot hold objects from both. Every tree's
-  recorded `CONFIG_CC_VERSION_TEXT` is compared against the compiler that would
-  build it *now* -- per tree, not per architecture, because a tree names its own
-  image and its own compiler version; asking the default image's native gcc about
-  a tree pinned to another one compares two unrelated compilers and reports a
-  mismatch that means nothing. A tree built by another compiler is reported as
-  `MIXED` and wants `make mrproper` before it is built here again; a tree naming a
-  compiler the image does not have is reported as `NO CC`, and one naming an image
-  that is not built as `MISSING`. A tree older than 4.19 records no
-  `CONFIG_CC_VERSION_TEXT` at all, so there is nothing to compare; it is reported
-  as `unchecked` rather than skipped, because an unchecked thing that reads as a
-  checked one is the failure this command exists to prevent.
-  The `Containerfile`'s own default is checked against the image too -- the `ln`
-  that makes `/usr/bin/gcc` point somewhere, not the newest package it installs,
-  since the image carries several on purpose. Editing it without rebuilding is
-  reported as `STALE`, because nothing else would say so.
-- **The mount.** The workspace is bind-mounted at the same path it has on the
-  host, so a workspace inside `/usr`, `/etc`, `/var` or any other system
-  directory is refused outright rather than handed to a container that could
-  write package-managed files underneath the package manager.
+- **The environment.** The image is asked what it actually receives, and any
+  build-steering variable seen inside (`CC`, `CFLAGS`, `MAKEFLAGS`,
+  `CROSS_COMPILE`, ...) means the runtime is leaking the host environment.
+  Expected answer: *clean*.
+- **The toolchain.** Each tree's recorded `CONFIG_CC_VERSION_TEXT` is compared
+  against the compiler that would build it now — per tree, since a tree names its
+  own image and version. A mismatch is `MIXED` (wants `make mrproper`); a missing
+  compiler is `NO CC`, a missing image `MISSING`, and a tree older than 4.19 (no
+  `CONFIG_CC_VERSION_TEXT`) `unchecked`. The `Containerfile`'s own `gcc` default is
+  checked too and reported `STALE` if it was edited without a rebuild.
+- **The mount.** The workspace is bind-mounted at its host path, so one inside
+  `/usr`, `/etc`, `/var` or another system directory is refused outright.
 - **The host's own config.** `/etc/containers` is checked for unmerged `.pacnew`
-  files, and rootless podman for the `subuid`/`subgid` ranges it needs. Files in
-  the workspace owned by root -- the mark of a rootful run -- are reported too.
+  files, rootless podman for its `subuid`/`subgid` ranges, and the workspace for
+  root-owned files (the mark of a rootful run).
 
-`kbuildlab containers clean` removes the containers made from kbuildlab's images
-and nothing else. `--images` also drops the images kbuildlab built. `--dangling`
-additionally removes untagged images, and says plainly that untagged images
-belong to no project by name, so that sweep is not limited to this one. Nothing
-here ever prunes the runtime wholesale: it is shared with whatever else the
-machine runs.
+`kbuildlab containers clean` removes the stopped containers made from kbuildlab's
+images and nothing else; `--images` also drops the images kbuildlab built;
+`--dangling` additionally removes every untagged image on the host (not only
+kbuildlab's). Nothing here prunes the runtime wholesale.
 
 ## Dependencies
 
-Required: a container runtime, `qemu-system-<arch>`, and a gdb that can debug
-the target — a cross gdb, or a host gdb built `--enable-targets=all`. A
-candidate whose own Python layer does not start is skipped with gdb's reason;
-the usual cause is a cross gdb older than the data directory it shares with the
-host gdb.
+Required: a container runtime, `qemu-system-<arch>`, and a gdb that can debug the
+target — a cross gdb, or a host gdb built `--enable-targets=all`. A candidate
+whose own Python layer does not start is skipped with gdb's reason.
 
-Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which is what
-makes symbols resolve before the MMU is on. `kbuildlab attach` finds it if it is
-installed and says so if it is not.
-
-Optional: `clangd` and `python3` on the host, for the clangd index. Absent,
-`kbuildlab tags` says so and builds the other three.
+Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which makes symbols
+resolve before the MMU is on; `kbuildlab attach` finds it if it is installed and
+says so if it is not. `clangd` and `python3` on the host, for the clangd index;
+absent, `kbuildlab tags` says so and builds the other three.
 
 Nothing is installed for you, and no system setting is changed.
