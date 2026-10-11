@@ -64,6 +64,38 @@ kbuildlab sync NAME && kbuildlab config NAME     # config starts from the record
 
 `init --restore` never overwrites a file that is there. Commit `lab/` to keep it.
 
+### ctags, cscope and gtags
+
+None of the three evaluates a conditional, so run over the source as it is
+they index every branch of every `#if` and every file the configuration never
+builds. `kbuildlab tags` hands them the tree as its build compiled it instead.
+Every compile a `.cmd` file records -- C, assembly, linker scripts, host
+programs -- goes through the build compiler with `-fdirectives-only`, by the
+collector and memo the clangd index uses; a line no unit compiled is blanked,
+and a file `scripts/tags.sh` lists that no unit read is emptied, every line
+number kept. The copies live in `$XDG_CACHE_HOME/kbuildlab/view/<tree>/` and
+podman mounts them over the tree as an overlay, so the kernel's own
+`make tags cscope gtags` run unchanged and record the tree's own paths and
+lines; the finished indexes are then moved into the tree.
+
+A copy changes on disk only when its content does, so cscope and gtags stay
+incremental. ctags has no incremental mode and is merged instead: the previous
+`tags` loses the lines of every file that is gone, new to the lists or newer
+than it, those files are indexed again with the options `scripts/tags.sh`
+passed, and the result goes back through `scripts/tags.sh` for its own
+post-processing, which gives the bytes a full run gives. Each ctags entry is
+then addressed by line number, as cscope and gtags address theirs: an editor
+follows a search pattern to the first line it matches, which can lie in a
+branch the configuration leaves out, so the line is found by that same search
+run over the view, where such branches are blank. The top of the tree
+is staged in the layer before each run, reflinked where the filesystem allows:
+a file overlayfs copies up while another descriptor has it open for reading
+stays split in two, and gtags updates its database in place. The first run
+over indexes built from the plain tree changes nearly every file, which GNU
+global's incremental update handles more slowly than a fresh build, once. Other
+container runtimes have no overlay volumes and index the tree as it is on disk,
+as `KBL_TAGS_VIEW=0` does.
+
 ### The clangd index
 
 `kbuildlab tags` builds a fourth index, for clangd, alongside the other three.
@@ -505,13 +537,13 @@ line in `grub.cfg`) and `GDB_BIND` (the address the gdbstub listens on, default
 `127.0.0.1`, because a gdbstub is an unauthenticated read/write channel into guest
 memory and qemu's own `tcp::N` spelling binds every interface).
 
-Every value in it is read with ONE grammar, and the same one in all five parsers
-that read the file -- kbuildlab's `kbl_tree_get`, its `GDBTOOLS_*` passthrough, the
-two firmware scripts, and the editor adapter's `discover.lua`:
-`^\s*KEY\s*=\s*VALUE`, trailing `#` comment and space stripped, one layer of
-surrounding double quotes removed. They used to differ, and a line written
-`GDBTOOLS_ENTRY_PA = 0x40200000` was honoured by the editor and dropped in silence
-by the terminal, so one guest calibrated to two different addresses.
+Every value in it is read with one grammar: `KEY`, optional blanks, `=`, optional
+blanks, the value; the first line for a key wins; a value that opens with `"` runs
+to the next `"`, any other ends at the first `#` with trailing blanks dropped.
+`kbl_tree_get` in `lib/common.sh` is the reference; `clangd.py`, the editor adapter
+and the workspace's firmware scripts read it too, and `tests/tree-conf-vectors.json`
+holds the cases they must all answer alike (`tests/tree-conf.py` checks kbuildlab's
+two).
 
 `attach` also hands the debugger every
 `GDBTOOLS_*` line verbatim, with one exception: `GDBTOOLS_ENTRY_PA` -- a kernel
@@ -526,7 +558,10 @@ records the workspace path in `~/.config/kbuildlab/workspace`, which is never
 committed; `$KBL_WORKSPACE` overrides it. Everything else per machine is a
 `KBL_*` variable (`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`, `KBL_DOCKER_USER`,
 ...), read from the environment -- keep them in an untracked file your shell
-sources, not in the tree.
+sources, not in the tree. `sync` clones with `--depth 1` unless
+`KBL_FULL_HISTORY=1` asks for the whole history, borrowed from a local
+`KBL_MIRROR` when one is named; a shallow tree advances only while it carries no
+commit of its own.
 
 ## The debuggability preset
 
@@ -681,7 +716,9 @@ through gcc-13; **no tree here uses it**. It is kept for two reasons: it is wher
 the unaided ceiling below was measured, and it is the answer for anyone who would
 rather build a 2016 kernel with an era-appropriate compiler than with a 2026 one
 plus a flag. `containers/Containerfile.legacy-gcc6` goes further back still --
-Debian 9, gcc-6.3 -- and is the same kind of fallback.
+Debian 9, gcc-6.3 -- but `kbuildlab image` does not build it, and it has no
+python3, which the clangd index and the tags view run inside the build image: a
+tree on it needs `KBL_CLANGD=0 KBL_TAGS_VIEW=0` for `tags`.
 
 Each image carries **several compiler generations, not one** -- 14, 15 and 16 in
 the default image, 9 through 13 in the legacy one, each with the aarch64 and
@@ -810,7 +847,10 @@ machine runs.
 ## Dependencies
 
 Required: a container runtime, `qemu-system-<arch>`, and a gdb that can debug
-the target — a cross gdb, or a host gdb built `--enable-targets=all`.
+the target — a cross gdb, or a host gdb built `--enable-targets=all`. A
+candidate whose own Python layer does not start is skipped with gdb's reason;
+the usual cause is a cross gdb older than the data directory it shares with the
+host gdb.
 
 Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which is what
 makes symbols resolve before the MMU is on. `kbuildlab attach` finds it if it is
