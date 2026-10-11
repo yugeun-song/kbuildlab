@@ -12,6 +12,7 @@ source "${KBL_REPO}/lib/common.sh"
 
 KBL_DEFAULT_VERSION="v6.12"
 KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
+KBL_LEGACY_IMAGE="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
 STABLE_URL="${KBL_STABLE_URL:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git}"
 MAINLINE_URL="${KBL_MAINLINE_URL:-https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git}"
 # Where every tree's definition is recorded: in this repository, so a deleted
@@ -50,7 +51,10 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                           [--no-warm]         tree, in the host's clangd config,
                                               and warmed here so an editor opens
                                               on a finished index (KBL_CLANGD=0,
-                                              KBL_CLANGD_WARM=0 turn them off)
+                                              KBL_CLANGD_WARM=0 turn them off);
+                                              the first three read the tree as its
+                                              build compiled it (KBL_TAGS_VIEW=0:
+                                              as it is on disk)
   kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
                                             (attaches the tree's INITRD rootfs;
                                              --run to boot now, --no-initrd for none,
@@ -92,7 +96,7 @@ cmd_doctor() {
     for a in x86_64 arm64 riscv64; do
         local q g
         q="$(kbl_qemu "$a" 2>/dev/null)" || { say "qemu $a    MISSING"; rc=1; continue; }
-        g="$(kbl_gdb  "$a" 2>/dev/null)" || { say "gdb  $a    MISSING"; rc=1; continue; }
+        g="$(kbl_gdb  "$a")" || { say "gdb  $a    MISSING"; rc=1; continue; }
         printf '  %-12s %s + %s\n' "$a" "$q" "$g"
     done
     if [[ -r /dev/kvm && -w /dev/kvm ]]; then say "kvm          usable (x86 guests can use it)"
@@ -145,7 +149,7 @@ cmd_init() {
         local was
         for was in ARCH:"$arch" VERSION:"$version"; do
             local key="${was%%:*}" want="${was#*:}" got
-            got="$(sed -n "s/^${key}=//p" "$rec/tree.conf" | head -1)"
+            got="$(kbl_tree_get "$rec" "$key")"
             [[ "$key" == VERSION && "$want" == "$KBL_DEFAULT_VERSION" ]] && continue
             [[ -z "$want" || "$want" == "$got" ]] \
                 || die "init: $name is recorded with $key=$got; drop the option or pick another name"
@@ -178,14 +182,14 @@ cmd_init() {
 }
 
 # ---------------------------------------------------------------- image
-# image        -> default Ubuntu-24.04 image ($KBL_IMAGE)
-# image legacy -> gcc-6 image for old kernels like v4.6 ($KBL_LEGACY_IMAGE)
+# image        -> containers/Containerfile, Ubuntu 26.04 ($KBL_IMAGE)
+# image legacy -> containers/Containerfile.legacy, Ubuntu 24.04, gcc-9..13 ($KBL_LEGACY_IMAGE)
 cmd_image() {
     local c file tag
     c="$(kbl_container)"
     case "${1:-}" in
         ""|default|latest) file="${KBL_REPO}/containers/Containerfile";        tag="$KBL_IMAGE" ;;
-        legacy)            file="${KBL_REPO}/containers/Containerfile.legacy";  tag="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}" ;;
+        legacy)            file="${KBL_REPO}/containers/Containerfile.legacy";  tag="$KBL_LEGACY_IMAGE" ;;
         *) die "image: unknown variant '$1' (known: legacy)" ;;
     esac
     [[ -r "$file" ]] || die "image: no Containerfile at $file"
@@ -324,6 +328,22 @@ _cc_args() {   # _cc_args TREE ARCH
     return 0
 }
 
+# The make command line for a tree's arch and compiler, left in _KBL_MAKE.
+_kmake_args() {   # _kmake_args TREE
+    local arch; arch="$(kbl_tree_arch "$1")" || exit 1
+    local -a cc=(); mapfile -t cc < <(_cc_args "$1" "$arch")
+    _KBL_MAKE=(make ARCH="$(_karch "$arch")" CROSS_COMPILE="$(_cross "$arch")" "${cc[@]+"${cc[@]}"}")
+}
+
+# That make, run in the tree's image with its source as the working directory.
+_kmake() {   # _kmake TREE MAKE-ARG...
+    local tree="$1" src _KBL_ACTIVE_IMAGE; shift
+    src="$(kbl_tree_src "$tree")" || exit 1
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    _kmake_args "$tree"
+    _in_container "$src" "${_KBL_MAKE[@]}" "$@"
+}
+
 # ---------------------------------------------------------------- sync
 cmd_sync() {
     local tree; tree="$(kbl_tree "${1:-}")" || exit 1
@@ -334,7 +354,7 @@ cmd_sync() {
         mainline) url="$MAINLINE_URL" ;;
         *)        url="$STABLE_URL" ;;
     esac
-    src="$(kbl_tree_src "$tree")"
+    src="$(kbl_tree_src "$tree")" || exit 1
 
     if [[ ! -d "$src/.git" ]]; then
         say "cloning      $ver from $url"
@@ -355,7 +375,10 @@ cmd_sync() {
     say "fetching     $ver"
     # depth-1 onto a full clone would shallow-truncate its history; keep depth-1
     # only when the repo is already shallow.
+    local shallow=0 tracked=""
     if [[ "$(git -C "$src" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+        shallow=1
+        tracked="$(git -C "$src" rev-parse --verify --quiet "refs/remotes/origin/$ver")"
         git -C "$src" fetch --depth 1 origin "$ver" || die "fetch failed"
     else
         git -C "$src" fetch --tags origin "$ver" || die "fetch failed"
@@ -367,7 +390,17 @@ cmd_sync() {
     else
         local before after
         before="$(git -C "$src" rev-parse HEAD)"
-        git -C "$src" merge --ff-only FETCH_HEAD || die "not a fast-forward -- the tree has local commits"
+        if [[ $shallow -eq 1 ]] && ! git -C "$src" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null \
+           && ! git -C "$src" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
+            # A depth-1 fetch cuts history at the new tip, so ancestry cannot be
+            # shown; HEAD moves only if it is exactly what the last fetch brought.
+            [[ -n "$tracked" && "$before" == "$tracked" ]] \
+                || die "$src is shallow and its HEAD is not origin/$ver as last fetched, so it may
+       carry local commits; nothing was changed.  git -C $src fetch --unshallow, then sync"
+            git -C "$src" reset --keep FETCH_HEAD || die "local changes in $src conflict with the new $ver"
+        else
+            git -C "$src" merge --ff-only FETCH_HEAD || die "not a fast-forward -- the tree has local commits"
+        fi
         after="$(git -C "$src" rev-parse HEAD)"
         if [[ "$before" == "$after" ]]; then say "up to date   $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"
         else say "advanced     $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"; fi
@@ -382,10 +415,9 @@ cmd_config() {
         case "$1" in --preset) preset=1; shift ;; *) rest+=("$1"); shift ;; esac
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
-    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
+    local arch src; arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source in $tree -- run: kbuildlab sync"
     local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
-    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
 
     local -a frags=() soft=()
     [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
@@ -415,14 +447,10 @@ cmd_config() {
     if [[ ! -f "$src/.config" && -f "$rec" ]]; then
         say "restoring    the recorded config, $rec"
         _lab_copy "$rec" "$src/.config" @KBL_WORKSPACE@ "$(kbl_workspace)" || die "cannot copy $rec"
-        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
-            "${cc[@]+"${cc[@]}"}" olddefconfig \
-            || die "olddefconfig failed"
+        _kmake "$tree" olddefconfig || die "olddefconfig failed"
     elif [[ ! -f "$src/.config" ]]; then
-        say "defconfig    $karch"
-        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
-            "${cc[@]+"${cc[@]}"}" defconfig \
-            || die "defconfig failed"
+        say "defconfig    $(_karch "$arch")"
+        _kmake "$tree" defconfig || die "defconfig failed"
     else
         say "keeping      the existing .config"
     fi
@@ -431,9 +459,7 @@ cmd_config() {
         say "merging      ${#frags[@]} fragment(s)"
         _in_container "$src" ./scripts/kconfig/merge_config.sh -m .config "${frags[@]}" \
             || die "merge_config failed"
-        _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
-            "${cc[@]+"${cc[@]}"}" olddefconfig \
-            || die "olddefconfig failed"
+        _kmake "$tree" olddefconfig || die "olddefconfig failed"
         # The whole point: read it back.  A fragment line whose depends-on was
         # unmet is dropped in silence, and the build then succeeds without it.
         "${KBL_REPO}/presets/verify.sh" "$src/.config" "${frags[@]}" \
@@ -443,9 +469,9 @@ cmd_config() {
     if [[ ${#soft[@]} -gt 0 ]]; then
         say "enabling     what the soft presets name, moving no existing answer"
         _container_run "$src" || exit 1
+        _kmake_args "$tree"
         python3 "${KBL_REPO}/lib/softconfig.py" --config "$src/.config" --source "$src" \
-            --olddefconfig "$(printf '%q ' "${_KBL_RUN[@]}" make ARCH="$karch" \
-                              CROSS_COMPILE="$(_cross "$arch")" "${cc[@]+"${cc[@]}"}" olddefconfig)" \
+            --olddefconfig "$(printf '%q ' "${_KBL_RUN[@]}" "${_KBL_MAKE[@]}" olddefconfig)" \
             "${soft[@]}" || die "the soft presets could not be applied"
     fi
     _record "$tree"
@@ -478,11 +504,12 @@ _record_workspace() {
     local -A tops=(["."]=1)
     for d in "$ws"/*/; do
         kbl_is_tree "${d%/}" || continue
-        while IFS= read -r v; do
+        while IFS= read -r k; do
+            v="$(kbl_tree_get "${d%/}" "$k")"
+            [[ "$v" == ../* ]] || continue
             rel="$(realpath -m --relative-to="$ws" "${d%/}/$v")"
             [[ "$rel" == ..* || "$rel" == /* ]] || tops["${rel%%/*}"]=1
-        done < <(sed -n 's/^[[:space:]]*[A-Z_][A-Z0-9_]*[[:space:]]*=[[:space:]]*\(\.\.\/[^[:space:]#]*\).*/\1/p' \
-                   "${d%/}/tree.conf")
+        done < <(kbl_tree_keys "${d%/}")
     done
     for d in "${!tops[@]}"; do
         for f in "$ws/$d"/*; do
@@ -503,7 +530,10 @@ _record_workspace() {
         d="${d%/}"
         [[ "$(basename "$d")" == . || "$(basename "$d")" == .. || ! -d "$d/.git" ]] && continue
         kbl_is_tree "$(dirname "$d")" && continue
-        printf '%s\t%s\t%s\n' "$(realpath -m --relative-to="$ws" "$d")" \
+        # A bash without globskipdots expands .*/ to ../ too: never record outside.
+        rel="$(realpath -m --relative-to="$ws" "$d")"
+        [[ "$rel" == ..* ]] && continue
+        printf '%s\t%s\t%s\n' "$rel" \
             "$(git -C "$d" remote get-url origin 2>/dev/null)" "$(git -C "$d" rev-parse HEAD 2>/dev/null)"
     done | sort -u > "$list"
     mkdir -p "$dst" && mv -f "$list" "$dst/sources"
@@ -527,6 +557,7 @@ _restore_workspace() {
     if [[ -f "$KBL_LAB/workspace/sources" ]]; then
         while IFS=$'\t' read -r rel url commit; do
             [[ -n "$rel" && -n "$url" && -n "$commit" ]] || continue
+            [[ "$rel" == ..* || "$rel" == /* ]] && { warn "not restored: $rel lies outside $ws"; continue; }
             [[ -e "$ws/$rel" ]] && { say "kept         $ws/$rel"; continue; }
             say "cloning      $url into $ws/$rel at ${commit:0:12}"
             git clone -q "$url" "$ws/$rel" && git -C "$ws/$rel" checkout -q "$commit" \
@@ -563,9 +594,9 @@ _older_than_preset() {   # _older_than_preset SRC
 # kernel itself stores a configuration and the form a config change is readable
 # in.  `init NAME` and `config` put them back on any machine.
 _record() {   # _record TREE
-    local tree="$1" name dst src arch ws
+    local tree="$1" name dst src ws
     name="$(basename "$tree")"; dst="${KBL_LAB}/trees/${name}"
-    src="$(kbl_tree_src "$tree")"; arch="$(kbl_tree_arch "$tree")"
+    src="$(kbl_tree_src "$tree")" || exit 1; kbl_tree_arch "$tree" >/dev/null || exit 1
     ws="$(kbl_workspace)" || return 0
     mkdir -p "$dst" || { warn "record: cannot write $dst"; return 0; }
     _lab_copy "$tree/tree.conf" "$dst/tree.conf" "$ws" @KBL_WORKSPACE@
@@ -573,10 +604,7 @@ _record() {   # _record TREE
         _lab_copy "$tree/config-fragment" "$dst/config-fragment" "$ws" @KBL_WORKSPACE@
     else rm -f "$dst/config-fragment"; fi
     [[ -f "$src/.config" ]] || return 0
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
-    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
-    if _in_container "$src" make ARCH="$(_karch "$arch")" CROSS_COMPILE="$(_cross "$arch")" \
-            "${cc[@]+"${cc[@]}"}" savedefconfig >/dev/null 2>&1 && [[ -f "$src/defconfig" ]]; then
+    if _kmake "$tree" savedefconfig >/dev/null 2>&1 && [[ -f "$src/defconfig" ]]; then
         cp -f "$src/defconfig" "$tree/defconfig.snapshot"
         _lab_copy "$src/defconfig" "$dst/defconfig" "$ws" @KBL_WORKSPACE@ && rm -f "$src/defconfig"
         say "recorded     $dst ($(grep -c . "$dst/defconfig") config lines)"
@@ -596,15 +624,13 @@ cmd_build() {
         rest+=("$1"); shift
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
-    local arch karch src jobs
-    arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
+    local arch src jobs
+    arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(basename "$tree") --preset"
     jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
-    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
-    say "building     $(basename "$tree") ($arch, -j$jobs${cc[0]+, ${cc[0]#CC=}})"
-    _in_container "$src" make ARCH="$karch" CROSS_COMPILE="$(_cross "$arch")" \
-        "${cc[@]+"${cc[@]}"}" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
+    _kmake_args "$tree"
+    say "building     $(basename "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
+    _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
     [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
     say "vmlinux      $src/vmlinux"
     _stage_modules "$tree"
@@ -620,14 +646,13 @@ cmd_build() {
 # has: the kernel replaces a path whose type differs, so a rootfs whose /lib
 # is a symlink would lose it.
 _stage_modules() {   # _stage_modules TREE
-    local tree="$1" src arch out stage hook=etc/init.d/S10kbuildlab-coldplug
-    src="$(kbl_tree_src "$tree")"; out="$tree/modules.cpio.gz"
+    local tree="$1" src out stage hook=etc/init.d/S10kbuildlab-coldplug
+    src="$(kbl_tree_src "$tree")" || exit 1; out="$tree/modules.cpio.gz"
     if [[ ! -s "$src/modules.order" ]]; then rm -f "$out"; return 0; fi
     [[ -f "$out" && ! "$src/modules.order" -nt "$out" \
        && -z "$(find "$src" -name '*.ko' -newer "$out" -print -quit)" ]] && return 0
-    arch="$(kbl_tree_arch "$tree")"; stage="$tree/.modules-stage"
+    stage="$tree/.modules-stage"
     local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
-    local -a cc=(); mapfile -t cc < <(_cc_args "$tree" "$arch")
     rm -rf "$stage" && mkdir -p "$stage/$(dirname "$hook")" \
         || { warn "modules: cannot write $stage"; return 0; }
     cat > "$stage/$hook" <<'EOF'
@@ -639,9 +664,7 @@ find /sys/devices -name modalias | while read -r f; do cat "$f"; done 2>/dev/nul
 echo OK
 EOF
     chmod 755 "$stage/$hook"
-    if _in_container "$src" make ARCH="$(_karch "$arch")" CROSS_COMPILE="$(_cross "$arch")" \
-           "${cc[@]+"${cc[@]}"}" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install \
-           >/dev/null \
+    if _kmake "$tree" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null \
        && _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | gzip -9" \
            > "$out.tmp"; then
         mv -f "$out.tmp" "$out"
@@ -673,8 +696,8 @@ EOF
 # reindexed for three of them and not the fourth is a tree whose editor is
 # quietly describing the previous build.  `update` calls this, so a synced and
 # rebuilt tree gets all four without being asked.
-_clangd_index() {
-    local tree="$1"
+_clangd_index() {   # _clangd_index TREE [gen|warm]
+    local tree="$1" phase="${2:-}"
     [[ "${KBL_CLANGD:-1}" == "0" ]] && { say "clangd       skipped (KBL_CLANGD=0)"; return 0; }
     command -v clangd  >/dev/null 2>&1 || { warn "clangd skipped: no clangd on the host"; return 0; }
     command -v python3 >/dev/null 2>&1 || { warn "clangd skipped: no python3 on the host"; return 0; }
@@ -696,10 +719,13 @@ _clangd_index() {
     # has other things to do; unset, each sizes itself to what is free.
     local -a jobs=()
     [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
-    say "indexing     clangd (compile_commands.json, out of tree)"
-    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" --workspace "$ws" "${peers[@]}" \
-        --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force "${jobs[@]+"${jobs[@]}"}" \
-        || { warn "clangd index failed (ctags/cscope/gtags are still current)"; return 1; }
+    if [[ "$phase" != warm ]]; then
+        say "indexing     clangd (compile_commands.json, out of tree)"
+        python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" --workspace "$ws" "${peers[@]}" \
+            --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force "${jobs[@]+"${jobs[@]}"}" \
+            || { warn "clangd index failed"; return 1; }
+    fi
+    [[ "$phase" == gen ]] && return 0
 
     # And then build clangd's own index, here, rather than leaving it to
     # whichever clangd an editor starts later.  It is the same work; done here
@@ -730,82 +756,150 @@ cmd_tags() {
         esac
     done
     local tree; tree="$(kbl_tree "${rest[0]:-}")" || exit 1
-    local arch karch src; arch="$(kbl_tree_arch "$tree")"; karch="$(_karch "$arch")"; src="$(kbl_tree_src "$tree")"
+    local src; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source in $tree"
-    if [[ $clangd -ne 2 ]]; then
-        local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
-        # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
-        # optional -- not every image ships `global`, so absent is a warn, not fatal.
-        say "indexing     ctags + cscope for $karch"
-        _in_container "$src" make ARCH="$karch" tags cscope \
-            || die "tags/cscope failed"
-        if _in_container "$src" sh -c 'command -v gtags >/dev/null 2>&1'; then
-            say "indexing     gtags (GNU GLOBAL) for $karch"
-            _in_container "$src" make ARCH="$karch" gtags \
-                || warn "gtags failed (ctags/cscope are still current)"
-        else
-            warn "gtags skipped: no 'global' in the build image (rebuild image to add it)"
-        fi
-        _in_container "$src" sh -c 'ls -la tags cscope.out GTAGS 2>/dev/null || true'
-    fi
     # Asked for clangd alone, its failure is the command's.
+    local gen=0
     if [[ $clangd -ne 0 ]]; then
-        _clangd_index "$tree" || [[ $clangd -ne 2 ]] || exit 1
+        _clangd_index "$tree" gen || { gen=1; [[ $clangd -ne 2 ]] || exit 1; }
+    fi
+    [[ $clangd -ne 2 ]] && _index_tree "$tree"
+    if [[ $clangd -ne 0 && $gen -eq 0 ]]; then
+        _clangd_index "$tree" warm
     fi
     return 0
 }
 
+# Where `tags` keeps a tree's view: its copies, its state, and the overlay's
+# work directory.  The one place that decides it; tagview.py is told.
+_view_dir() { printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/kbuildlab/view/$(basename "$1")"; }
+
+_index_plain() {   # _index_plain TREE
+    local tree="$1" arch karch src
+    arch="$(kbl_tree_arch "$tree")" || exit 1; karch="$(_karch "$arch")"
+    src="$(kbl_tree_src "$tree")" || exit 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "${KBL_REPO}/lib/tagview.py" --tree "$tree" --view "$(_view_dir "$tree")" forget \
+            || die "cannot remove the view's indexes"
+    fi
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
+    # optional -- not every image ships `global`, so absent is a warn, not fatal.
+    say "indexing     ctags + cscope for $karch"
+    _in_container "$src" make ARCH="$karch" tags cscope \
+        || die "tags/cscope failed"
+    if _in_container "$src" sh -c 'command -v gtags >/dev/null 2>&1'; then
+        say "indexing     gtags (GNU GLOBAL) for $karch"
+        _in_container "$src" make ARCH="$karch" gtags \
+            || warn "gtags failed (ctags/cscope are still current)"
+    else
+        warn "gtags skipped: no 'global' in the build image (rebuild image to add it)"
+    fi
+    _in_container "$src" sh -c 'ls -la tags cscope.out GTAGS 2>/dev/null || true'
+}
+
+_index_tree() {   # _index_tree TREE
+    local tree="$1" name arch karch src view st up wk mode=full rc
+    name="$(basename "$tree")"
+    arch="$(kbl_tree_arch "$tree")" || exit 1; karch="$(_karch "$arch")"
+    src="$(kbl_tree_src "$tree")" || exit 1
+    if [[ "${KBL_TAGS_VIEW:-1}" == "0" ]]; then _index_plain "$tree"; return; fi
+    if [[ "$(basename "$(kbl_container)")" != podman ]] || ! command -v python3 >/dev/null 2>&1; then
+        warn "the config view needs podman's overlay mounts and python3 on the host; indexing $name as it is on disk"
+        _index_plain "$tree"; return
+    fi
+    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    view="$(_view_dir "$tree")"
+    st="$view/state"; up="$view/upper"; wk="$view/work"
+    mkdir -p "$st" "$up" "$wk" || die "cannot write $view"
+    rm -f "$st"/keys "$st"/opts.* "$st"/files.* "$st"/now.* "$st"/replay.* "$st"/tags.new "$st"/tags.prev \
+          "$st"/emitted
+    if [[ -s "$src/tags" ]] \
+       && { ln -f "$src/tags" "$st/tags.prev" 2>/dev/null || cp --reflink=auto "$src/tags" "$st/tags.prev"; }; then
+        mode=merge
+    fi
+    local -a py=(python3 "${KBL_REPO}/lib/tagview.py" --tree "$tree" --view "$view")
+    "${py[@]}" harvest --drop || die "cannot clear $up"
+    _container_run "$src" -v "$src:$src:O,upperdir=$up,workdir=$wk" -v "$st:$st" -e "KBL_TAGS_STATE=$st" || exit 1
+    local -a over=("${_KBL_RUN[@]}")
+    say "indexing     the sources scripts/tags.sh lists for $karch"
+    "${over[@]}" bash -c "PATH=${KBL_REPO}/lib/ctags-shim:\$PATH; exec make ARCH=$karch tags" >/dev/null \
+        || die "scripts/tags.sh could not list the sources of $name"
+    [[ -s "$st/keys" ]] || die "scripts/tags.sh ran no ctags in $_KBL_ACTIVE_IMAGE; is ctags installed there?"
+    "${py[@]}" harvest --drop || die "cannot clear $up"
+    _container_run "$src" -i || exit 1
+    local -a jobs=()
+    [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
+    say "indexing     $name as its build compiled it (out of tree, $up)"
+    "${py[@]}" build --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" "${jobs[@]+"${jobs[@]}"}"
+    rc=$?
+    if [[ $rc -eq 2 ]]; then
+        rm -f "$st/tags.prev"; warn "$name records no compile; indexing it as it is on disk"
+        _index_plain "$tree"; return
+    fi
+    [[ $rc -eq 0 ]] || die "the view of $name could not be built"
+    say "indexing     ctags ($mode), cscope and gtags over that view"
+    "${py[@]}" stage || die "cannot stage the indexes of $name in $up"
+    "${over[@]}" bash "${KBL_REPO}/lib/tags-index.sh" "$karch" "$mode"; rc=$?
+    # 1 means an indexer failed and tags-index.sh withdrew what it wrote; any other
+    # failure is the script's own, and nothing it left is trusted.
+    if [[ $rc -le 1 ]]; then
+        "${py[@]}" harvest --keep || die "cannot move the indexes of $name out of $up"
+    else
+        "${py[@]}" harvest --drop || die "cannot clear $up"
+    fi
+    rm -f "$st/tags.prev" "$st/tags.new" "$st/emitted"
+    [[ $rc -eq 0 ]] || die "indexing $name failed (above); what failed keeps its previous index"
+    ls -la "$src/tags" "$src/cscope.out" "$src/GTAGS" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------- update
-# What `make olddefconfig` does and does not say.
-#
-# It reads the existing .config, answers every symbol the newer source ADDED
-# with that symbol's default, leaves every existing answer alone, and writes the
-# result back in place -- so the tree's .config becomes the current one without
-# being re-derived.  That is the right operation for an update and is why
-# cmd_update calls cmd_config WITHOUT --preset: re-merging the fragments would
-# overwrite answers the operator changed on purpose.
-#
-# What it does not do is say anything, and two things then pass unnoticed:
-#
-#   1. A preset line that the newer source renamed, moved under a different
-#      `depends on`, or deleted.  The setting is simply gone, the build succeeds,
-#      and the next debugging session is quietly worse -- which is the exact
-#      failure presets/verify.sh was written to catch, except that verify.sh only
-#      runs under --preset and so never ran on an update.
-#   2. A DEFAULT that moved between versions.  olddefconfig takes the new default
-#      for a new symbol, and that is a real behaviour change nobody asked for.
-#
-# Both are reported here and neither is repaired: an update preserves the tree's
-# answers, and a tool that silently rewrote them would be the worse failure.
-# kbuild leaves .config.old behind on every config run, which is what the first
-# report compares against.
-_update_report() {   # _update_report TREE
-    local tree="$1" src cfg old
-    src="$(kbl_tree_src "$tree")"; cfg="$src/.config"; old="$src/.config.old"
+# An update keeps the tree's answers: no --preset, because re-merging the
+# fragments would overwrite answers the operator changed on purpose.  It runs
+# olddefconfig itself, so new symbols take their defaults before anything is
+# reported, and reports two things olddefconfig does not say: what the update
+# changed in the .config, and any preset line the newer source dropped (renamed,
+# moved under another `depends on`, deleted).  Neither is repaired.
+
+# How one .config differs from another, one "new|gone|changed CONFIG_X" per line.
+_config_delta() {   # _config_delta OLD NEW
+    LC_ALL=C awk '
+        function parse(line) {
+            if (line ~ /^CONFIG_[A-Za-z0-9_]+=/) {
+                name = line; sub(/=.*/, "", name); val = substr(line, length(name) + 2); return 1
+            }
+            if (line ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) { name = line; sub(/^# /, "", name); sub(/ .*/, "", name); val = "n"; return 1 }
+            return 0
+        }
+        FNR == NR { if (parse($0)) old[name] = val; next }
+        parse($0) { now[name] = val }
+        END {
+            for (n in now) if (!(n in old)) print "new " n; else if (old[n] != now[n]) print "changed " n
+            for (n in old) if (!(n in now)) print "gone " n
+        }' "$1" "$2" | LC_ALL=C sort
+}
+
+_update_report() {   # _update_report TREE BEFORE
+    local tree="$1" before="$2" src cfg arch
+    src="$(kbl_tree_src "$tree")" || exit 1; cfg="$src/.config"
     [[ -r "$cfg" ]] || return 0
 
-    # (1) what this update changed in the .config, from kbuild's own backup.
-    if [[ -r "$old" ]]; then
-        local added removed changed
-        added=$(comm -13 <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$old" | sort -u) \
-                         <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$cfg" | sort -u) | wc -l)
-        removed=$(comm -23 <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$old" | sort -u) \
-                           <(sed -n 's/^\(CONFIG_[A-Z0-9_]*\)[= ].*/\1/p;s/^# \(CONFIG_[A-Z0-9_]*\) is not set/\1/p' "$cfg" | sort -u) | wc -l)
-        changed=$(diff <(grep -E '^(CONFIG_|# CONFIG_)' "$old" | sort) \
-                       <(grep -E '^(CONFIG_|# CONFIG_)' "$cfg" | sort) 2>/dev/null | grep -c '^<')
-        if [[ "$added" -eq 0 && "$removed" -eq 0 && "$changed" -eq 0 ]]; then
-            say "config       unchanged by this update"
-        else
-            say "config       $added new symbol(s) took their default, $removed gone, $changed line(s) differ"
-            say "             diff .config.old .config   (in $src)"
-        fi
+    # (1) what this update changed in the .config, against the copy taken before it.
+    if [[ -s "$before" ]]; then
+        local -a delta=() names=(); local kind
+        mapfile -t delta < <(_config_delta "$before" "$cfg")
+        [[ ${#delta[@]} -eq 0 ]] && say "config       unchanged by this update"
+        for kind in new gone changed; do
+            mapfile -t names < <(printf '%s\n' "${delta[@]+"${delta[@]}"}" | sed -n "s/^$kind //p")
+            [[ ${#names[@]} -gt 0 ]] \
+                && say "config       ${#names[@]} $kind: ${names[*]:0:12}${names[12]:+ ...}"
+        done
     fi
 
-    # (2) does the .config still say what the preset asked for?  Reported, never
-    # repaired -- see above.  A tree with its own fragment is checked against
-    # that too, in the same order cmd_config would merge them.
+    # (2) does the .config still say what the preset asked for?  A tree with its
+    # own fragment is checked against that too, in the order cmd_config merges them.
     local -a frags=("${KBL_REPO}/presets/common.config")
-    local arch; arch="$(kbl_tree_arch "$tree")"
+    arch="$(kbl_tree_arch "$tree")" || exit 1
     local archpreset="${KBL_REPO}/presets/arch/${arch}.config"
     [[ "$(kbl_tree_get "$tree" UPSTREAM)" == "mainline" \
        && -f "${KBL_REPO}/presets/arch/${arch}-mainline.config" ]] \
@@ -826,24 +920,24 @@ _update_report() {   # _update_report TREE
        'kbuildlab config $(basename "$tree") --preset' if that is what you want:"
         printf '%s\n' "$out" >&2
     fi
-
-    # (3) a minimal, diffable snapshot of what this tree is now configured as,
-    # beside the tree and in the repository (_record).
-    _record "$tree"
 }
 
 cmd_update() {
-    local tree; tree="$(kbl_tree "${1:-}")" || exit 1
-    local name; name="$(basename "$tree")"
-    say "updating     $name"
-    cmd_sync "$name"
-    # No --preset: an update preserves the .config that is there.  olddefconfig
-    # answers whatever new symbols the newer source introduced, using their
-    # defaults, and leaves every existing answer alone.
-    cmd_config "$name"
-    _update_report "$tree"
-    cmd_build "$name"
-    cmd_tags "$name"
+    local tree src before
+    tree="$(kbl_tree "${1:-}")" || exit 1
+    src="$(kbl_tree_src "$tree")" || exit 1
+    say "updating     $(basename "$tree")"
+    cmd_sync "$tree"
+    # Taken before cmd_config, which merges a tree's own fragment.
+    before="$(mktemp)" || die "cannot create a temporary file"
+    _KBL_UPDATE_BEFORE="$before"
+    trap 'rm -f -- "$_KBL_UPDATE_BEFORE"' EXIT
+    [[ -f "$src/.config" ]] && cp "$src/.config" "$before"
+    cmd_config "$tree"
+    _kmake "$tree" olddefconfig || die "olddefconfig failed"
+    _update_report "$tree" "$before"
+    cmd_build "$tree"
+    cmd_tags "$tree"
 }
 
 # ---------------------------------------------------------------- run / attach
@@ -855,7 +949,8 @@ cmd_resume() { exec "${KBL_REPO}/lib/resume.sh" "$@"; }
 # ---------------------------------------------------------------- containers
 # What the container runtime holds for kbuildlab on this host, and whether any of
 # it can collide with the system package manager, the host toolchain, or the
-# environment a build runs in.  `status` only reports.  `clean` removes, and by
+# environment a build runs in.  `status` only reports, though it runs throwaway
+# containers to ask the images.  `clean` removes, and by
 # default only what kbuildlab itself created: the runtime is shared with whatever
 # else this machine runs, so a blanket prune is never the right answer here.
 
@@ -872,7 +967,7 @@ _KBL_BUILD_ENV=(CC CXX CPP LD AR NM OBJCOPY OBJDUMP HOSTCC HOSTCXX
 # names for itself.  status and clean both read this, so a tree that pins its
 # own image is not invisible to either.
 _kbl_image_tags() {
-    { printf '%s\n' "$KBL_IMAGE" "${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
+    { printf '%s\n' "$KBL_IMAGE" "$KBL_LEGACY_IMAGE"
       local t tr
       for t in $(kbl_trees 2>/dev/null); do
           tr="$(kbl_tree "$t" 2>/dev/null)" || continue
@@ -1127,6 +1222,9 @@ cmd_containers() {
 }
 
 # ---------------------------------------------------------------- dispatch
+# Braced and ended with exit, so bash has read all of it before running any:
+# editing this file during a long update cannot change what runs after it.
+{
 cmd="${1:-help}"; shift || true
 case "$cmd" in
     init)   cmd_init "$@" ;;
@@ -1146,3 +1244,5 @@ case "$cmd" in
     help|-h|--help) usage ;;
     *) echo "kbuildlab: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
 esac
+exit
+}

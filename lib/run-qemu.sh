@@ -7,6 +7,9 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/common.sh"
 
+# One brace group, parsed whole before any of it runs: editing this file while a
+# guest runs cannot change what the launcher does when the guest exits.
+{
 RUN=0; PORT=""; PORT_SET=0; MEM=1G; SMP=2; KVM=0; KASLR=0; NET=1
 QMP=1; QMPPORT=""; QMPPORT_SET=0   # QMP monitor: what drgn attaches through
 INITRD=""; INITRD_SET=0; NO_INITRD=0; SSHPORT=""; SSHPORT_SET=0
@@ -18,7 +21,7 @@ MODULES=1                   # append the modules kbuildlab build staged to the i
 declare -a EXTRA=()
 declare -a REST=()
 _usage() {
-    cat <<USAGE
+    cat <<'USAGE'
 kbuildlab run [TREE] [options] [-- QEMU ARGS]
   boot a built tree under QEMU, frozen at reset for a debugger (--run to boot now)
 
@@ -87,8 +90,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 tree="$(kbl_tree "${REST[0]:-}")" || exit 1
-arch="$(kbl_tree_arch "$tree")"
-src="$(kbl_tree_src "$tree")"
+arch="$(kbl_tree_arch "$tree")" || exit 1
+src="$(kbl_tree_src "$tree")" || exit 1
+_statedir="$(kbl_statedir)" || exit 1
 
 # A persistent disk must not be opened read-write by two guests at once, or the
 # ext4 on it corrupts. QEMU's own image lock would refuse the second guest and
@@ -133,7 +137,7 @@ console="$(kbl_tree_get "$tree" CONSOLE)"; [[ -n "$console" ]] || die "$tree/tre
 # alive; a file left by a dead launcher is not a claim and does not block.
 _busy() {
     [[ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]] && return 0
-    kbl_launcher_alive "$(kbl_statedir)/kbl-run-$1.env"
+    kbl_launcher_alive "$_statedir/kbl-run-$1.env"
 }
 
 # Take the port, or fail because someone else already did.  noclobber makes the
@@ -148,7 +152,7 @@ _busy() {
 # Two runs can see the same dead owner at once, so the check and the rm run
 # under flock: without it the second rm removed the first run's fresh claim.
 _claim_port() {
-    local port="$1" f lp; f="$(kbl_statedir)/kbl-run-${port}.env"
+    local port="$1" f lp; f="$_statedir/kbl-run-${port}.env"
     # The launcher's start time goes in beside its pid, for the same reason
     # qemu's does: a pid on its own is not an identity, and a reused one would
     # make a dead run's claim look live for ever.
@@ -162,7 +166,7 @@ _claim_port() {
         [[ -n "$lp" ]] && kill -0 "$lp" 2>/dev/null && exit 1      # a live owner
         rm -f "$f" 2>/dev/null
         _try
-    ) 9>>"$(kbl_statedir)/kbl-claim.lock"
+    ) 9>>"$_statedir/kbl-claim.lock"
 }
 # Prune per-run scratch whose guest is gone.  The rule (a live qemu carries that
 # gdb port, AND something is listening on it) lives in common.sh so `attach`
@@ -181,17 +185,17 @@ if [[ $PORT_SET -eq 1 ]]; then
         die "port $PORT already has a listener (you asked for it explicitly); pick another with --port"
     fi
     if ! _claim_port "$PORT"; then
-        _lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$(kbl_statedir)/kbl-run-${PORT}.env" 2>/dev/null | head -1)"
+        _lp="$(sed -n 's/^KBL_LAUNCHER_PID=//p' "$_statedir/kbl-run-${PORT}.env" 2>/dev/null | head -1)"
         die "port $PORT is being set up by another run (launcher pid ${_lp:-?}); pick another with --port"
     fi
 else
-    _claimed=0
-    for _p in "$PORT" $(seq $((_orig + 1)) $((_orig + 128))); do
+    _claimed=0; _span=128
+    for _p in "$PORT" $(seq $((_orig + 1)) $((_orig + _span))); do
         _busy "$_p" && continue
         _claim_port "$_p" || continue         # lost the race for this one; try the next
         PORT="$_p"; _claimed=1; break
     done
-    [[ $_claimed -eq 1 ]] || die "no free gdb port in $_orig..$((_orig + 128))"
+    [[ $_claimed -eq 1 ]] || die "no free gdb port in $_orig..$((_orig + _span))"
     [[ "$PORT" == "$_orig" ]] || \
         say "port         $_orig busy -> using $PORT (attach with --port $PORT)"
 fi
@@ -200,7 +204,7 @@ fi
 # here on too.  Every `die` between the claim and the launch -- an unbuildable
 # command line, a missing firmware file, a full tmpfs -- used to leave the claim
 # behind and make that port unusable until something pruned it.
-_state="$(kbl_statedir)/kbl-run-${PORT}.env"
+_state="$_statedir/kbl-run-${PORT}.env"
 _loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
 shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""; _ird=""   # per-run scratch
 qmpsock=""                                                 # QMP unix socket, same
@@ -299,7 +303,7 @@ if [[ -n "$INITRD" && $MODULES -eq 1 && -f "$tree/modules.cpio.gz" ]]; then
         warn "$tree/modules.cpio.gz is older than the build's modules; booting without them
        (kbuildlab build $(basename "$tree") stages them again)"
     else
-        _ird="$(kbl_statedir)/kbl-initrd-${PORT}.cpio.gz"
+        _ird="$_statedir/kbl-initrd-${PORT}.cpio.gz"
         cat "$INITRD" "$tree/modules.cpio.gz" > "$_ird" || die "could not write $_ird"
         INITRD="$_ird"; mods="$tree/modules.cpio.gz"
     fi
@@ -439,10 +443,9 @@ CMD+=(-device virtio-rng-pci)
 _shm_room_for() {
     local src="$1" need avail
     need="$(stat -c%s "$src" 2>/dev/null)" || return 0
-    local sd; sd="$(kbl_statedir)"
-    avail="$(df -B1 --output=avail "$sd" 2>/dev/null | tail -1 | tr -dc 0-9)"
+    avail="$(df -B1 --output=avail "$_statedir" 2>/dev/null | tail -1 | tr -dc 0-9)"
     [[ -n "$avail" ]] || return 0
-    (( avail > need + (need / 4) )) || die "$sd has $((avail / 1048576)) MiB free; this run needs \
+    (( avail > need + (need / 4) )) || die "$_statedir has $((avail / 1048576)) MiB free; this run needs \
 $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_DIR elsewhere."
 }
 case "$BOOT" in
@@ -464,14 +467,14 @@ case "$BOOT" in
         command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
         _loadaddr="$la"                                 # attach's HW-bp goes here
         _shm_room_for "$bd"
-        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"
+        shmdisk="$_statedir/kbl-boot-${PORT}.img"
         cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
         # u-boot ignores QEMU -append, so this run's bootargs ride in boot.scr.
         # The initrd is loaded, and named to booti, only when there is one: `-`
         # in its place is how booti is told there is none.  Loading it anyway
         # under --no-initrd would boot a root filesystem the caller asked not to
         # have, and the flag would look like it did nothing.
-        _bc="$(mktemp -p "$(kbl_statedir)")"; _bs="$(mktemp -p "$(kbl_statedir)")"
+        _bc="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"; _bs="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"
         { printf 'load virtio 0:1 %s /Image\n' "$la"
           [[ -n "$INITRD" ]] && printf 'load virtio 0:1 %s /rootfs.cpio.gz\n' "$ra"
           printf "setenv bootargs '%s'\n" "$append"
@@ -527,9 +530,9 @@ case "$BOOT" in
         _loadaddr="$la"
         command -v mcopy >/dev/null 2>&1 || die "mtools (mcopy) required for boot uefi"
         _shm_room_for "$bd"
-        shmdisk="$(kbl_statedir)/kbl-boot-${PORT}.img"
+        shmdisk="$_statedir/kbl-boot-${PORT}.img"
         cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
-        shmvars="$(kbl_statedir)/kbl-vars-${PORT}.fd"
+        shmvars="$_statedir/kbl-vars-${PORT}.fd"
         cp -f "$vars" "$shmvars" || die "could not copy $vars to $shmvars"
         # Rewrite grub.cfg with this run's bootargs (kaslr/console).  The initrd
         # line is written only when there is one: grub loads what the config
@@ -539,7 +542,7 @@ case "$BOOT" in
         # OVMF's console leaves SGR 40 in force, which bands every kernel line on a
         # palette whose color0 is not the background.  On its own serial terminal
         # grub answers a color_normal write with ESC[m, which clears it.
-        _gc="$(mktemp -p "$(kbl_statedir)")"
+        _gc="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"
         { [[ "$console" =~ ^ttyS([0-9]+)$ ]] \
               && printf 'serial --unit=%s\nterminal_output serial\nset color_normal=$color_normal\n' "${BASH_REMATCH[1]}"
           printf 'search --no-floppy --set=root --file /vmlinuz\n'
@@ -654,7 +657,7 @@ if [[ $QMP -eq 1 ]]; then
         [[ -n "$QMPPORT" ]] || die "no free qmp port in $_qo..$((_qo + 128))"
         say "qmp          $_qo busy -> using $QMPPORT"
     fi
-    qmpsock="$(kbl_statedir)/kbl-qmp-${PORT}.sock"
+    qmpsock="$_statedir/kbl-qmp-${PORT}.sock"
     rm -f "$qmpsock"
     CMD+=(-qmp "unix:${qmpsock},server=on,wait=off"
           -qmp "tcp:127.0.0.1:${QMPPORT},server=on,wait=off"
@@ -741,7 +744,7 @@ _write_state() {   # _write_state [QEMU_PID]
     # no load address -- and then skip the hardware breakpoint and stop somewhere
     # the kernel never runs, with nothing on screen to say why.  rename(2) is
     # atomic, so a reader sees either the old record or the new one.
-    tmp="$(mktemp -p "$(dirname "$_state")" .kbl-run.XXXXXX)" || return 0
+    tmp="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")" || return 0
     printf '%s\n' "${rec[@]}" > "$tmp" && mv -f "$tmp" "$_state" || rm -f "$tmp"
 }
 _write_state
@@ -827,3 +830,4 @@ if [[ $_rc -gt 128 ]]; then
     esac
 fi
 exit $_rc
+}
