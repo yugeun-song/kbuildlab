@@ -81,27 +81,8 @@ case "$dbg" in
         warn "resume: resuming under an attached debugger (--force); it will disagree" ;;
 esac
 
-out="$(python3 - "$qmpport" <<'PY' 2>&1
-import json, socket, sys
-try:
-    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
-    s.recv(65536); s.sendall(b'{"execute":"qmp_capabilities"}\n'); s.recv(65536)
-    s.sendall(b'{"execute":"cont"}\n')
-    for _ in range(4):
-        line = s.recv(65536).splitlines()[0]
-        msg = json.loads(line)
-        if "error" in msg:
-            print("ERROR", msg["error"].get("desc", msg["error"])); break
-        if "return" in msg:
-            print("OK"); break
-except Exception as e:
-    print("ERROR", e)
-PY
-)"
-case "$out" in
-    OK*) : ;;
-    *)   die "resume: QMP refused: ${out#ERROR }" ;;
-esac
+out="$(python3 "${KBL_REPO}/lib/qmp.py" --port "$qmpport" --timeout 5 cont 2>&1)" \
+    || die "resume: QMP refused: $out"
 
 state="$(kbl_qmp_runstate "$_r_sf")"
 say "resume       runstate now ${state:-unknown}"

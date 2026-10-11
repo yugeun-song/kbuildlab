@@ -127,8 +127,8 @@ else
     addr="$qmpsock"
 fi
 
-arch="$(kbl_tree_arch "$tree")"
-src="$(kbl_tree_src "$tree")"
+arch="$(kbl_tree_arch "$tree")" || exit 1
+src="$(kbl_tree_src "$tree")" || exit 1
 vmlinux="$src/vmlinux"
 if [[ $SYMBOLS -eq 1 ]]; then
     [[ -f "$vmlinux" ]] || die "no vmlinux at $vmlinux
@@ -175,25 +175,11 @@ if [[ "$_ident" == 0 && $WAIT -gt 0 ]]; then
     [[ "$_ident" == 1 ]] && say "waiting      published after $(( WAIT - (_end - SECONDS) ))s"
 fi
 
-_qmp_status() {
-    [[ -n "$qmpport" ]] && command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$qmpport" <<'QMPPY' 2>/dev/null
-import json, socket, sys
-try:
-    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2)
-    s.recv(65536); s.sendall(b'{"execute":"qmp_capabilities"}\n'); s.recv(65536)
-    s.sendall(b'{"execute":"query-status"}\n')
-    print(json.loads(s.recv(65536).splitlines()[0])["return"]["status"])
-except Exception:
-    pass
-QMPPY
-}
-
 if [[ "$_ident" == 0 ]]; then
     # The note is written from qemu_fw_cfg's device initcall, so it does not
     # exist while the kernel is still inside start_kernel -- which is where an
     # early-boot session usually is.  Say how far to go, not just "continue".
-    if [[ "$(_qmp_status)" == prelaunch ]]; then
+    if [[ "$(kbl_qmp_runstate "$_r_sf")" == prelaunch ]]; then
         warn "drgn: the guest on :$PORT has never been started -- it is frozen at its
        reset vector, so there is no kernel in memory.  Every symbol lookup in this
        session raises ObjectNotFoundError, and it will keep doing so: drgn builds
@@ -233,7 +219,7 @@ fi
 # Image header while any kernel VA raises FaultError "could not find memory
 # segment", identically under Sv39 and under Sv48/Sv57.  Only worth saying once
 # the guest has been identified; before that the message above is the reason.
-if [[ "$(kbl_tree_arch "$tree")" == riscv64 && "$_ident" != 0 ]]; then
+if [[ "$arch" == riscv64 && "$_ident" != 0 ]]; then
     warn "drgn: $(drgn --version 2>/dev/null | head -1) translates no riscv64 kernel virtual
        address, so reads through symbols raise FaultError even though the guest is
        identified and physical reads work.  Use prog.read(PA, N, physical=True),
