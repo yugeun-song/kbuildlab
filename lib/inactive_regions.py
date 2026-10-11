@@ -212,6 +212,7 @@ class Layout:
                 self.owner[no] = g.gid
         self.parent = [g.parent.gid if g.parent is not None else -1 for g in self.groups]
         self.visible: set[int] = set()
+        self.renumbers = False
         in_block = tail = False
         for first, last, buf in logical_lines(text):
             began_in_comment = in_block
@@ -223,6 +224,8 @@ class Layout:
             if m:
                 if m.group(1) in _OUTPUT_DIRECTIVES:
                     self.visible.add(first)
+                elif m.group(1) == "line":
+                    self.renumbers = True
                 tail = in_block
                 continue
             tail = False
@@ -336,6 +339,7 @@ def _trace(job):
     guarded = {w[0]: w[4] for w in wanted.values()}
     stack: list[str] = []
     here, path, lineno = "", "", 0
+    whole = False
     assert proc.stdout is not None
     for line in proc.stdout:
         lineno += 1
@@ -387,17 +391,19 @@ def _trace(job):
                 if not opened and key in entries and guarded[key]:
                     pending.discard(key)
             if not pending:
+                whole = True
                 break
         elif " 1" in m["flags"]:
             stack.append(path)
-    proc.kill()
-    proc.wait()
+    if whole:
+        proc.kill()
+    whole = proc.wait() == 0 or whole
     best: dict[str, tuple[dict, dict, dict, int]] = {}
     for fid, (key, _, _, lines, _) in wanted.items():
         if key in entries and key not in best:
             e = max(entries[key], key=lambda x: sum(lines[g] for g in x["live"]))
             best[key] = (e["state"], e["later"], e["origin"], sum(lines[g] for g in e["live"]))
-    return best
+    return best, whole
 
 
 def _preamble(job):
@@ -424,9 +430,9 @@ def _preamble(job):
         m = _UNDEF.match(line)
         if m:
             have.pop(m.group(1), None)
-    proc.wait()
+    rc = proc.wait()
     os.unlink(vfs)
-    return have
+    return have, rc == 0
 
 
 class Memo:
@@ -586,11 +592,13 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
         jobs_a.append((argv, s["file"], s["directory"], wanted,
                        _vfs(workdir, marked[src]), renumber[src]))
         keys_a.append(key if stamps[src] is not None else None)
+    unfinished = 0
     with cf.ProcessPoolExecutor(jobs) as ex:
-        for key, found in zip(keys_a, ex.map(_trace, jobs_a, chunksize=4)):
+        for key, (found, whole) in zip(keys_a, ex.map(_trace, jobs_a, chunksize=4)):
             target.update(found)
-            if key:
+            if key and whole:
                 memo.put(key, found)
+            unfinished += not whole
     retraced = len(jobs_a)
 
     written = 0
@@ -614,10 +622,11 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
         jobs_b.append((argv, e["file"], e["directory"], set(snap[0]), workdir, empty))
         keys_b.append((rel, key if stamp is not None else None))
     with cf.ProcessPoolExecutor(jobs) as ex:
-        for (rel, key), have in zip(keys_b, ex.map(_preamble, jobs_b, chunksize=8)):
+        for (rel, key), (have, whole) in zip(keys_b, ex.map(_preamble, jobs_b, chunksize=8)):
             have_of[rel] = have
-            if key:
+            if key and whole:
                 memo.put(key, have)
+            unfinished += not whole
 
     for rel, have in have_of.items():
         want_state, later, origin, _ = target[rel]
@@ -662,7 +671,8 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
         print(f"    {len(target)} headers traced through {len(per_source)} sources "
               f"({retraced} preprocessed, the rest unchanged since last time); "
               f"{written} needed their macro state corrected, "
-              f"{traced - len(target)} are never reached by their source")
+              f"{traced - len(target)} are never reached by their source"
+              + (f"; {unfinished} clang run(s) did not finish and are not kept" if unfinished else ""))
     empty = {os.path.relpath(headers[fid]["file"], ksrc): src
              for src, wanted in per_source.items() for fid, w in wanted.items()
              if w[0] not in target or not target[w[0]][3]}
@@ -701,6 +711,8 @@ def read_unit(job):
                             stderr=subprocess.PIPE, errors="replace")
     passes: dict[str, list[set[int]]] = {}
     stack: list[tuple[str, set[int]]] = []
+    renamed: set[str] = set()
+    main = os.path.normpath(os.path.join(cwd, argv[-1]))
     line = 0
     assert proc.stdout is not None and proc.stderr is not None
     for raw in proc.stdout:
@@ -720,7 +732,9 @@ def read_unit(job):
                 if stack:
                     stack[-1][1].add(line - 1)
             elif not stack or stack[-1][0] != path:
-                stack = [(path, set())]
+                if len(stack) > 1 or (stack and path != main and not m["path"].startswith("<")):
+                    renamed.add(path)
+                stack[-1:] = [(path, set())]
                 passes.setdefault(path, []).append(stack[-1][1])
             continue
         if stack and raw.strip():
@@ -734,9 +748,12 @@ def read_unit(job):
             outside.append(path)
             continue
         lay = layout_of(path, _LAYOUTS)
-        if lay is None or not lay.groups:
+        if lay is None or not lay.groups or lay.renumbers or path in renamed:
             continue
-        seen = sorted({tuple(sorted(s)) for s in map(lay.live, emitted) if s})
+        # A pass that emitted lines is a reading even when none lies in a group:
+        # every group of the file was dead.  One that emitted none re-entered a
+        # guarded header and read nothing.
+        seen = sorted({tuple(sorted(lay.live(e))) for e in emitted if e})
         if seen:
             files[os.path.relpath(path, cwd)] = [list(r) for r in seen]
     return key, rc, err[-2000:] if rc else "", {"files": files, "outside": sorted(outside)}

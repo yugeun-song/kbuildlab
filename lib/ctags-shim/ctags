@@ -1,0 +1,26 @@
+#!/bin/bash
+here=$(dirname "$(readlink -f "$0")")
+real=
+IFS=: read -ra dirs <<<"$PATH"
+for p in "${dirs[@]}"; do
+    [[ $(readlink -f "$p") != "$here" && -x $p/ctags ]] && { real=$p/ctags; break; }
+done
+[[ -n $real ]] || { echo "ctags shim: no ctags on PATH" >&2; exit 127; }
+
+case "${1-}" in --version|--list-*|--help*) exec "$real" "$@" ;; esac
+
+d=${KBL_TAGS_STATE:?ctags shim: KBL_TAGS_STATE is not set}
+if [[ -n ${KBL_TAGS_EMIT-} ]]; then
+    [[ -e $d/emitted ]] || { cat "$d/tags.new" > tags && : > "$d/emitted"; }
+    exit
+fi
+args=("$@")
+i=$#
+while (( i > 0 )) && [[ ${args[i-1]} != -* && -f ${args[i-1]} ]]; do (( i-- )); done
+key=$(printf '%s\0' "${args[@]:0:i}" | md5sum | cut -c1-16)
+if [[ ! -e $d/opts.$key ]]; then
+    printf '%s\0' "${args[@]:0:i}" > "$d/opts.$key"
+    printf '%s\n' "$key" >> "$d/keys"
+fi
+(( i < $# )) && printf '%s\n' "${args[@]:i}" >> "$d/files.$key"
+: >> tags
