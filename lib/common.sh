@@ -74,11 +74,24 @@ kbl_qemu() {
     printf '%s\n' "$bin"
 }
 
+kbl_gdb_python() {
+    local err why rc detail
+    err="$("$1" -nx -batch -ex 'python gdb.VERSION' 2>&1 >/dev/null)"; rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    why="$(grep -E '^(Python Exception|Could not load)|not supported' <<<"$err" | head -2)"
+    [[ -n "$why" ]] || why="$(grep -m1 '[^[:space:]]' <<<"$err")"
+    detail="$({ "$1" --version 2>/dev/null | head -1; printf '%s\n' "$why"; } | sed '/^[[:space:]]*$/d; s/^/       /')"
+    warn "skipping $1: 'python gdb.VERSION' exited with status $rc${detail:+
+$detail}"
+    return 1
+}
+
 # A cross gdb, or the host one if it was built for every target.  Names differ
 # between distributions, so the candidates are probed rather than assumed.
 kbl_gdb() {
-    local arch="$1" c
-    local -a cands
+    local arch="$1" c hint="
+       The host gdb is only usable if it was built --enable-targets=all"
+    local -a cands bad=()
     case "$arch" in
         arm64|aarch64) cands=(aarch64-linux-gnu-gdb aarch64-none-linux-gnu-gdb
                               aarch64-none-elf-gdb gdb-multiarch) ;;
@@ -88,14 +101,19 @@ kbl_gdb() {
         *) die "unknown architecture '$arch'" ;;
     esac
     for c in "${cands[@]}"; do
-        command -v "$c" >/dev/null 2>&1 && { printf '%s\n' "$c"; return 0; }
+        command -v "$c" >/dev/null 2>&1 || continue
+        kbl_gdb_python "$c" && { printf '%s\n' "$c"; return 0; }
+        bad+=("$c")
     done
-    if command -v gdb >/dev/null 2>&1 &&
-       gdb --configuration 2>/dev/null | grep -q -- '--enable-targets=all'; then
-        printf '%s\n' gdb; return 0
+    if [[ " ${cands[*]} " == *" gdb "* ]]; then
+        hint=""
+    elif command -v gdb >/dev/null 2>&1 &&
+         gdb --configuration 2>/dev/null | grep -q -- '--enable-targets=all'; then
+        kbl_gdb_python gdb && { printf '%s\n' gdb; return 0; }
+        cands+=(gdb); bad+=(gdb); hint=""
     fi
-    die "no gdb that can debug $arch. Tried: ${cands[*]}
-       The host gdb is only usable if it was built --enable-targets=all"
+    die "no gdb that can debug $arch. Tried: ${cands[*]}${bad[*]:+
+       Present but rejected (see above): ${bad[*]}}$hint"
 }
 
 # --- the workspace -----------------------------------------------------------
@@ -182,18 +200,13 @@ kbl_tree() {
 # --- the tree's own description ----------------------------------------------
 # Read from the tree, never inferred from its directory name: renaming a
 # directory must not change what gets built.
-# tree.conf grammar, and it is the SAME one in all five parsers that read this
-# file (kbuildlab's kbl_tree_get and its GDBTOOLS_ passthrough, the two firmware
-# scripts, and the editor adapter's discover.lua):
 #
-#     ^\s* KEY \s*=\s* VALUE   with a trailing  # comment  and trailing space
-#     stripped, and one layer of surrounding double quotes removed.
-#
-# They used to differ: three demanded KEY= with no space while the Lua one
-# accepted spaces, and only one stripped quotes.  A line written as
-# `GDBTOOLS_ENTRY_PA = 0x40200000` was then honoured by the editor and dropped in
-# silence by the terminal, so the same guest calibrated to two different addresses
-# with nothing to say which was which.
+# tree.conf grammar.  kbl_tree_get is the reference, and every other reader
+# (clangd.py's tree_conf_get, the editor adapter, the workspace's firmware
+# scripts) must give the same answers on tests/tree-conf-vectors.json:
+#   KEY, optional blanks, '=', optional blanks, VALUE; the first such line wins.
+#   A VALUE that starts with '"' runs to the next '"'; any other ends at the
+#   first '#', trailing blanks stripped.
 kbl_tree_get() {
     local tree="$1" key="$2" v
     v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$tree/tree.conf" | head -1)"
@@ -202,11 +215,19 @@ kbl_tree_get() {
     printf '%s\n' "$v"
 }
 
+# Every key tree.conf states, each once, in order of first appearance.
+kbl_tree_keys() {
+    sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\1/p' "$1/tree.conf" \
+        | awk '!seen[$0]++'
+}
+
+# The architecture as kbuildlab names it everywhere else: aarch64 is read as arm64.
 kbl_tree_arch() {
     local a; a="$(kbl_tree_get "$1" ARCH)"
-    [[ -n "$a" ]] || die "$1/tree.conf states no ARCH"
     case "$a" in
-        arm64|aarch64|riscv64|x86_64) printf '%s\n' "$a" ;;
+        arm64|aarch64) printf 'arm64\n' ;;
+        riscv64|x86_64) printf '%s\n' "$a" ;;
+        "") die "$1/tree.conf states no ARCH" ;;
         *) die "$1/tree.conf states ARCH=$a, which is not one of arm64, riscv64, x86_64" ;;
     esac
 }
@@ -482,13 +503,12 @@ kbl_prune_state() {
     local rec p
     while IFS=$'\x1f' read -r p _; do [[ -n "$p" ]] && live["$p"]=1; done < <(kbl_instances)
     local f fp
-    # All per-run scratch lives in the state directory, so the glob follows it
-    # too: half of it under $KBL_STATE_DIR and half hardcoded in /dev/shm meant a
-    # moved state directory left the 90-128 MB boot images unreclaimed for ever.
+    # Every per-run file is named kbl-<what>-<gdb port>[.<suffix>] in the state
+    # directory; run-qemu.sh creates no other.
     for f in "$sd"/kbl-run-*.env "$sd"/kbl-boot-*.img "$sd"/kbl-vars-*.fd \
-             "$sd"/kbl-qmp-*.sock; do
+             "$sd"/kbl-qmp-*.sock "$sd"/kbl-initrd-*.cpio.gz "$sd"/kbl-tmp-*; do
         [[ -e "$f" ]] || continue
-        fp="${f##*-}"; fp="${fp%.env}"; fp="${fp%.img}"; fp="${fp%.fd}"; fp="${fp%.sock}"
+        fp="${f##*/kbl-}"; fp="${fp#*-}"; fp="${fp%%.*}"
         [[ "$fp" =~ ^[0-9]+$ ]] || continue
         # Two owners, and only these two.  A live qemu carrying that gdb port, or
         # a `run` that has claimed the port and not started qemu yet (its
@@ -525,16 +545,7 @@ kbl_uptime_of() { ps -o etime= -p "$1" 2>/dev/null | tr -d ' '; }
 kbl_qmp_runstate() {   # kbl_qmp_runstate STATEFILE
     local port; port="$(kbl_state_get "$1" KBL_QMP_PORT 2>/dev/null)"
     [[ -n "$port" ]] && command -v python3 >/dev/null 2>&1 || return 0
-    python3 - "$port" <<'KBLQMP' 2>/dev/null
-import json, socket, sys
-try:
-    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2)
-    s.recv(65536); s.sendall(b'{"execute":"qmp_capabilities"}\n'); s.recv(65536)
-    s.sendall(b'{"execute":"query-status"}\n')
-    print(json.loads(s.recv(65536).splitlines()[0])["return"]["status"])
-except Exception:
-    pass
-KBLQMP
+    python3 "${KBL_REPO}/lib/qmp.py" --port "$port" --timeout 2 query-status 2>/dev/null
 }
 
 kbl_guest_table() {   # kbl_guest_table ROW...

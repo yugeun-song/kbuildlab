@@ -1,0 +1,146 @@
+[
+ {
+  "name": "plain",
+  "conf": "KEY=value\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "blanks around =",
+  "conf": "KEY = value\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "leading and inner tabs",
+  "conf": "\tKEY\t=\tvalue\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "trailing blanks",
+  "conf": "KEY=value   \n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "comment",
+  "conf": "KEY=value # note\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "comment without blank",
+  "conf": "KEY=value#note\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "inner blanks kept",
+  "conf": "KEY=a b  # c\n",
+  "key": "KEY",
+  "value": "a b"
+ },
+ {
+  "name": "quoted",
+  "conf": "KEY=\"value\"\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "quoted hash",
+  "conf": "KEY=\"a#b\" # c\n",
+  "key": "KEY",
+  "value": "a#b"
+ },
+ {
+  "name": "quoted blanks",
+  "conf": "KEY=\"a b\"\n",
+  "key": "KEY",
+  "value": "a b"
+ },
+ {
+  "name": "quoted, nothing after the closing quote kept",
+  "conf": "KEY=\"abc\"def\n",
+  "key": "KEY",
+  "value": "abc"
+ },
+ {
+  "name": "unterminated quote",
+  "conf": "KEY=\"abc\n",
+  "key": "KEY",
+  "value": "abc"
+ },
+ {
+  "name": "single quotes are part of the value",
+  "conf": "KEY='abc'\n",
+  "key": "KEY",
+  "value": "'abc'"
+ },
+ {
+  "name": "empty",
+  "conf": "KEY=\n",
+  "key": "KEY",
+  "value": ""
+ },
+ {
+  "name": "empty quoted",
+  "conf": "KEY=\"\"\n",
+  "key": "KEY",
+  "value": ""
+ },
+ {
+  "name": "first line wins",
+  "conf": "KEY=first\nKEY=second\n",
+  "key": "KEY",
+  "value": "first"
+ },
+ {
+  "name": "commented line is not a key",
+  "conf": "# KEY=x\nKEY=y\n",
+  "key": "KEY",
+  "value": "y"
+ },
+ {
+  "name": "longer key is another key",
+  "conf": "KEYX=1\nKEY=2\n",
+  "key": "KEY",
+  "value": "2"
+ },
+ {
+  "name": "key inside another is not the key",
+  "conf": "XKEY=1\n",
+  "key": "KEY",
+  "value": null
+ },
+ {
+  "name": "absent",
+  "conf": "OTHER=1\n",
+  "key": "KEY",
+  "value": null
+ },
+ {
+  "name": "value holding =",
+  "conf": "KEY=a=b\n",
+  "key": "KEY",
+  "value": "a=b"
+ },
+ {
+  "name": "CRLF line",
+  "conf": "KEY=value\r\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "CRLF line, quoted",
+  "conf": "KEY=\"value\"\r\n",
+  "key": "KEY",
+  "value": "value"
+ },
+ {
+  "name": "GDBTOOLS key, quoted",
+  "conf": "GDBTOOLS_ENTRY_PA = \"0x40080000\"  # the image base\n",
+  "key": "GDBTOOLS_ENTRY_PA",
+  "value": "0x40080000"
+ }
+]

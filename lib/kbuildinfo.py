@@ -512,24 +512,32 @@ def build_overlay(ksrc: str, overlay_dir: str, arch: str, verbose: bool = False)
     lds = index_linker_scripts(ksrc, arch)
     autoconf = os.path.join(overlay_dir, "generated", "autoconf.h")
     sections = os.path.join(overlay_dir, "asm-generic", "sections.h")
-    ac_total, ac_doc = write_autoconf_overlay(ksrc, autoconf, kconfig, makefiles)
-    se_total, se_doc = write_sections_overlay(ksrc, sections, lds)
-    # Whatever an earlier layout of the overlay left behind would still shadow
-    # the tree, so only what this run wrote may stay.  Written first and pruned
-    # after: a clangd reading the tree meanwhile never finds the overlay empty.
-    for root, _, names in os.walk(overlay_dir):
-        for n in names:
-            if os.path.join(root, n) not in (autoconf, sections):
-                os.unlink(os.path.join(root, n))
+    # Written beside the live overlay, which clangd may be reading, checked, and
+    # only then renamed over it.
+    staged = {autoconf: autoconf + ".kbl-tmp", sections: sections + ".kbl-tmp"}
+    ac_total, ac_doc = write_autoconf_overlay(ksrc, staged[autoconf], kconfig, makefiles)
+    se_total, se_doc = write_sections_overlay(ksrc, staged[sections], lds)
     problems: list[str] = []
-    for p in (autoconf, sections):
+    for p in staged.values():
         if os.path.isfile(p):
             problems += verify_comments(p)
     if problems:
+        for p in staged.values():
+            if os.path.isfile(p):
+                os.unlink(p)
         for line in problems[:10]:
             print(f"    OVERLAY PROBLEM {line}")
         raise SystemExit(f"overlay for {ksrc} would break the parse "
                          f"({len(problems)} bad comment(s)); refusing to use it")
+    for final, p in staged.items():
+        if os.path.isfile(p):
+            os.replace(p, final)
+    # Whatever an earlier layout of the overlay left behind would still shadow
+    # the tree, so only what this run wrote may stay.
+    for root, _, names in os.walk(overlay_dir):
+        for n in names:
+            if os.path.join(root, n) not in (autoconf, sections):
+                os.unlink(os.path.join(root, n))
     if verbose:
         print(f"    Kconfig: {len(kconfig)} symbols, "
               f"Makefiles: {len(makefiles)} config-gated build rules, "

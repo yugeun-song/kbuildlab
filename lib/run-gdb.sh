@@ -112,42 +112,40 @@ case "$_dbg" in
        start a second guest:  kbuildlab run $(basename "$tree")" ;;
 esac
 
-arch="$(kbl_tree_arch "$tree")"
-src="$(kbl_tree_src "$tree")"
+arch="$(kbl_tree_arch "$tree")" || exit 1
+src="$(kbl_tree_src "$tree")" || exit 1
 vmlinux="$src/vmlinux"
 [[ -f "$vmlinux" ]] || die "no vmlinux at $vmlinux
        build it first: kbuildlab build $(basename "$tree")"
 
-gdb="$(kbl_gdb "$arch")"
+gdb="$(kbl_gdb "$arch")" || exit 1
 
 # gdbtools, if it is installed, is what makes symbols work before the MMU is on.
-# It is optional and found the way it documents; absent is a normal answer.
+# Absent is a normal answer; a location that is stated and wrong is not.
 tool=""
-if [[ -n "${GDBTOOLS_PATH:-}" && -f "${GDBTOOLS_PATH}" ]]; then
+_root_file="${XDG_CONFIG_HOME:-$HOME/.config}/gdbtools/root"
+if [[ -n "${GDBTOOLS_PATH:-}" ]]; then
+    [[ -f "$GDBTOOLS_PATH" ]] || die "GDBTOOLS_PATH=$GDBTOOLS_PATH is not a file"
     tool="$GDBTOOLS_PATH"
-elif [[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/gdbtools/root" ]]; then
-    _r="$(<"${XDG_CONFIG_HOME:-$HOME/.config}/gdbtools/root")"
-    [[ -f "$_r/gdbtools.py" ]] && tool="$_r/gdbtools.py"
+elif [[ -r "$_root_file" ]]; then
+    _r="$(<"$_root_file")"
+    [[ -f "$_r/gdbtools.py" ]] || die "$_root_file names $_r, which has no gdbtools.py
+       (re-run gdbtools' setup.sh, or remove the file)"
+    tool="$_r/gdbtools.py"
 fi
 
-# The machine description this tree states, handed over as-is.  Anything already
-# in the environment wins, so a one-off override still works.  GDBTOOLS_ENTRY_PA is
-# the exception: the tree states the address its DEFAULT boot mode lands the kernel
-# at, and this port may be running another one, so it is held back here and applied
-# further down only if nothing better is recorded.  Both callers of gdbtools resolve
-# it the same way -- the nvim adapter reads the per-port state file too.
+# The machine description this tree states, read by kbl_tree_get's grammar and
+# handed over as-is; a value already in the environment wins.  GDBTOOLS_ENTRY_PA
+# describes the tree's DEFAULT boot mode and this port may run another, so it is
+# held back and applied below only if no run state says better.  GDBTOOLS_AUTO is
+# always on: arming the session is what this launcher is for.
 _op_entry="${GDBTOOLS_ENTRY_PA:-}"   # an operator pin; it outranks everything below
 _tree_entry=""                       # what tree.conf states, applied only as a fallback
-while IFS='=' read -r k v; do
-    # The same grammar as kbl_tree_get, including the quote strip that this one
-    # was missing -- and this is the parser whose output goes straight into gdb's
-    # environment, so `GDBTOOLS_ENTRY_PA="0x40080000"` reached the debugger with
-    # its quotes attached and did not parse as a number.
-    if [[ "$v" == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
-    else v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+while IFS= read -r k; do
+    v="$(kbl_tree_get "$tree" "$k")"
     [[ "$k" == GDBTOOLS_ENTRY_PA ]] && { _tree_entry="$v"; continue; }
     [[ -n "${!k:-}" ]] || export "$k=$v"
-done < <(sed -n 's/^[[:space:]]*\(GDBTOOLS_[A-Z0-9_]*\)[[:space:]]*=[[:space:]]*\(.*\)/\1=\2/p' "$tree/tree.conf")
+done < <(kbl_tree_keys "$tree" | grep -E '^GDBTOOLS_[A-Z0-9_]*$')
 export GDBTOOLS_AUTO=1
 
 # Match the exact boot combination `run` recorded for this gdb port (mode + load

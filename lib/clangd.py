@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import fcntl
 import hashlib
 import inspect
 import json
@@ -125,11 +126,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kbuildinfo
 import inactive_regions
 
-CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME",
-                                    os.path.expanduser("~/.cache")),
+# An empty XDG variable counts as unset, as it does in lib/common.sh.
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
                      "kbuildlab", "clangd")
-USER_CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME",
-                                          os.path.expanduser("~/.config")),
+USER_CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                            "clangd", "config.yaml")
 
 # One marked block per tree, so `kbuildlab tags <one-tree>` rewrites that tree's
@@ -187,16 +187,27 @@ def tree_source(tree_dir: str) -> str | None:
 
 
 def tree_conf_get(tree_dir: str, key: str) -> str | None:
-    path = os.path.join(tree_dir, "tree.conf")
+    """kbl_tree_get's grammar (lib/common.sh), held to it by tests/tree-conf-vectors.json."""
+    line_re = re.compile(rf"^[ \t\r\f\v]*{re.escape(key)}[ \t\r\f\v]*=[ \t\r\f\v]*(.*)$")
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
+        with open(os.path.join(tree_dir, "tree.conf"), encoding="utf-8", errors="replace") as f:
             for line in f:
-                line = line.strip()
-                if line.startswith(f"{key}="):
-                    return line.partition("=")[2].strip()
+                m = line_re.match(line.rstrip("\n"))
+                if m:
+                    v = m.group(1)
+                    if v.startswith('"'):
+                        return v[1:].split('"', 1)[0]
+                    return v.split("#", 1)[0].rstrip(" \t\r\f\v")
     except OSError:
         pass
     return None
+
+
+def write_text(path: str, text: str) -> None:
+    """Replace a file clangd may be reading in one step."""
+    with open(path + ".kbl-tmp", "w") as f:
+        f.write(text)
+    os.replace(path + ".kbl-tmp", path)
 
 
 def tree_conf_arch(tree_dir: str) -> str | None:
@@ -425,10 +436,8 @@ def write_compat_shim(tree: str, entries: list[dict],
         return path, None, 0
     after = next(seq[n - 1] for n in range(1, len(seq) + 1) if defined_after(n) == names)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write("/* GCC resolves counted_by against the finished struct; this clang does not. */\n")
-        for n in names:
-            f.write(f"#undef {n}\n#define {n}(member)\n")
+    write_text(path, "/* GCC resolves counted_by against the finished struct; this clang does not. */\n"
+               + "".join(f"#undef {n}\n#define {n}(member)\n" for n in names))
     return path, after, len(names)
 
 
@@ -566,8 +575,7 @@ def write_identities(tree: str, targets: "Targets", flag_sets: list[tuple], answ
         if header:
             path = os.path.join(d, hashlib.sha1(header.encode()).hexdigest()[:16] + ".h")
             if not os.path.exists(path):
-                with open(path, "w") as f:
-                    f.write(header)
+                write_text(path, header)
             paths[sig] = path
     kept = sorted(meta["kept"])
     with open(os.path.join(d, KEPT_FILE), "w") as f:
@@ -1626,29 +1634,32 @@ def write_tree_block(tree: str, blocks: list[str] | None) -> None:
     None removes the block.
     """
     begin, end = block_markers(tree)
-    existing = read_user_config()
     body = ""
     if blocks:
         body = begin + "\n" + "\n---\n".join(blocks) + end + "\n"
-    if begin in existing and end in existing:
-        pre = existing.split(begin)[0]
-        post = existing.split(end, 1)[1].lstrip("\n")
-        new = pre + body + post
-    elif body:
-        new = (existing.rstrip("\n") + "\n---\n" + body) if existing.strip() else body
-    else:
-        return
-    new = re.sub(r"\n---\s*\n(\s*---\s*\n)+", "\n---\n", new)
-    new = re.sub(r"\A(\s*---\s*\n)+", "", new)
     os.makedirs(os.path.dirname(USER_CONFIG), exist_ok=True)
-    if new.strip():
-        # Renamed into place: a running clangd re-reads this file when it
-        # changes, and must never find half of it.
-        with open(USER_CONFIG + ".tmp", "w") as f:
-            f.write(new)
-        os.replace(USER_CONFIG + ".tmp", USER_CONFIG)
-    elif os.path.isfile(USER_CONFIG):
-        os.unlink(USER_CONFIG)
+    # Trees are indexed in parallel.  The read-modify-write holds a lock on the
+    # config's own directory, the one thing every writer of it shares.
+    lock = os.open(os.path.dirname(USER_CONFIG), os.O_RDONLY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = read_user_config()
+        if begin in existing and end in existing:
+            pre = existing.split(begin)[0]
+            post = existing.split(end, 1)[1].lstrip("\n")
+            new = pre + body + post
+        elif body:
+            new = (existing.rstrip("\n") + "\n---\n" + body) if existing.strip() else body
+        else:
+            return
+        new = re.sub(r"\n---\s*\n(\s*---\s*\n)+", "\n---\n", new)
+        new = re.sub(r"\A(\s*---\s*\n)+", "", new)
+        if new.strip():
+            write_text(USER_CONFIG, new)
+        elif os.path.isfile(USER_CONFIG):
+            os.unlink(USER_CONFIG)
+    finally:
+        os.close(lock)
 
 
 # ---------------------------------------------------------------------------
