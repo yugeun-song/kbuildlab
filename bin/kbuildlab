@@ -9,6 +9,8 @@ _self="$(readlink -f "${BASH_SOURCE[0]}")"
 KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/common.sh"
+# shellcheck source=/dev/null
+source "${KBL_REPO}/lib/registry.sh"
 
 KBL_DEFAULT_VERSION="v6.12"
 KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
@@ -24,17 +26,38 @@ KBL_GITHUB_FILE_LIMIT=$((100 * 1024 * 1024))
 
 usage() {
     cat <<USAGE
-kbuildlab -- containerised Linux kernel build, boot and debug
+kbuildlab -- register, build, boot and debug Linux kernel trees
 
-  kbuildlab init [--workspace DIR]          record where trees live
-  kbuildlab init NAME --arch ARCH [--version V]
-                                            create a tree (default $KBL_DEFAULT_VERSION)
-  kbuildlab init NAME                       recreate a tree recorded in lab/trees:
-                                            its tree.conf now, its .config at config
-  kbuildlab init --restore                  put back the recorded workspace: its own
-                                            files, the source checkouts it builds
-                                            from, and every recorded tree
-  kbuildlab image                           build the container image
+Trees (any directory, any time):
+  kbuildlab trees [-q|--json]               every registered tree: kernel, commit,
+                                            build state, running guests, source
+  kbuildlab inspect TREE [--json|--format K]  everything known about one tree
+  kbuildlab add DIR [--name N] [--arch A]   register a kernel source you already have
+  kbuildlab init NAME --arch ARCH [--version V] [--src DIR]
+                                            register a new tree, to clone with sync
+                                            (default $KBL_DEFAULT_VERSION, into the workspace)
+  kbuildlab init NAME                       recreate a tree recorded in lab/trees
+  kbuildlab init --restore                  recreate the recorded workspace and trees
+  kbuildlab init --workspace DIR            record where new trees are cloned
+  kbuildlab get TREE [KEY...]               read its tree.conf (all of it, or keys)
+  kbuildlab set TREE KEY=VALUE...           write keys into its tree.conf
+  kbuildlab unset TREE KEY...               remove keys from its tree.conf
+  kbuildlab edit TREE                       open its tree.conf in \$VISUAL / \$EDITOR
+  kbuildlab mv TREE DIR [--no-move]         move its source (or only repoint SRC)
+  kbuildlab rename OLD NEW                  rename a tree
+  kbuildlab rm TREE [--purge] [--yes]       unregister; --purge also deletes the
+                                            source, its data and its indexes
+  kbuildlab prune [--yes]                   drop trees whose source is gone and data
+                                            no tree owns
+  kbuildlab migrate [--dry-run]             move trees that keep tree.conf beside
+                                            their source into the registry
+
+Build:
+  kbuildlab update [TREE...|--all] [--no-tags] [--no-clangd] [--no-warm]
+                                            one pass: check, sync, keep .config
+                                            (olddefconfig + report), incremental
+                                            build, modules, ctags/cscope/gtags,
+                                            clangd -- then a summary
   kbuildlab sync   [TREE]                   fetch, and fast-forward to the newest
                                             patch level of the tracked version
   kbuildlab config [TREE] [--preset]        apply the debuggability preset; its soft
@@ -42,90 +65,106 @@ kbuildlab -- containerised Linux kernel build, boot and debug
                                             and their tracing without moving an
                                             existing answer
   kbuildlab build  [TREE] [-- MAKE ARGS]    build in the container
-  kbuildlab update [TREE]                   sync + rebuild + reindex, keeping .config
-                                            (reports what olddefconfig changed and
-                                             any preset line the newer source lost;
-                                             repairs neither)
   kbuildlab tags   [TREE] [--no-clangd]     refresh ctags, cscope, gtags and the
-                          [--clangd-only]     clangd index -- the last one out of
-                          [--no-warm]         tree, in the host's clangd config,
-                                              and warmed here so an editor opens
-                                              on a finished index (KBL_CLANGD=0,
-                                              KBL_CLANGD_WARM=0 turn them off);
-                                              the first three read the tree as its
-                                              build compiled it (KBL_TAGS_VIEW=0:
-                                              as it is on disk)
-  kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger
-                                            (attaches the tree's INITRD rootfs;
-                                             --run to boot now, --no-initrd for none,
-                                             --append to add kernel command-line words,
-                                             --emulate for emulated controllers)
-  kbuildlab drgn   [TREE] [--qmp-port N]    attach drgn to a running guest over QMP
-                                            (does not pause it, and does not
-                                             displace an attached gdb)
-  kbuildlab attach [TREE] [--port N]        attach gdb to a running guest, found by
-                                            discovery rather than by the tree's
-                                            GDB_PORT; asks which when several of a
-                                            tree are live (--list to just look,
-                                            --first to take the lowest port)
-                                            (defaults to stopping at head.S _text;
-                                             --no-bootbreak to attach raw)
-  kbuildlab resume [TREE] [--port N]        resume a guest a dead debugger left
-                                            paused (QMP; the gdbstub cannot)
-  kbuildlab trees                           what is in the workspace
-  kbuildlab containers [status|clean]       what the container runtime holds for
-                                            kbuildlab, and whether it can collide
-                                            with the host (clean --images also
-                                            drops the built image)
-  kbuildlab doctor                          check the host has what is needed
+                          [--clangd-only]     clangd index (KBL_CLANGD=0,
+                          [--no-warm]         KBL_CLANGD_WARM=0 turn clangd off)
+  kbuildlab image  [legacy]                 build the container image
+
+Run and debug:
+  kbuildlab run    [TREE] [QEMU ARGS]       boot it, frozen for a debugger; Ctrl-C
+                                            goes to the guest, Ctrl-A X quits qemu
+                                            (--run, --no-initrd, --append, --emulate,
+                                             --mem, --smp, --kaslr, --boot)
+  kbuildlab attach [TREE] [--port N]        attach gdb to a running guest, stopped
+                                            at head.S _text (--no-bootbreak, --list,
+                                            --first, --json for the session spec)
+  kbuildlab drgn   [TREE] [--qmp-port N]    attach drgn over QMP
+  kbuildlab resume [TREE] [--port N]        resume a guest a dead debugger left paused
+
+Host:
+  kbuildlab doctor                          what is installed, and what is missing
+  kbuildlab containers [status|clean]       what the container runtime holds
 
 ARCH is one of: arm64, riscv64, x86_64.
-TREE is a tree's name, its directory, or the kernel source root inside it
-(recognised by content, so the source directory may be named anything); omitted,
-it is the tree the current directory belongs to.
+TREE is a registered name, or a path inside a registered source (or the
+directory holding one); omitted, it is the tree the current directory belongs
+to, else the only one registered.  rm, mv and rename take a name only.
 USAGE
 }
 
 # ---------------------------------------------------------------- doctor
 cmd_doctor() {
-    local rc=0
-    echo "kbuildlab doctor"
+    local rc=0 c v a q g t w
+    head1 "kbuildlab doctor  ($(kbl_distro))"
     say "repo         ${KBL_REPO}"
-    if c="$(kbl_container 2>/dev/null)"; then say "container    $c"; else
-        say "container    MISSING (podman, docker or nerdctl)"; rc=1; fi
-    for a in x86_64 arm64 riscv64; do
-        local q g
-        q="$(kbl_qemu "$a" 2>/dev/null)" || { say "qemu $a    MISSING"; rc=1; continue; }
-        g="$(kbl_gdb  "$a")" || { say "gdb  $a    MISSING"; rc=1; continue; }
-        printf '  %-12s %s + %s\n' "$a" "$q" "$g"
+    if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
+        ok "bash $BASH_VERSION"
+    else bad "bash $BASH_VERSION -- 4.4 or newer is needed"; rc=1; fi
+    v="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
+    if [[ -n "$v" ]] && python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null; then
+        ok "python3 $v"
+    else bad "python3 ${v:-missing} -- 3.12 or newer is needed$(kbl_pkg_hint python3)"; rc=1; fi
+    for t in git ss flock timeout; do
+        if command -v "$t" >/dev/null 2>&1; then ok "$t"; else bad "$t missing$(kbl_pkg_hint "$t")"; rc=1; fi
     done
-    if [[ -r /dev/kvm && -w /dev/kvm ]]; then say "kvm          usable (x86 guests can use it)"
-    else say "kvm          not accessible -- x86 guests fall back to TCG"; fi
-    if w="$(kbl_workspace 2>/dev/null)"; then
-        say "workspace    $w"
-        local t; t="$(kbl_trees | tr '\n' ' ')"
-        say "trees        ${t:-(none)}"
-    else
-        say "workspace    not recorded -- kbuildlab init --workspace DIR"
-    fi
-    [[ $rc -eq 0 ]] || echo "kbuildlab: something above is missing; install it and re-run" >&2
+    if c="$(kbl_container 2>/dev/null)"; then
+        ok "container    $c"
+        if "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1; then ok "image        $KBL_IMAGE"
+        else bad "image        $KBL_IMAGE is not built -- kbuildlab image"; rc=1; fi
+    else bad "container    none of podman, docker, nerdctl$(kbl_pkg_hint podman)"; rc=1; fi
+    # The floors are what kbuildlab passes to qemu: riscv's sv39/sv48/sv57 CPU
+    # properties (CPU_PAGING) arrived in 8.0, and virtio-sound-pci, which
+    # --emulate attaches, in 8.2.
+    _vge() { printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
+    for a in x86_64 arm64 riscv64; do
+        case "$a" in arm64) q=qemu-system-aarch64 ;; *) q="qemu-system-$a" ;; esac
+        if command -v "$q" >/dev/null 2>&1; then
+            v="$("$q" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+            if [[ -z "$v" ]]; then bad "$q -- its version could not be read"; rc=1
+            elif [[ "$a" == riscv64 ]] && ! _vge "$v" 8.0; then
+                bad "$q $v -- 8.0 or newer is needed (the sv48/sv57 CPU properties)"; rc=1
+            elif ! _vge "$v" 8.2; then ok "$q $v ${KBL_D}(--emulate needs 8.2: virtio-sound-pci)${KBL_0}"
+            else ok "$q $v"; fi
+        else bad "$q missing$(kbl_pkg_hint "$q")"; rc=1; fi
+        if g="$(kbl_gdb "$a" 2>/dev/null)"; then ok "gdb for $a: $g"
+        else bad "gdb for $a: none with a working Python$(kbl_pkg_hint gdb)"; rc=1; fi
+    done
+    for t in mkimage mcopy clangd drgn; do
+        if command -v "$t" >/dev/null 2>&1; then ok "$t"
+        else printf '  %s-%s %s (optional)%s\n' "$KBL_D" "$KBL_0" "$t" "$(kbl_pkg_hint "$t")"; fi
+    done
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then ok "kvm (x86 guests can use it)"
+    else printf '  %s-%s kvm not accessible; x86 guests run under TCG\n' "$KBL_D" "$KBL_0"; fi
+    say "registry     $KBL_TREES"
+    t="$(kbl_trees | tr '\n' ' ')"
+    say "trees        ${t:-(none)}"
+    w="$(kbl_legacy_trees | tr '\n' ' ')"
+    [[ -n "$w" ]] && { bad "not migrated: $w-- kbuildlab migrate"; rc=1; }
+    if w="$(kbl_workspace_opt)"; then say "workspace    $w"
+    else say "workspace    not recorded (needed only to clone: kbuildlab init --workspace DIR)"; fi
+    [[ $rc -eq 0 ]] || warn "something above is missing; install it and re-run"
     return $rc
 }
 
 # ---------------------------------------------------------------- init
 cmd_init() {
-    local name="" arch="" version="$KBL_DEFAULT_VERSION" ws="" restore=0
+    local name="" arch="" version="$KBL_DEFAULT_VERSION" ws="" restore=0 srcdir=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --workspace) ws="${2:?--workspace needs a directory}"; shift 2 ;;
             --restore)   restore=1; shift ;;
             --arch)      arch="${2:?--arch needs a value}"; shift 2 ;;
             --version)   version="${2:?--version needs a value}"; shift 2 ;;
+            --src)       srcdir="${2:?--src needs a directory}"; shift 2 ;;
             -*) die "init: unknown option '$1'" ;;
             *)  name="$1"; shift ;;
         esac
     done
 
+    if [[ -n "$srcdir" ]]; then
+        [[ "$srcdir" == /* || "$srcdir" == "~" || "$srcdir" == "~/"* ]] || srcdir="$PWD/$srcdir"
+        srcdir="$(kbl_norm_src "$srcdir")" || die "init: --src needs a directory path"
+    fi
     if [[ -n "$ws" ]]; then
         mkdir -p "$ws" || die "cannot create $ws"
         ws="$(cd -P "$ws" && pwd)"
@@ -140,13 +179,13 @@ cmd_init() {
     fi
 
     [[ -n "$name" ]] || die "init: name a tree, or pass --workspace DIR"
-    local root; root="$(kbl_workspace)/$name"
-    [[ -e "$root" ]] && die "init: $root already exists"
+    _kbl_new_name init "$name"
+    local root="$KBL_TREES/$name"
 
     # A recorded tree comes back as it was, not from the templates.
     local rec="${KBL_LAB}/trees/${name}"
     if [[ -f "$rec/tree.conf" ]]; then
-        local was
+        local was ws_now sd
         for was in ARCH:"$arch" VERSION:"$version"; do
             local key="${was%%:*}" want="${was#*:}" got
             got="$(kbl_tree_get "$rec" "$key")"
@@ -154,30 +193,36 @@ cmd_init() {
             [[ -z "$want" || "$want" == "$got" ]] \
                 || die "init: $name is recorded with $key=$got; drop the option or pick another name"
         done
-        mkdir -p "$root"
-        _lab_copy "$rec/tree.conf" "$root/tree.conf" @KBL_WORKSPACE@ "$(dirname "$root")"
+        ws_now="$(kbl_workspace)" || exit 1
+        mkdir -p "$root" || die "init: cannot create $root"
+        _lab_copy "$rec/tree.conf" "$root/tree.conf" @KBL_WORKSPACE@ "$ws_now" \
+            || die "init: cannot write $root/tree.conf"
         [[ -f "$rec/config-fragment" ]] \
-            && _lab_copy "$rec/config-fragment" "$root/config-fragment" @KBL_WORKSPACE@ "$(dirname "$root")"
-        ln -sfn tree.conf "$root/qemu.conf"
-        say "restored     $root from $rec"
+            && _lab_copy "$rec/config-fragment" "$root/config-fragment" @KBL_WORKSPACE@ "$ws_now"
+        if [[ -z "$(kbl_tree_get "$root" SRC)" ]]; then
+            # A record from before the registry: its paths are relative to
+            # <workspace>/<name>, which held the source too (SRC_DIR, else kernel/).
+            sd="$(kbl_tree_get "$root" SRC_DIR)"
+            _kbl_legacy_conf "$root/tree.conf" "$root/tree.conf" "$ws_now/$name" \
+                "${srcdir:-$(kbl_norm_src "$ws_now/$name/${sd:-kernel}")}"
+        elif [[ -n "$srcdir" ]]; then
+            _kbl_conf_set "$root/tree.conf" SRC "$srcdir"
+        fi
+        ok "restored $name from $rec"
+        say "source       $(kbl_tree_get "$root" SRC)"
         say "next         kbuildlab sync $name   (config then starts from the recorded .config)"
         return 0
     fi
 
     [[ -n "$arch" ]] || die "init: --arch is required (arm64, riscv64, x86_64)"
     case "$arch" in arm64|riscv64|x86_64) ;; *) die "init: unknown arch '$arch'" ;; esac
+    [[ -n "$srcdir" ]] || { srcdir="$(kbl_workspace)/$name" || exit 1; }
+    [[ -e "$srcdir" && ! -d "$srcdir/.git" && -n "$(ls -A "$srcdir" 2>/dev/null)" ]] \
+        && die "init: $srcdir exists and is not empty; register an existing source with: kbuildlab add $srcdir"
     mkdir -p "$root"
-    local tpl="${KBL_REPO}/templates/tree.conf.${arch}"
-    [[ -r "$tpl" ]] || die "init: no QEMU template for $arch"
-    local body; body="$(<"${KBL_REPO}/templates/tree.conf.in")"
-    body="${body//@ARCH@/"$arch"}"; body="${body//@VERSION@/"$version"}"; body="${body//@NAME@/"$name"}"
-    { printf '%s\n' "$body"
-      cat "$tpl"
-    } > "$root/tree.conf"
-    # tree.conf is the name; qemu.conf was the older one, and an editor adapter
-    # that still looks for it reads the same bytes rather than a stale copy.
-    ln -sfn tree.conf "$root/qemu.conf"
-    say "created      $root"
+    _kbl_new_conf "$root/tree.conf" "$name" "$arch" "$version" "$srcdir"
+    ok "registered $name"
+    say "source       $srcdir (cloned by sync)"
     say "next         kbuildlab sync $name"
 }
 
@@ -201,9 +246,7 @@ cmd_image() {
 # The command prefix that runs a program in the active image with WORKDIR as
 # its working directory, left in _KBL_RUN; RUN-OPTIONs go to `run` itself.
 _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
-    local c ws wd img; c="$(kbl_container)"; wd="$1"; shift
-    local _ws_raw; _ws_raw="$(kbl_workspace)" || exit 1
-    ws="$(kbl_assert_mountable "$_ws_raw")" || exit 1
+    local c wd img p q; c="$(kbl_container)"; wd="$1"; shift
     # A tree that pins IMAGE= builds in that one; everything else in $KBL_IMAGE.
     # The caller sets _KBL_ACTIVE_IMAGE because only a caller holding a tree can
     # know which, and _in_container is also called with no tree in hand.
@@ -213,7 +256,7 @@ _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     # Run as the host user so build artifacts aren't root-owned; HOME to a
     # writable path (mapped uid has no passwd entry).  Rootless podman already maps
     # the invoking user onto the container's root, so --user there would put the
-    # build on a subuid instead and the workspace would come back owned by nobody.
+    # build on a subuid instead and the tree would come back owned by nobody.
     # KBL_DOCKER_USER states one explicitly; KBL_DOCKER_USER="" opts out entirely.
     local -a _idopt=()
     if [[ -z "${KBL_DOCKER_USER+x}" ]]; then
@@ -223,16 +266,54 @@ _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     elif [[ -n "${KBL_DOCKER_USER}" ]]; then
         _idopt=(--user "${KBL_DOCKER_USER}" -e HOME=/tmp)
     fi
-    # config --preset feeds $KBL_REPO preset paths to in-container commands, but
-    # only the workspace is mounted; a repo outside it (sibling dir) is invisible
-    # in the guest and merge_config fails. Mount it read-only unless covered.
-    local -a _repomnt=()
-    case "${KBL_REPO}/" in
-        "${ws}"/*) : ;;
-        *) _repomnt=(-v "${KBL_REPO}:${KBL_REPO}:ro") ;;
-    esac
-    _KBL_RUN=("$c" run --rm "$@" "${_idopt[@]+"${_idopt[@]}"}" "${_repomnt[@]+"${_repomnt[@]}"}"
-              -v "${ws}:${ws}" -w "$wd" "$img")
+    # What the container may write is what the build writes: the active tree's
+    # source and data directory, and the working directory when it lies outside
+    # both.  The tree's registry directory (its config-fragment) and this
+    # repository (the presets) are read-only, and so is any object store the
+    # source borrows through git alternates.  Each is mounted at the path it
+    # resolves to and, when the caller spells it through a symlink, at that
+    # spelling too, so every path handed in (-w, make arguments) names it there.
+    # Only a writable mount must pass the system-directory guard.
+    local -a rw=() ro=("${KBL_REPO}") mounts=() taken=()
+    if [[ -n "${_KBL_ACTIVE_TREE:-}" ]]; then
+        p="$(kbl_tree_src "$_KBL_ACTIVE_TREE")" || exit 1
+        rw+=("$p")
+        q="$(kbl_tree_data "$_KBL_ACTIVE_TREE")"; mkdir -p "$q" && rw+=("$q")
+        ro+=("$_KBL_ACTIVE_TREE")
+        if [[ -r "$p/.git/objects/info/alternates" ]]; then
+            while IFS= read -r q; do [[ -d "$q" ]] && ro+=("$q"); done < "$p/.git/objects/info/alternates"
+        fi
+    fi
+    rw+=("$wd")
+    # A destination the caller mounts itself (the tags view overlays the source)
+    # is not mounted a second time, under either spelling.
+    local -a args=("$@"); local i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        [[ "${args[i]}" == -v ]] && { q="${args[i+1]#*:}"; taken+=("${q%%:*}"); }
+    done
+    _kbl_covered() {   # is $1 inside something already mounted?
+        local m
+        for m in "${taken[@]+"${taken[@]}"}"; do [[ "$1" == "$m" || "$1" == "$m"/* ]] && return 0; done
+        return 1
+    }
+    _kbl_mount() {   # _kbl_mount PATH rw|ro
+        local given real d opt=""
+        given="$(realpath -m -s -- "$1")"
+        if [[ "$2" == rw ]]; then
+            real="$(kbl_assert_mountable "$1")" || exit 1
+        else
+            real="$(readlink -f -- "$1" 2>/dev/null)"; opt=":ro"
+            [[ -n "$real" && "$real" != / ]] || die "'$1' does not resolve to a path that can be mounted"
+        fi
+        _kbl_covered "$given" && return 0
+        for d in "$real" "$given"; do
+            _kbl_covered "$d" && continue
+            mounts+=(-v "$real:$d$opt"); taken+=("$d")
+        done
+    }
+    for p in "${rw[@]}"; do _kbl_mount "$p" rw; done
+    for p in "${ro[@]}"; do _kbl_mount "$p" ro; done
+    _KBL_RUN=("$c" run --rm "$@" "${_idopt[@]+"${_idopt[@]}"}" "${mounts[@]}" -w "$wd" "$img")
 }
 
 _in_container() {   # _in_container WORKDIR CMD...
@@ -337,9 +418,9 @@ _kmake_args() {   # _kmake_args TREE
 
 # That make, run in the tree's image with its source as the working directory.
 _kmake() {   # _kmake TREE MAKE-ARG...
-    local tree="$1" src _KBL_ACTIVE_IMAGE; shift
+    local tree="$1" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE; shift
     src="$(kbl_tree_src "$tree")" || exit 1
-    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"; _KBL_ACTIVE_TREE="$tree"
     _kmake_args "$tree"
     _in_container "$src" "${_KBL_MAKE[@]}" "$@"
 }
@@ -416,8 +497,8 @@ cmd_config() {
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch src; arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
-    [[ -d "$src" ]] || die "no kernel source in $tree -- run: kbuildlab sync"
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    [[ -d "$src" ]] || die "no kernel source at $src -- run: kbuildlab sync $(basename "$tree")"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
 
     local -a frags=() soft=()
     [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
@@ -446,7 +527,8 @@ cmd_config() {
     local rec="${KBL_LAB}/trees/$(basename "$tree")/defconfig"
     if [[ ! -f "$src/.config" && -f "$rec" ]]; then
         say "restoring    the recorded config, $rec"
-        _lab_copy "$rec" "$src/.config" @KBL_WORKSPACE@ "$(kbl_workspace)" || die "cannot copy $rec"
+        _lab_copy "$rec" "$src/.config" @KBL_WORKSPACE@ "$(kbl_workspace_opt || echo @KBL_WORKSPACE@)" \
+            || die "cannot copy $rec"
         _kmake "$tree" olddefconfig || die "olddefconfig failed"
     elif [[ ! -f "$src/.config" ]]; then
         say "defconfig    $(_karch "$arch")"
@@ -498,18 +580,19 @@ EOF
 # built -- and the source checkouts it builds them from, as path, URL and
 # commit read off each checkout.  Dot files and build output are not recipes.
 _record_workspace() {
-    local ws dst d f rel v
-    ws="$(kbl_workspace)" || return 0
+    local ws dst d f rel v t
+    ws="$(kbl_workspace_opt)" || return 0
     dst="${KBL_LAB}/workspace"
     local -A tops=(["."]=1)
-    for d in "$ws"/*/; do
-        kbl_is_tree "${d%/}" || continue
+    for t in $(kbl_trees); do
+        d="$KBL_TREES/$t"
         while IFS= read -r k; do
-            v="$(kbl_tree_get "${d%/}" "$k")"
-            [[ "$v" == ../* ]] || continue
-            rel="$(realpath -m --relative-to="$ws" "${d%/}/$v")"
-            [[ "$rel" == ..* || "$rel" == /* ]] || tops["${rel%%/*}"]=1
-        done < <(kbl_tree_keys "${d%/}")
+            [[ "$k" == SRC ]] && continue
+            v="$(kbl_tree_get "$d" "$k")"
+            [[ "$v" == "$ws"/* ]] || continue
+            rel="${v#"$ws"/}"
+            tops["${rel%%/*}"]=1
+        done < <(kbl_tree_keys "$d")
     done
     for d in "${!tops[@]}"; do
         for f in "$ws/$d"/*; do
@@ -526,10 +609,14 @@ _record_workspace() {
     # Checkouts at the top of the workspace or one level down that are not a
     # tree's kernel: buildroot, u-boot and the like, pinned at what is there.
     local list; list="$(mktemp)"
+    local -A srcs=()
+    for t in $(kbl_trees); do
+        v="$(kbl_norm_src "$(kbl_tree_get "$KBL_TREES/$t" SRC)")" && srcs["$v"]=1
+    done
     for d in "$ws"/*/ "$ws"/.*/ "$ws"/*/*/ "$ws"/.*/*/; do
         d="${d%/}"
         [[ "$(basename "$d")" == . || "$(basename "$d")" == .. || ! -d "$d/.git" ]] && continue
-        kbl_is_tree "$(dirname "$d")" && continue
+        [[ -n "${srcs["$(readlink -f "$d")"]:-}" ]] && continue
         # A bash without globskipdots expands .*/ to ../ too: never record outside.
         rel="$(realpath -m --relative-to="$ws" "$d")"
         [[ "$rel" == ..* ]] && continue
@@ -566,8 +653,8 @@ _restore_workspace() {
     fi
     for rec in "$KBL_LAB"/trees/*/; do
         [[ -f "$rec/tree.conf" ]] || continue
-        if [[ -e "$ws/$(basename "$rec")" ]]; then say "kept         $ws/$(basename "$rec")"
-        else cmd_init "$(basename "$rec")"; fi
+        if kbl_is_tree "$KBL_TREES/$(basename "$rec")"; then say "kept         $(basename "$rec") (registered)"
+        else ( cmd_init "$(basename "$rec")" ) || warn "not restored: $(basename "$rec") (above)"; fi
     done
 }
 
@@ -597,7 +684,7 @@ _record() {   # _record TREE
     local tree="$1" name dst src ws
     name="$(basename "$tree")"; dst="${KBL_LAB}/trees/${name}"
     src="$(kbl_tree_src "$tree")" || exit 1; kbl_tree_arch "$tree" >/dev/null || exit 1
-    ws="$(kbl_workspace)" || return 0
+    ws="$(kbl_workspace_opt)" || ws="/nonexistent-kbuildlab-workspace"
     mkdir -p "$dst" || { warn "record: cannot write $dst"; return 0; }
     _lab_copy "$tree/tree.conf" "$dst/tree.conf" "$ws" @KBL_WORKSPACE@
     if [[ -f "$tree/config-fragment" ]]; then
@@ -605,7 +692,7 @@ _record() {   # _record TREE
     else rm -f "$dst/config-fragment"; fi
     [[ -f "$src/.config" ]] || return 0
     if _kmake "$tree" savedefconfig >/dev/null 2>&1 && [[ -f "$src/defconfig" ]]; then
-        cp -f "$src/defconfig" "$tree/defconfig.snapshot"
+        mkdir -p "$(kbl_tree_data "$tree")" && cp -f "$src/defconfig" "$(kbl_tree_data "$tree")/defconfig.snapshot"
         _lab_copy "$src/defconfig" "$dst/defconfig" "$ws" @KBL_WORKSPACE@ && rm -f "$src/defconfig"
         say "recorded     $dst ($(grep -c . "$dst/defconfig") config lines)"
     else
@@ -647,14 +734,15 @@ cmd_build() {
 # is a symlink would lose it.
 _stage_modules() {   # _stage_modules TREE
     local tree="$1" src out stage hook=etc/init.d/S10kbuildlab-coldplug
-    src="$(kbl_tree_src "$tree")" || exit 1; out="$tree/modules.cpio.gz"
+    src="$(kbl_tree_src "$tree")" || exit 1; out="$(kbl_tree_data "$tree")/modules.cpio.gz"
+    mkdir -p "$(dirname "$out")" || { warn "modules: cannot write $(dirname "$out")"; return 1; }
     if [[ ! -s "$src/modules.order" ]]; then rm -f "$out"; return 0; fi
     [[ -f "$out" && ! "$src/modules.order" -nt "$out" \
        && -z "$(find "$src" -name '*.ko' -newer "$out" -print -quit)" ]] && return 0
-    stage="$tree/.modules-stage"
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    stage="$(kbl_tree_data "$tree")/.modules-stage"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     rm -rf "$stage" && mkdir -p "$stage/$(dirname "$hook")" \
-        || { warn "modules: cannot write $stage"; return 0; }
+        || { warn "modules: cannot write $stage"; return 1; }
     cat > "$stage/$hook" <<'EOF'
 #!/bin/sh
 [ "$1" = start ] || exit 0
@@ -664,16 +752,22 @@ find /sys/devices -name modalias | while read -r f; do cat "$f"; done 2>/dev/nul
 echo OK
 EOF
     chmod 755 "$stage/$hook"
-    if _kmake "$tree" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null \
-       && _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | gzip -9" \
+    local rc=0
+    if ! _kmake "$tree" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null; then
+        warn "modules: modules_install failed (above); the guest gets none of this build's modules"; rc=1
+    elif [[ -z "$(find "$stage/lib/modules" -name '*.ko*' -print -quit 2>/dev/null)" ]]; then
+        warn "modules: modules_install wrote no module into $stage, though $src/modules.order
+       lists $(grep -c . "$src/modules.order"); the guest gets none of this build's modules"; rc=1
+    elif _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | gzip -9" \
            > "$out.tmp"; then
         mv -f "$out.tmp" "$out"
         say "modules      $out ($(grep -c . "$src/modules.order") for the guest, $(du -h "$out" | cut -f1))"
     else
-        rm -f "$out.tmp"
-        warn "modules: not staged for the guest (see above)"
+        warn "modules: the archive could not be written (above); the guest gets none of this build's modules"; rc=1
     fi
+    rm -f "$out.tmp"
     rm -rf "$stage"
+    return $rc
 }
 
 # ---------------------------------------------------------------- tags
@@ -706,14 +800,14 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     # copy.  The .cmd format that script reads has not changed since it was
     # added in v5.4, and copying it into the old tree would be writing into the
     # source -- which is the one thing this must not do.
-    local ws d; local -a peers=()
-    ws="$(kbl_workspace)" || return 0
-    for d in "$ws"/*/; do kbl_is_tree "${d%/}" && peers+=(--peer "${d%/}"); done
+    local ws t; local -a peers=() wsopt=()
+    for t in $(kbl_trees); do peers+=(--peer "$KBL_TREES/$t"); done
+    ws="$(kbl_workspace_opt)" && wsopt=(--workspace "$ws")
     # The build image answers what clangd's clang would answer differently --
     # __clang__, __GNUC__, the __has_* tests -- and later measures the result,
     # so the generator is told how to reach it.  -i: both read their questions
     # from stdin.
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     _container_run "$(kbl_tree_src "$tree")" -i || return 0
     # KBL_CLANGD_JOBS caps the parallel work of both steps, for a machine that
     # has other things to do; unset, each sizes itself to what is free.
@@ -721,7 +815,7 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
     if [[ "$phase" != warm ]]; then
         say "indexing     clangd (compile_commands.json, out of tree)"
-        python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" --workspace "$ws" "${peers[@]}" \
+        python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" "${wsopt[@]+"${wsopt[@]}"}" "${peers[@]}" \
             --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force "${jobs[@]+"${jobs[@]}"}" \
             || { warn "clangd index failed"; return 1; }
     fi
@@ -782,7 +876,7 @@ _index_plain() {   # _index_plain TREE
         python3 "${KBL_REPO}/lib/tagview.py" --tree "$tree" --view "$(_view_dir "$tree")" forget \
             || die "cannot remove the view's indexes"
     fi
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
     # optional -- not every image ships `global`, so absent is a warn, not fatal.
     say "indexing     ctags + cscope for $karch"
@@ -808,7 +902,7 @@ _index_tree() {   # _index_tree TREE
         warn "the config view needs podman's overlay mounts and python3 on the host; indexing $name as it is on disk"
         _index_plain "$tree"; return
     fi
-    local _KBL_ACTIVE_IMAGE; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     view="$(_view_dir "$tree")"
     st="$view/state"; up="$view/upper"; wk="$view/work"
     mkdir -p "$st" "$up" "$wk" || die "cannot write $view"
@@ -1139,17 +1233,22 @@ _containers_status() {
             && say "subid        ${who} has subuid and subgid ranges (rootless is set up)" \
             || { say "subid        ${who} has NO subuid/subgid range -- rootless podman cannot map users"; rc=1; }
     fi
-    local w root_owned
-    if w="$(kbl_workspace 2>/dev/null)"; then
-        # Run the same guard _in_container runs, rather than describing it.
-        if kbl_assert_mountable "$w" >/dev/null 2>&1; then
-            say "workspace    $w (mounted at the same path; the guard accepts it)"
-        else
-            say "workspace    $w -- REFUSED by the mount guard; a build here would not start"; rc=1
-        fi
-        root_owned="$(find "$w" -maxdepth 4 -user root -print -quit 2>/dev/null)"
-        [[ -n "$root_owned" ]] && { say "ROOT-OWNED   $root_owned -- a rootful run left it; chown it back"; rc=1; }
-    fi
+    # What a build mounts writable: each tree's source and data directory, put
+    # through the same guard _container_run applies rather than described.
+    local p root_owned nt=0 refused=0
+    for t in $(kbl_trees 2>/dev/null); do
+        nt=$((nt + 1))
+        for p in "$(kbl_tree_src "$KBL_TREES/$t" 2>/dev/null)" "$(kbl_tree_data "$KBL_TREES/$t")"; do
+            [[ -n "$p" && -e "$p" ]] || continue
+            if ! kbl_assert_mountable "$p" >/dev/null 2>&1; then
+                say "REFUSED      $t: $p -- the mount guard refuses it, so a build of $t would not start"
+                refused=1; rc=1
+            fi
+            root_owned="$(find "$p" -maxdepth 4 -user root -print -quit 2>/dev/null)"
+            [[ -n "$root_owned" ]] && { say "ROOT-OWNED   $root_owned -- a rootful run left it; chown it back"; rc=1; }
+        done
+    done
+    [[ $refused -eq 0 ]] && say "mounts       the sources and data directories of $nt tree(s) pass the mount guard"
     [[ $rc -eq 0 ]] || echo "kbuildlab: something above needs attention" >&2
     return $rc
 }
@@ -1238,7 +1337,18 @@ case "$cmd" in
     attach) cmd_attach "$@" ;;
     drgn)   cmd_drgn "$@" ;;
     resume) cmd_resume "$@" ;;
-    trees)  kbl_trees ;;
+    trees|ls) cmd_trees "$@" ;;
+    inspect) cmd_inspect "$@" ;;
+    add)    cmd_add "$@" ;;
+    rm)     cmd_rm "$@" ;;
+    mv)     cmd_mv "$@" ;;
+    rename) cmd_rename "$@" ;;
+    get)    cmd_get "$@" ;;
+    set)    cmd_set "$@" ;;
+    unset)  cmd_unset "$@" ;;
+    edit)   cmd_edit "$@" ;;
+    prune)  cmd_prune "$@" ;;
+    migrate) cmd_migrate "$@" ;;
     containers) cmd_containers "$@" ;;
     doctor) cmd_doctor ;;
     help|-h|--help) usage ;;

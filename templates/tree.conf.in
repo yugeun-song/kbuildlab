@@ -9,16 +9,20 @@ ARCH=@ARCH@
 VERSION=@VERSION@
 UPSTREAM=stable          # stable | mainline
 
-# Where the kernel source lives inside this tree.  Left unset, kbuildlab finds
-# it by content (the single kernel source root among the children) and clones
-# into 'kernel'.  Set it only to disambiguate more than one source, or to clone
-# into a differently named directory: SRC_DIR=dummy
+# The kernel source this tree builds and boots, an absolute path.  `sync` clones
+# into it when it does not exist yet; `kbuildlab mv` moves it and updates this.
+SRC=@SRC@
 
-# Root filesystem for `kbuildlab run`, handed to the kernel as an initramfs.  A
-# path, absolute or relative to this tree.  Without it the guest panics at
-# mount-root once continued, so set it to boot to a login shell (or pass
-# --no-initrd for early-boot debugging that never needs userspace):
-# INITRD=../rootfs/<arch>/images/rootfs.cpio.gz
+# Paths below are absolute, ~/-relative, or relative to the tree's data directory
+# (`kbuildlab inspect <name> --format data` names it), where its boot disks,
+# persistent disk and module archive live.  kbuildlab's own records never go into
+# the source.
+
+# Root filesystem for `kbuildlab run`, handed to the kernel as an initramfs.
+# Without it the guest panics at mount-root once continued, so set it to boot to
+# a login shell (or pass --no-initrd for early-boot debugging that never needs
+# userspace):
+# INITRD=/path/to/rootfs/<arch>/images/rootfs.cpio.gz
 
 # Toolchain.  Both optional.  IMAGE names the container image this tree builds
 # in, GCC the compiler version inside it; unset means the default image and its
@@ -68,10 +72,9 @@ UPSTREAM=stable          # stable | mainline
 # --- syntax ------------------------------------------------------------------
 # Every line here is read as  ^\s* KEY \s*=\s* VALUE , with a trailing # comment
 # and trailing space stripped and one layer of surrounding double quotes removed.
-# All five parsers that read this file use exactly that grammar (kbuildlab's
-# kbl_tree_get and its GDBTOOLS_ passthrough, firmware/build-bootdisk.sh,
-# firmware/build-esp.sh, and the editor adapter's discover.lua), so a line that
-# works in one works in all of them.
+# Every reader uses exactly that grammar (kbuildlab's kbl_tree_get and its
+# GDBTOOLS_ passthrough, lib/treeinfo.py and lib/clangd.py), so a line that
+# works in one works in all of them.  `kbuildlab set NAME KEY=VALUE` writes it.
 
 # --- the guest's own command line --------------------------------------------
 # Words appended to the kernel command line, in every boot mode: -append for a
@@ -96,6 +99,14 @@ UPSTREAM=stable          # stable | mainline
 # --emulate and --no-emulate decide for one run.
 # EMULATE=1
 
+# --- a u-boot boot -------------------------------------------------------------
+# Where boot.scr loads the kernel image and the initramfs.  QEMU's virt machine
+# has defaults; any other MACHINE states both, and RAM_BASE (hex) so `run` can
+# check that they lie in the guest's RAM.
+# UBOOT_LOADADDR=0x40200000
+# UBOOT_RDADDR=0x48000000
+# RAM_BASE=0x40000000
+
 # --- where the gdbstub listens -----------------------------------------------
 # Default 127.0.0.1.  qemu's own `-gdb tcp::N` spelling binds 0.0.0.0 AND [::],
 # and a gdbstub is an unauthenticated read/write channel into the guest's memory,
@@ -106,9 +117,8 @@ UPSTREAM=stable          # stable | mainline
 # --- debugger settings passed straight through -------------------------------
 # Any GDBTOOLS_* line here is exported verbatim to the debugger, so the whole of
 # gdbtools' contract table is reachable from this file without touching the
-# launcher.  Beyond GDBTOOLS_ENTRY_PA and GDBTOOLS_BREAK_KIND, which the arch
-# templates already use, these are the ones a non-QEMU board is most likely to
-# need: GDBTOOLS_PROFILE (a JSON machine description), GDBTOOLS_DTB, GDBTOOLS_SCAN
+# launcher, and a line here outranks what `attach` states by default.  These
+# are the ones a non-QEMU board is most likely to need: GDBTOOLS_PROFILE (a JSON machine description), GDBTOOLS_DTB, GDBTOOLS_SCAN
 # (a lo:hi physical range to search for the image magic), GDBTOOLS_RAM_BASE,
 # GDBTOOLS_PHYS_WINDOW, GDBTOOLS_PRESET, GDBTOOLS_ANCHOR and the GDBTOOLS_X86_*
 # recovery keys.  See gdbtools/README.md for what each one means; a value stated

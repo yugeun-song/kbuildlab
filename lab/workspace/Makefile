@@ -1,5 +1,5 @@
 KBL ?= $(shell command -v kbuildlab)
-TREES := $(patsubst %/tree.conf,%,$(wildcard */tree.conf))
+TREES := $(shell $(KBL) trees -q)
 
 export KBL_WORKSPACE := $(CURDIR)
 export KBL_CLANGD := 1

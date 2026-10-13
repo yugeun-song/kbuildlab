@@ -125,6 +125,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kbuildinfo
 import inactive_regions
+import treeinfo
 
 # An empty XDG variable counts as unset, as it does in lib/common.sh.
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
@@ -174,33 +175,14 @@ def is_kernel_source(d: str) -> bool:
 
 
 def tree_source(tree_dir: str) -> str | None:
-    named = tree_conf_get(tree_dir, "SRC_DIR")
-    if named:
-        cand = os.path.join(tree_dir, named)
-        return cand if os.path.isdir(cand) else None
-    found = [os.path.join(tree_dir, d) for d in sorted(os.listdir(tree_dir))
-             if is_kernel_source(os.path.join(tree_dir, d))]
-    if len(found) == 1:
-        return found[0]
-    cand = os.path.join(tree_dir, "kernel")
-    return cand if os.path.isdir(cand) else None
+    """SRC in the tree's tree.conf (lib/common.sh kbl_tree_src)."""
+    src = treeinfo.norm_src(tree_conf_get(tree_dir, "SRC"))
+    return src if src and os.path.isdir(src) else None
 
 
 def tree_conf_get(tree_dir: str, key: str) -> str | None:
     """kbl_tree_get's grammar (lib/common.sh), held to it by tests/tree-conf-vectors.json."""
-    line_re = re.compile(rf"^[ \t\r\f\v]*{re.escape(key)}[ \t\r\f\v]*=[ \t\r\f\v]*(.*)$")
-    try:
-        with open(os.path.join(tree_dir, "tree.conf"), encoding="utf-8", errors="replace") as f:
-            for line in f:
-                m = line_re.match(line.rstrip("\n"))
-                if m:
-                    v = m.group(1)
-                    if v.startswith('"'):
-                        return v[1:].split('"', 1)[0]
-                    return v.split("#", 1)[0].rstrip(" \t\r\f\v")
-    except OSError:
-        pass
-    return None
+    return treeinfo.conf_get(tree_dir, key)
 
 
 def write_text(path: str, text: str) -> None:
@@ -2845,7 +2827,14 @@ def main() -> int:
     k = sub.add_parser("clean", help="undo everything gen wrote for these trees")
     k.set_defaults(func=cmd_clean)
 
+    d = sub.add_parser("drop", help="remove a tree's block by name, for a tree that is "
+                                    "no longer registered")
+    d.add_argument("name")
+
     args = ap.parse_args()
+    if args.cmd == "drop":
+        write_tree_block(args.name, None)
+        return 0
     if not args.tree:
         raise SystemExit("clangd.py: --tree DIR is required")
     for d in args.peer:

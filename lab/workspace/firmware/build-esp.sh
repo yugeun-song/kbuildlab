@@ -2,42 +2,25 @@
 # Pre-build a UEFI ESP disk for a tree: OVMF -> grub2 -> kernel. GPT + FAT ESP
 # holding grub (BOOTX64.EFI, embedded cfg), the kernel and the initramfs. Built
 # once on SSD; run-qemu makes a per-run RAM copy and patches grub.cfg bootargs.
-# usage: build-esp.sh <tree-dir>   output: <tree-dir>/boot/esp.img
+# usage: build-esp.sh TREE (a kbuildlab tree name)
+# output: <the tree's data directory>/boot/esp.img
 set -uo pipefail
-tree="${1:?usage: build-esp.sh <tree-dir>}"
-[ -d "$tree" ] || { echo "no such tree: $tree" >&2; exit 1; }
-[ -f "$tree/tree.conf" ] || { echo "not a tree (no tree.conf): $tree" >&2; exit 1; }
-# One grammar, shared with kbuildlab and the editor adapter: KEY, optional
-# spaces, '=', optional spaces, value; trailing comment and space stripped, one
-# layer of surrounding double quotes removed.
-get() {
-    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$tree/tree.conf" \
-        | head -1 | sed 's/#.*//; s/[[:space:]]*$//; s/^"//; s/"$//'
-}
-# The kernel source directory, by the same rule kbuildlab uses: SRC_DIR when the
-# tree states one, else the single directory that IS a kernel source.  Assuming
-# "kernel" is wrong for any tree that renamed its clone, and the failure is an
-# ESP quietly built from a stale image somewhere else.
-_is_ksrc() {
-    [ -d "$1/arch" ] && [ -f "$1/Kbuild" ] && [ -f "$1/Makefile" ] &&
-    grep -qE '^[[:space:]]*VERSION[[:space:]]*=' "$1/Makefile" 2>/dev/null &&
-    grep -qE '^[[:space:]]*PATCHLEVEL[[:space:]]*=' "$1/Makefile" 2>/dev/null
-}
-src="$(get SRC_DIR)"
-if [ -n "$src" ]; then src="$tree/$src"; else
-    src=""; n=0
-    for d in "$tree"/*/; do d="${d%/}"; _is_ksrc "$d" && { src="$d"; n=$((n+1)); }; done
-    [ "$n" -eq 1 ] || src="$tree/kernel"
-fi
-[ -d "$src" ] || { echo "no kernel source in $tree" >&2; exit 1; }
+tree="${1:?usage: build-esp.sh TREE}"
+# Everything about the tree comes from kbuildlab, which keeps its registry.
+kbl="${KBUILDLAB:-kbuildlab}"
+command -v "$kbl" >/dev/null 2>&1 || { echo "kbuildlab is not on PATH (or set \$KBUILDLAB)" >&2; exit 1; }
+src="$("$kbl" inspect "$tree" --format src)" || exit 1
+data="$("$kbl" inspect "$tree" --format data)" || exit 1
+[ -d "$src" ] || { echo "no kernel source at $src" >&2; exit 1; }
+path() { case "$1" in /*) echo "$1" ;; "~"/*) echo "$HOME/${1#\~/}" ;; *) echo "$data/$1" ;; esac; }
 
-image="$src/$(get KERNEL_IMAGE_REL)"; initrd="$tree/$(get INITRD)"
+image="$src/$("$kbl" get "$tree" KERNEL_IMAGE_REL)"; initrd="$(path "$("$kbl" get "$tree" INITRD)")"
 [ -f "$image" ]  || { echo "no kernel image: $image"; exit 1; }
 [ -f "$initrd" ] || { echo "no initrd: $initrd"; exit 1; }
 command -v grub-mkstandalone >/dev/null || { echo "grub-mkstandalone required"; exit 1; }
 command -v sgdisk >/dev/null || { echo "sgdisk required"; exit 1; }
 
-out="$tree/boot"; mkdir -p "$out"; disk="$out/esp.img"
+out="$data/boot"; mkdir -p "$out"; disk="$out/esp.img"
 # Up to date means the payloads are IN there, not merely that the file is newer.
 # Every one of these images was found holding a formatted but payload-less
 # filesystem while the mtime guard reported it current, because an mtime says

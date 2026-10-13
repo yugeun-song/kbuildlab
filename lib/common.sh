@@ -14,13 +14,112 @@ kbl_repo() {
 }
 KBL_REPO="${KBL_REPO:-$(kbl_repo)}"
 
-die()  { printf 'kbuildlab: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'kbuildlab: %s\n' "$*" >&2; }
-say()  { printf '  %s\n' "$*"; }
+# --- output ------------------------------------------------------------------
+# Colour only on a terminal, never under NO_COLOR (no-color.org) or TERM=dumb;
+# the marks fall back to ASCII outside a UTF-8 locale.  A line printed by say()
+# is "label   value": the label is coloured, the value is left as it is.
+_kbl_tty() { [[ -t "$1" && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; }
+if _kbl_tty 1; then
+    KBL_B=$'\e[1m' KBL_D=$'\e[2m' KBL_R=$'\e[31m' KBL_G=$'\e[32m' KBL_Y=$'\e[33m'
+    KBL_C=$'\e[36m' KBL_0=$'\e[0m'
+else
+    KBL_B="" KBL_D="" KBL_R="" KBL_G="" KBL_Y="" KBL_C="" KBL_0=""
+fi
+if _kbl_tty 2; then KBL_ER=$'\e[1;31m' KBL_EY=$'\e[1;33m' KBL_E0=$'\e[0m'
+else KBL_ER="" KBL_EY="" KBL_E0=""; fi
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) KBL_OK="✓" KBL_NO="✗" ;;
+    *) KBL_OK="+" KBL_NO="x" ;;
+esac
+
+die()  { printf '%skbuildlab:%s %s\n' "$KBL_ER" "$KBL_E0" "$*" >&2; exit 1; }
+warn() { printf '%skbuildlab:%s %s\n' "$KBL_EY" "$KBL_E0" "$*" >&2; }
+say() {
+    local s="$*"
+    if [[ -n "$KBL_C" && "$s" =~ ^([^[:space:]]+([[:space:]][^[:space:]]+){0,2})([[:space:]]{2,}.*)$ ]]; then
+        printf '  %s%s%s%s\n' "$KBL_C" "${BASH_REMATCH[1]}" "$KBL_0" "${BASH_REMATCH[3]}"
+    else
+        printf '  %s\n' "$s"
+    fi
+}
+ok()   { printf '  %s%s%s %s\n' "$KBL_G" "$KBL_OK" "$KBL_0" "$*"; }
+bad()  { printf '  %s%s%s %s\n' "$KBL_R" "$KBL_NO" "$KBL_0" "$*"; }
+head1() { printf '%s%s%s\n' "$KBL_B" "$*" "$KBL_0"; }
 
 # --- host prerequisites ------------------------------------------------------
 # Reported by name and never installed.  Changing a machine's packages or its
 # sysctls is not this tool's business; saying precisely what is absent is.
+#
+# The distribution family, from /etc/os-release, only to name the package that
+# provides a missing program: arch, debian (Ubuntu too), fedora (RHEL and its
+# rebuilds), void, suse, or unknown.
+kbl_distro() {
+    local id="" like="" w
+    if [[ -r /etc/os-release ]]; then
+        id="$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"' | head -1)"
+        like="$(sed -n 's/^ID_LIKE=//p' /etc/os-release | tr -d '"' | head -1)"
+    fi
+    for w in $id $like; do
+        case "$w" in
+            arch|manjaro|endeavouros|cachyos) echo arch; return ;;
+            debian|ubuntu|linuxmint|pop) echo debian; return ;;
+            fedora|rhel|centos|rocky|almalinux) echo fedora; return ;;
+            void) echo void; return ;;
+            suse|opensuse|opensuse-leap|opensuse-tumbleweed|sles) echo suse; return ;;
+        esac
+    done
+    echo unknown
+}
+
+# " -- install: <command>" for a program, or nothing when the family is unknown.
+kbl_pkg_hint() {   # kbl_pkg_hint PROGRAM
+    local fam pkg="" cmd=""
+    fam="$(kbl_distro)"
+    case "$fam" in
+        arch)   cmd="pacman -S" ;;
+        debian) cmd="apt install" ;;
+        fedora) cmd="dnf install" ;;
+        void)   cmd="xbps-install" ;;
+        suse)   cmd="zypper install" ;;
+        *) return 0 ;;
+    esac
+    case "$fam:$1" in
+        arch:qemu-system-aarch64)   pkg=qemu-system-aarch64 ;;
+        arch:qemu-system-riscv64)   pkg=qemu-system-riscv ;;
+        arch:qemu-system-x86_64)    pkg=qemu-system-x86 ;;
+        debian:qemu-system-aarch64) pkg=qemu-system-arm ;;
+        debian:qemu-system-riscv64) pkg=qemu-system-misc ;;
+        debian:qemu-system-x86_64)  pkg=qemu-system-x86 ;;
+        fedora:qemu-system-aarch64) pkg=qemu-system-aarch64 ;;
+        fedora:qemu-system-riscv64) pkg=qemu-system-riscv ;;
+        fedora:qemu-system-x86_64)  pkg=qemu-system-x86 ;;
+        void:qemu-system-*)         pkg=qemu ;;
+        suse:qemu-system-aarch64)   pkg=qemu-arm ;;
+        suse:qemu-system-riscv64)   pkg=qemu-extra ;;
+        suse:qemu-system-x86_64)    pkg=qemu-x86 ;;
+        arch:gdb|fedora:gdb|suse:gdb) pkg=gdb ;;
+        debian:gdb|void:gdb)        pkg=gdb-multiarch ;;
+        arch:python3)               pkg=python ;;
+        *:python3)                  pkg=python3 ;;
+        fedora:ss)                  pkg=iproute ;;
+        *:ss)                       pkg=iproute2 ;;
+        *:flock)                    pkg=util-linux ;;
+        *:timeout)                  pkg=coreutils ;;
+        arch:mkimage|fedora:mkimage) pkg=uboot-tools ;;
+        *:mkimage)                  pkg=u-boot-tools ;;
+        *:mcopy)                    pkg=mtools ;;
+        arch:clangd)                pkg=clang ;;
+        debian:clangd)              pkg=clangd ;;
+        fedora:clangd|void:clangd)  pkg=clang-tools-extra ;;
+        suse:clangd)                pkg=clang-tools ;;
+        arch:ovmf|fedora:ovmf|void:ovmf) pkg=edk2-ovmf ;;
+        debian:ovmf)                pkg=ovmf ;;
+        suse:ovmf)                  pkg=qemu-ovmf-x86_64 ;;
+        *:git|*:podman|*:drgn)      pkg="$1" ;;
+    esac
+    [[ -n "$pkg" ]] && printf ' -- install: %s %s\n' "$cmd" "$pkg"
+}
+
 # podman first, then docker.  Rootless podman needs no daemon at all, so a machine
 # that keeps dockerd off -- a laptop, say -- builds without starting a service or
 # asking for root.  $KBL_CONTAINER still wins over both when a machine wants one.
@@ -33,11 +132,11 @@ kbl_container() {
        (or set \$KBL_CONTAINER to the one you use)"
 }
 
-# The workspace is bind-mounted into the build container at the SAME path it has
-# here, so a workspace that resolved to a system directory would hand an Ubuntu
-# container write access to this host's package-managed files -- and the package
-# manager would then find them changed underneath it.  Refuse before mounting;
-# print the resolved path so the caller mounts exactly what was checked.
+# A tree's source and data are bind-mounted into the build container at the SAME
+# paths they have here, so one that resolved to a system directory would hand an
+# Ubuntu container write access to this host's package-managed files -- and the
+# package manager would then find them changed underneath it.  Refuse before
+# mounting; print the resolved path so the caller mounts exactly what was checked.
 #
 # The list is what a distribution actually owns, not everything outside $HOME:
 # /run is tmpfs and /run/media is where removable drives land, /var is mostly
@@ -47,9 +146,9 @@ kbl_container() {
 kbl_assert_mountable() {
     local p sys
     p="$(readlink -f "${1:-}" 2>/dev/null)"
-    [[ -n "$p" ]] || die "workspace '${1:-}' does not resolve to a path"
+    [[ -n "$p" ]] || die "'${1:-}' does not resolve to a path"
     [[ "$p" != "/" ]] \
-        || die "workspace '${1:-}' resolves to the filesystem root; refusing to mount it into a container"
+        || die "'${1:-}' resolves to the filesystem root; refusing to mount it into a container"
     if [[ "${KBL_ALLOW_SYSTEM_MOUNT:-}" == 1 ]]; then
         warn "mounting '$p' into a container because \$KBL_ALLOW_SYSTEM_MOUNT=1"
         printf '%s\n' "$p"; return 0
@@ -57,7 +156,7 @@ kbl_assert_mountable() {
     for sys in /usr /etc /boot /opt /bin /sbin /lib /lib64 /proc /sys /dev \
                /var/lib/pacman /var/cache/pacman /var/lib/dpkg /var/lib/rpm /var/db; do
         [[ "$p" == "$sys" || "$p" == "$sys"/* ]] \
-            && die "workspace '$p' is inside $sys, which the system owns; refusing to mount it into a container (set \$KBL_ALLOW_SYSTEM_MOUNT=1 if you mean it)"
+            && die "'$p' is inside $sys, which the system owns; refusing to mount it into a container (set \$KBL_ALLOW_SYSTEM_MOUNT=1 if you mean it)"
     done
     printf '%s\n' "$p"
 }
@@ -116,12 +215,21 @@ kbl_gdb() {
        Present but rejected (see above): ${bad[*]}}$hint"
 }
 
-# --- the workspace -----------------------------------------------------------
-# Handed in, or recorded once.  Never searched for: picking the wrong workspace
-# attaches correct-looking symbols to the wrong machine, which is the one
-# failure this tool must not produce quietly.
+# --- where kbuildlab keeps things ---------------------------------------------
+# kbuildlab's own records never live in or beside a kernel tree; only what the
+# kernel's own make writes (the build, its tag indexes) lands in the source.
+# Each tree is one directory in the registry, holding its tree.conf (and
+# config-fragment) -- plain text, edited by hand or with `kbuildlab set`, and
+# read afresh by every command, so an edit takes effect on the next one.  Files
+# a tree's runs and builds produce (boot disks, the persistent disk, the module
+# archive) live in the tree's data directory.  The XDG variables move both.
 KBL_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/kbuildlab"
+KBL_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/kbuildlab"
+KBL_TREES="$KBL_CONFIG_HOME/trees"
 
+# The workspace is where `init` clones new trees and `sync` keeps its mirror.
+# Handed in, or recorded once.  Never searched for.  Commands that work on a
+# registered tree do not need one.
 kbl_workspace() {
     local d
     if [[ -n "${KBL_WORKSPACE:-}" ]]; then
@@ -133,6 +241,14 @@ kbl_workspace() {
        kbuildlab init --workspace DIR"
     fi
     [[ -d "$d" ]] || die "workspace does not exist: $d"
+    (cd -P "$d" && pwd)
+}
+
+# The workspace if one is recorded, else nothing and status 1, without a message.
+kbl_workspace_opt() {
+    local d="${KBL_WORKSPACE:-}"
+    [[ -z "$d" && -r "$KBL_CONFIG_HOME/workspace" ]] && d="$(<"$KBL_CONFIG_HOME/workspace")"
+    [[ -n "$d" && -d "$d" ]] || return 1
     (cd -P "$d" && pwd)
 }
 
@@ -152,48 +268,118 @@ kbl_is_ksrc() {
         && grep -qE '^[[:space:]]*SUBLEVEL[[:space:]]*=' "$d/Makefile" 2>/dev/null
 }
 
-# Map any path the user might name -- a tree directory, or the kernel source root
-# inside one -- to the tree that owns it.  Prints the tree dir; empty on no match.
-_kbl_owning_tree() {
-    local d="$1" p
-    [[ -d "$d" ]] || return 1
-    d="$(cd -P "$d" && pwd)" || return 1
-    kbl_is_tree "$d" && { printf '%s\n' "$d"; return 0; }
-    if kbl_is_ksrc "$d"; then
-        p="$(cd -P "$d/.." && pwd)"
-        kbl_is_tree "$p" && { printf '%s\n' "$p"; return 0; }
-    fi
-    return 1
-}
+# A tree name is a directory name in the registry, so it is what a path segment
+# may be and nothing that would read as an option or climb out of it.
+kbl_valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; }
 
 kbl_trees() {
-    local ws d; ws="$(kbl_workspace)" || exit 1
-    for d in "$ws"/*/; do kbl_is_tree "${d%/}" && basename "${d%/}"; done
+    local d
+    [[ -d "$KBL_TREES" ]] || return 0
+    for d in "$KBL_TREES"/*/; do kbl_is_tree "${d%/}" && basename "${d%/}"; done
 }
 
+kbl_tree_name() { basename "$1"; }
+kbl_tree_data() { printf '%s\n' "$KBL_DATA_HOME/trees/$(basename "$1")"; }
+
+# Trees still in the layout before the registry: a tree.conf next to the kernel
+# source, in the workspace.  `kbuildlab migrate` moves them.
+kbl_legacy_trees() {
+    local ws d
+    ws="$(kbl_workspace_opt)" || return 0
+    for d in "$ws"/*/; do
+        d="${d%/}"
+        kbl_is_tree "$d" && ! kbl_is_tree "$KBL_TREES/$(basename "$d")" && printf '%s\n' "$d"
+    done
+}
+
+# SRC as one absolute path: a leading ~ expanded, then symlinks, . and ..
+# resolved whether or not it exists yet.  Nothing and status 1 when it is empty
+# or relative.  Every reader of SRC goes through here, so none can disagree.
+kbl_norm_src() {   # kbl_norm_src VALUE
+    local s="${1:-}"
+    case "$s" in "~") s="$HOME" ;; "~"/*) s="$HOME/${s#\~/}" ;; esac
+    [[ "$s" == /* ]] || return 1
+    readlink -m -- "$s"
+}
+
+# The registered tree whose source holds PATH (the longest source wins).
+_kbl_owning_tree() {
+    local p t s best="" bestlen=0
+    p="$(readlink -f -- "$1" 2>/dev/null)" || return 1
+    [[ -n "$p" ]] || return 1
+    for t in $(kbl_trees); do
+        s="$(kbl_norm_src "$(kbl_tree_get "$KBL_TREES/$t" SRC)")" || continue
+        if [[ "$p" == "$s" || "$p" == "$s"/* ]] && [[ ${#s} -gt $bestlen ]]; then
+            best="$KBL_TREES/$t"; bestlen=${#s}
+        fi
+    done
+    [[ -n "$best" ]] && printf '%s\n' "$best"
+}
+
+# The registered tree whose source is DIR's immediate child, when exactly one
+# is: the directory a source was cloned into, as in the layout before the registry.
+_kbl_child_tree() {   # _kbl_child_tree DIR
+    local p t s hit="" n=0
+    p="$(readlink -f -- "$1" 2>/dev/null)" && [[ -n "$p" && -d "$p" ]] || return 1
+    for t in $(kbl_trees); do
+        s="$(kbl_norm_src "$(kbl_tree_get "$KBL_TREES/$t" SRC)")" || continue
+        [[ "$(dirname "$s")" == "$p" ]] && { hit="$KBL_TREES/$t"; n=$((n + 1)); }
+    done
+    [[ $n -eq 1 ]] && printf '%s\n' "$hit"
+}
+
+_kbl_no_tree() {
+    local legacy have
+    legacy="$(kbl_legacy_trees | tr '\n' ' ')"
+    have="$(kbl_trees | tr '\n' ' ')"
+    [[ -n "$legacy" ]] && die "$1
+       These trees still keep their tree.conf beside the source: $legacy
+       Move them into the registry: kbuildlab migrate"
+    die "$1${have:+
+       have: $have}"
+}
+
+# Resolve what the user named to a tree: a registered name, a path inside a
+# registered source (or the registry directory itself, or the directory holding
+# exactly one source), or, given nothing, the tree the current directory belongs
+# to and then the only tree there is.  Prints the tree's registry directory.
 kbl_tree() {
-    local want="${1:-}" ws d n t
-    ws="$(kbl_workspace)" || exit 1
+    local want="${1:-}" t n
+    local -a all=()
     if [[ -n "$want" ]]; then
-        # A path (absolute, or relative with a slash) is tried as given and
-        # relative to CWD; a bare name is a tree under the workspace.  Either the
-        # tree directory or the kernel source root inside it may be named.
-        local -a cand=()
-        if   [[ "$want" == /* ]];  then cand=("$want")
-        elif [[ "$want" == */* ]]; then cand=("$PWD/$want" "$ws/$want")
-        else                            cand=("$ws/$want"); fi
-        for d in "${cand[@]}"; do
-            t="$(_kbl_owning_tree "$d")" && { printf '%s\n' "$t"; return 0; }
-        done
-        die "'$want' is not a tree or a kernel source (no tree.conf, no kernel Makefile)
-       have: $(kbl_trees | tr '\n' ' ')"
+        if [[ "$want" != */* && "$want" != "." && "$want" != ".." ]]; then
+            kbl_is_tree "$KBL_TREES/$want" && { printf '%s\n' "$KBL_TREES/$want"; return 0; }
+            [[ -d "$want" ]] || _kbl_no_tree "no tree named '$want'"
+        fi
+        [[ -e "$want" ]] || _kbl_no_tree "'$want' is neither a tree name nor a path"
+        t="$(readlink -f -- "$want")"
+        if [[ "$(dirname "$t")" == "$(readlink -f -- "$KBL_TREES" 2>/dev/null)" ]] && kbl_is_tree "$t"; then
+            printf '%s\n' "$KBL_TREES/$(basename "$t")"; return 0
+        fi
+        t="$(_kbl_owning_tree "$want")" && { printf '%s\n' "$t"; return 0; }
+        t="$(_kbl_child_tree "$want")" && { printf '%s\n' "$t"; return 0; }
+        _kbl_no_tree "'$want' is not inside the source of any registered tree"
     fi
     t="$(_kbl_owning_tree "$PWD")" && { printf '%s\n' "$t"; return 0; }
-    mapfile -t n < <(kbl_trees)
-    case ${#n[@]} in
-        0) die "no trees in $ws. Create one: kbuildlab init <name> --arch ARCH" ;;
-        1) (cd -P "$ws/${n[0]}" && pwd) ;;
-        *) die "several trees in $ws -- name one: ${n[*]}" ;;
+    t="$(_kbl_child_tree "$PWD")" && { printf '%s\n' "$t"; return 0; }
+    mapfile -t all < <(kbl_trees)
+    case ${#all[@]} in
+        0) _kbl_no_tree "no trees are registered. Create one: kbuildlab init <name> --arch ARCH,
+       or register a kernel source you have: kbuildlab add <dir>" ;;
+        1) printf '%s\n' "$KBL_TREES/${all[0]}" ;;
+        *) n="${all[*]}"; die "several trees are registered -- name one: $n" ;;
+    esac
+}
+
+# A path from tree.conf: absolute, ~/-relative, or relative to the tree's data
+# directory, where the files a tree's runs produce live.
+kbl_tree_path() {   # kbl_tree_path TREE VALUE
+    local v="$2"
+    case "$v" in
+        "") return 0 ;;
+        /*) printf '%s\n' "$v" ;;
+        "~"/*) printf '%s\n' "$HOME/${v#\~/}" ;;
+        *) printf '%s\n' "$(kbl_tree_data "$1")/$v" ;;
     esac
 }
 
@@ -201,9 +387,9 @@ kbl_tree() {
 # Read from the tree, never inferred from its directory name: renaming a
 # directory must not change what gets built.
 #
-# tree.conf grammar.  kbl_tree_get is the reference, and every other reader
-# (clangd.py's tree_conf_get, the editor adapter, the workspace's firmware
-# scripts) must give the same answers on tests/tree-conf-vectors.json:
+# tree.conf grammar.  kbl_tree_get is the reference, and the other reader
+# (treeinfo.py's conf_get, which clangd.py's tree_conf_get calls) must give the
+# same answers on tests/tree-conf-vectors.json:
 #   KEY, optional blanks, '=', optional blanks, VALUE; the first such line wins.
 #   A VALUE that starts with '"' runs to the next '"'; any other ends at the
 #   first '#', trailing blanks stripped.
@@ -232,30 +418,20 @@ kbl_tree_arch() {
     esac
 }
 
-# The kernel source directory inside a tree.  Named by SRC_DIR in tree.conf when
-# set; else the single kernel source root among the tree's immediate children;
-# else the historical default 'kernel' (also the clone target before any source
-# exists).  'kernel' is a default, never a requirement -- the clone may be named
-# anything and is still found by content.
+# The kernel source a tree builds: SRC in its tree.conf, an absolute path.
 kbl_tree_src() {
-    local tree="$1" d n=0 found="" sd
-    sd="$(kbl_tree_get "$tree" SRC_DIR)"
-    [[ -n "$sd" ]] && { printf '%s\n' "$tree/$sd"; return 0; }
-    for d in "$tree"/*/; do
-        d="${d%/}"
-        kbl_is_ksrc "$d" && { found="$d"; n=$((n + 1)); }
-    done
-    case $n in
-        1) printf '%s\n' "$found" ;;
-        0) printf '%s\n' "$tree/kernel" ;;
-        *) die "$tree holds more than one kernel source; name one in tree.conf: SRC_DIR=<dir>" ;;
-    esac
+    local tree="$1" s n
+    s="$(kbl_tree_get "$tree" SRC)"
+    [[ -n "$s" ]] || die "$tree/tree.conf states no SRC (the kernel source directory)
+       kbuildlab set $(basename "$tree") SRC=/path/to/linux"
+    n="$(kbl_norm_src "$s")" || die "$tree/tree.conf states SRC=$s, which is not an absolute path"
+    printf '%s\n' "$n"
 }
 
 # --- per-run state -----------------------------------------------------------
-# Where `run` records what it started and `attach` reads it back.  A path, not a
-# constant, because it is a contract with three other readers (the nvim adapter,
-# and both halves of this tool) and moving it must be one coordinated change.
+# Where `run` records what it started and `attach`, `drgn`, `resume` and
+# `trees` read it back.  A path, not a constant, because it is a contract
+# between them and moving it must be one coordinated change.
 #
 # The default stays /dev/shm rather than $XDG_RUNTIME_DIR, and that is a
 # measured choice: /run/user/<uid> is 1.55 GB on this host while /dev/shm is

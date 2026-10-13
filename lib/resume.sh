@@ -27,7 +27,7 @@ kbuildlab resume [TREE] [options]
                 believes it stopped the guest, and its next packet will disagree
                 with reality -- detach it instead if you can
 
-  TREE is a name, directory, or kernel source root; omitted, the current tree.
+  TREE is a registered name, or a path inside its source; omitted, the current tree.
 USAGE
 }
 while [[ $# -gt 0 ]]; do

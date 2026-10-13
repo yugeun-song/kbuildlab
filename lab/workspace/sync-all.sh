@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Update every tree: `kbuildlab update` per tree = sync (fetch+ff, full history
-# kept; a pinned tag is a no-op) -> config (olddefconfig, keeps .config) -> build
-# (incremental) -> tags (ctags+cscope+gtags).
+# Update every registered tree, or the ones named: `kbuildlab update` = check ->
+# sync (fetch+ff, full history kept; a pinned tag is a no-op) -> config
+# (olddefconfig, keeps .config) -> build (incremental) -> tags (ctags, cscope,
+# gtags, clangd), then a summary.
 #
 # Rootless podman is the default runtime and needs no group and no daemon.
 set -uo pipefail
@@ -25,21 +26,6 @@ fi
 say_kbl="$(readlink -f "$KBL")"
 echo "sync-all: using $say_kbl"
 
-# Optional: limit to trees named on the command line; default is all seven.
-if [[ $# -gt 0 ]]; then trees=("$@"); else
-  trees=(v6.12-x86_64 v6.12-arm64 v6.12-riscv64
-         upstream-x86_64 upstream-arm64 upstream-riscv64
-         v4.6-arm64)
-fi
-
-# No per-tree special-casing here any more.  A tree states its own toolchain in its
-# own tree.conf -- GCC=, and IMAGE= if it needs another image -- which is where the
-# rest of its build is described.  All seven state GCC=16; v4.6 additionally states
-# HOSTCC_FLAGS and KCFLAGS, and none needs a different image.
-rc=0
-for t in "${trees[@]}"; do
-  echo "######## update $t ########"
-  "$KBL" update "$t" || { echo "!! $t update FAILED"; rc=1; }
-done
-echo "sync-all done (rc=$rc)"
-exit $rc
+# A tree states its own toolchain in its tree.conf -- GCC=, and IMAGE= if it needs
+# another image -- so nothing here is per tree.
+if [[ $# -gt 0 ]]; then "$KBL" update "$@"; else "$KBL" update --all; fi

@@ -35,7 +35,7 @@ kbuildlab drgn [TREE] [options] [-- DRGN ARGS]
   --first            with several matches, take the lowest port instead of asking
   -- DRGN ARGS       passed straight to drgn (a script and its arguments, -e ...)
 
-  TREE is a name, directory, or kernel source root; omitted, the current tree.
+  TREE is a registered name, or a path inside its source; omitted, the current tree.
 
   drgn reads a BOOTED kernel.  A guest still frozen at its reset vector has none
   yet; this says so rather than letting drgn fail at it.
