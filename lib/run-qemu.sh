@@ -10,7 +10,7 @@ source "${KBL_REPO}/lib/common.sh"
 # One brace group, parsed whole before any of it runs: editing this file while a
 # guest runs cannot change what the launcher does when the guest exits.
 {
-RUN=0; PORT=""; PORT_SET=0; MEM=1G; SMP=2; KVM=0; KASLR=0; NET=1
+RUN=0; PORT=""; PORT_SET=0; MEM=""; SMP=""; KVM=0; KASLR=""; NET=1
 QMP=1; QMPPORT=""; QMPPORT_SET=0   # QMP monitor: what drgn attaches through
 INITRD=""; INITRD_SET=0; NO_INITRD=0; SSHPORT=""; SSHPORT_SET=0
 BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
@@ -27,7 +27,8 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
 
   --run              boot now instead of freezing at reset
   --boot MODE        direct | uboot | uefi (default: the tree's BOOT)
-  --kaslr|--no-kaslr randomized vs deterministic base (default: --no-kaslr)
+  --kaslr|--no-kaslr randomized vs deterministic base (default: the tree's
+                     KASLR, else off)
   --kvm|--no-kvm     x86 only; default TCG for deterministic early-boot HW bp
   --initrd PATH | --no-initrd    root fs image, or none (early-boot only)
   --append WORDS     extra kernel command-line words, repeatable; added after
@@ -35,7 +36,8 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      mode: -append (direct), boot.scr bootargs (u-boot),
                      grub.cfg linux (uefi)
   --net|--no-net     user/virtio NIC with ssh forward, or none
-  --ssh-port N       host port forwarded to guest :22 (default 2222, auto-avoids)
+  --ssh-port N       host port forwarded to guest :22 (default: the tree's
+                     SSH_PORT, else 2222; a busy default moves on)
   --persist|--no-persist   attach the tree's writable disk (default: tree PERSIST)
   --emulate|--no-emulate   attach the emulated controllers the soft presets build
                      drivers for: NVMe, AHCI, virtio-scsi and USB disks, USB and
@@ -51,8 +53,13 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      way in -- `kbuildlab drgn` uses it, and unlike the gdbstub
                      a QMP client does not pause the guest or displace gdb
   --no-qmp           no QMP monitor and no vmcoreinfo device
-  --mem|-m SIZE  --smp N  --bios PATH
-  TREE is a name, directory, or kernel source root; omitted, the current tree.
+  --mem|-m SIZE  --smp N   (default: the tree's MEM and SMP, else 1G and 2;
+                     handed to qemu's -m and -smp as written)
+  --bios PATH        a relative PATH here is from the current directory; in
+                     tree.conf it is from the tree's data directory
+  The console is the guest's serial line: Ctrl-C goes to the guest, Ctrl-A X
+  quits qemu, Ctrl-A C switches to qemu's monitor and back.
+  TREE is a registered name or a path inside its source; omitted, the current tree.
 USAGE
 }
 while [[ $# -gt 0 ]]; do
@@ -69,14 +76,15 @@ while [[ $# -gt 0 ]]; do
         --no-kvm)    KVM=0; shift ;;        # default: TCG, deterministic early-boot HW breakpoints
         --kaslr)     KASLR=1; shift ;;      # boot with KASLR active
         --no-kaslr)  KASLR=0; shift ;;      # default: nokaslr, deterministic
-        --initrd)    INITRD="${2:?--initrd needs a path}"; INITRD_SET=1; shift 2 ;;
+        --initrd)    INITRD="${2:?--initrd needs a path}"; INITRD="$(realpath -m -s -- "$INITRD")"
+                     INITRD_SET=1; shift 2 ;;
         --no-initrd) NO_INITRD=1; shift ;;  # boot without a root fs (early-boot debug)
         --append)    APPEND_EXTRA+=("${2:?--append needs a string}"); shift 2 ;;
         --net)       NET=1; shift ;;
         --no-net)    NET=0; shift ;;        # no NIC at all
         --ssh-port)  SSHPORT="${2:?--ssh-port needs a number}"; SSHPORT_SET=1; shift 2 ;;
         --boot)      BOOT="${2:?--boot needs a mode (direct|uboot)}"; shift 2 ;;
-        --bios)      BIOS="${2:?--bios needs a path}"; shift 2 ;;
+        --bios)      BIOS="${2:?--bios needs a path}"; BIOS="$(realpath -m -s -- "$BIOS")"; shift 2 ;;
         --persist)    PERSIST=1; PERSIST_SET=1; shift ;;  # attach the tree's writable disk
         --no-persist) PERSIST=0; PERSIST_SET=1; shift ;;  # boot without it (volatile rootfs)
         --emulate)    EMULATE=1; EMULATE_SET=1; shift ;;
@@ -93,6 +101,31 @@ tree="$(kbl_tree "${REST[0]:-}")" || exit 1
 arch="$(kbl_tree_arch "$tree")" || exit 1
 src="$(kbl_tree_src "$tree")" || exit 1
 _statedir="$(kbl_statedir)" || exit 1
+
+# What the tree states for its runs; a flag wins over it, and the values after
+# :- are the defaults when neither says.
+[[ -n "$MEM" ]] || MEM="$(kbl_tree_get "$tree" MEM)"; MEM="${MEM:-1G}"
+[[ -n "$SMP" ]] || SMP="$(kbl_tree_get "$tree" SMP)"; SMP="${SMP:-2}"
+[[ -n "$KASLR" ]] || KASLR="$(kbl_tree_get "$tree" KASLR)"; KASLR="${KASLR:-0}"
+[[ "$KASLR" == 0 || "$KASLR" == 1 ]] || die "KASLR in $tree/tree.conf is '$KASLR'; it is 0 or 1"
+# MEM and SMP go to qemu as written, so every form it takes works (2G,maxmem=8G;
+# 4,cores=2) and qemu judges them; only a blank would split its command line.
+[[ "$MEM" != *[[:space:]]* ]] || die "MEM is '$MEM'; it may not contain blanks"
+[[ "$SMP" != *[[:space:]]* ]] || die "SMP is '$SMP'; it may not contain blanks"
+# The leading size of a -m value in bytes, read as qemu reads it (a bare number
+# is MiB, a fraction such as 1.5G is allowed), or nothing for a form this does
+# not parse.  Only the u-boot address check below needs it.
+_mem_bytes() {
+    local m="${1#size=}"; m="${m%%,*}"
+    awk -v m="$m" 'BEGIN {
+        if (m !~ /^[0-9]+(\.[0-9]+)?[KkMmGgTt]?$/) exit 1
+        u = toupper(substr(m, length(m))); n = m + 0
+        if (u == "K") n *= 1024; else if (u == "G") n *= 1024 ^ 3
+        else if (u == "T") n *= 1024 ^ 4; else n *= 1024 ^ 2
+        printf "%.0f\n", n
+    }'
+}
+_membytes="$(_mem_bytes "$MEM")" || _membytes=""
 
 # A persistent disk must not be opened read-write by two guests at once, or the
 # ext4 on it corrupts. QEMU's own image lock would refuse the second guest and
@@ -279,14 +312,14 @@ _cleanup() {
 trap _cleanup EXIT HUP INT TERM
 
 # Root filesystem, handed to the kernel as an initramfs.  Stated per tree with
-# INITRD= in tree.conf (a path, absolute or relative to the tree); overridden by
+# INITRD= in tree.conf (absolute, or relative to the tree's data directory); overridden by
 # --initrd, suppressed by --no-initrd.  Without one the kernel panics at "mount
 # root" the moment it is continued, so a missing-but-requested initrd is fatal
 # here, not a surprise 30 seconds into boot.
 if [[ $NO_INITRD -eq 0 ]]; then
     [[ $INITRD_SET -eq 1 ]] || INITRD="$(kbl_tree_get "$tree" INITRD)"
     if [[ -n "$INITRD" ]]; then
-        [[ "$INITRD" == /* ]] || INITRD="$tree/$INITRD"
+        INITRD="$(kbl_tree_path "$tree" "$INITRD")"
         [[ -f "$INITRD" ]] || die "initrd not found: $INITRD
        build the rootfs, fix INITRD in $tree/tree.conf, or pass --no-initrd"
     fi
@@ -296,16 +329,16 @@ fi
 # rootfs as a second archive: the kernel unpacks concatenated archives as one.
 # An archive older than the build's own modules would not load into this
 # kernel, so it is left out and said so.
-rootfs="$INITRD"; mods=""
-if [[ -n "$INITRD" && $MODULES -eq 1 && -f "$tree/modules.cpio.gz" ]]; then
-    if [[ "$src/modules.order" -nt "$tree/modules.cpio.gz" \
-          || -n "$(find "$src" -name '*.ko' -newer "$tree/modules.cpio.gz" -print -quit 2>/dev/null)" ]]; then
-        warn "$tree/modules.cpio.gz is older than the build's modules; booting without them
+rootfs="$INITRD"; mods=""; _marc="$(kbl_tree_data "$tree")/modules.cpio.gz"
+if [[ -n "$INITRD" && $MODULES -eq 1 && -f "$_marc" ]]; then
+    if [[ "$src/modules.order" -nt "$_marc" \
+          || -n "$(find "$src" -name '*.ko' -newer "$_marc" -print -quit 2>/dev/null)" ]]; then
+        warn "$_marc is older than the build's modules; booting without them
        (kbuildlab build $(basename "$tree") stages them again)"
     else
         _ird="$_statedir/kbl-initrd-${PORT}.cpio.gz"
-        cat "$INITRD" "$tree/modules.cpio.gz" > "$_ird" || die "could not write $_ird"
-        INITRD="$_ird"; mods="$tree/modules.cpio.gz"
+        cat "$INITRD" "$_marc" > "$_ird" || die "could not write $_ird"
+        INITRD="$_ird"; mods="$_marc"
     fi
 fi
 
@@ -314,7 +347,10 @@ fi
 [[ -n "$BOOT" ]] || BOOT="$(kbl_tree_get "$tree" BOOT)"
 [[ -n "$BOOT" ]] || BOOT="direct"
 # OVMF/UEFI wants the modern q35 chipset on x86.
-[[ "$BOOT" == uefi && "$arch" == x86_64 && "$machine" == pc ]] && machine=q35
+if [[ "$BOOT" == uefi && "$arch" == x86_64 && "$machine" == pc ]]; then
+    machine=q35
+    say "machine      q35 for this UEFI boot (the tree states pc; OVMF wants q35)"
+fi
 
 # Persistent per-tree disk: a writable virtio-blk image on SSD, kept between runs
 # (and reboots) so the guest's /persist survives. Opt-in (--persist, or PERSIST=1
@@ -325,7 +361,7 @@ persist_ok=0; persist_disk=""; persist_dev=""
 [[ $PERSIST_SET -eq 1 ]] || PERSIST="$(kbl_tree_get "$tree" PERSIST)"
 if [[ "$PERSIST" == 1 ]]; then
     persist_disk="$(kbl_tree_get "$tree" PERSIST_DISK)"; persist_disk="${persist_disk:-disk/persist.img}"
-    [[ "$persist_disk" == /* ]] || persist_disk="$tree/$persist_disk"
+    persist_disk="$(kbl_tree_path "$tree" "$persist_disk")"
     _psize="$(kbl_tree_get "$tree" PERSIST_SIZE)"; _psize="${_psize:-2G}"
     if ! mkdir -p "$(dirname "$persist_disk")" 2>/dev/null; then
         say "persist      cannot create $(dirname "$persist_disk") -- booting without /persist"
@@ -413,7 +449,15 @@ for _w in "${APPEND_EXTRA[@]+"${APPEND_EXTRA[@]}"}"; do
     _cmdline_ok "$_w" "--append"
     append="$append $_w"
 done
-declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic)
+# The console is the guest's serial line, multiplexed with qemu's monitor on
+# this terminal and with signals off: Ctrl-C is a byte for the guest (it stops a
+# `ping` there instead of killing qemu), Ctrl-A X quits qemu, Ctrl-A C reaches
+# the monitor.  Stated rather than left to -nographic, whose own default is a
+# console WITH signals, and no monitor at all once QMP below takes the monitor
+# slot -- which is how Ctrl-C came to end the whole guest.
+declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic
+                -chardev stdio,id=kblcon,mux=on,signal=off -serial chardev:kblcon
+                -mon chardev=kblcon,mode=readline)
 
 # An entropy source.  A headless guest has no keyboard, no disk seek noise and no
 # hardware RNG, so its CRNG is seeded by whatever the kernel can manufacture on
@@ -456,13 +500,35 @@ case "$BOOT" in
     uboot)
         ub="${BIOS:-$(kbl_tree_get "$tree" UBOOT)}"
         [[ -n "$ub" ]] || die "boot uboot: state UBOOT= in $tree/tree.conf or pass --bios"
-        [[ "$ub" == /* ]] || ub="$tree/$ub"
+        ub="$(kbl_tree_path "$tree" "$ub")"
         [[ -f "$ub" ]] || die "u-boot not found: $ub"
-        bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="${bd:-boot/uboot.img}"
-        [[ "$bd" == /* ]] || bd="$tree/$bd"
+        bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/uboot.img}")"
         [[ -f "$bd" ]] || die "no boot disk: $bd -- build it first with your workspace's firmware/build-bootdisk.sh (not shipped with kbuildlab; see README)"
-        la="$(kbl_tree_get "$tree" UBOOT_LOADADDR)"; la="${la:-0x40200000}"
-        ra="$(kbl_tree_get "$tree" UBOOT_RDADDR)";   ra="${ra:-0x48000000}"
+        # Where boot.scr loads the image and the initramfs.  On QEMU's virt
+        # machine the defaults are its own: RAM at 1 GiB on arm64, at 2 GiB on
+        # riscv64, where u-boot itself runs at 0x80200000 -- so the image goes
+        # above it.  Any other machine states both, and states RAM_BASE for the
+        # check that they lie in the guest's RAM; virt's RAM base is its own.
+        _ramb=""; _dla=""; _dra=""
+        case "$arch:${machine%%,*}" in
+            arm64:virt|arm64:virt-*)     _ramb=0x40000000; _dla=0x40200000; _dra=0x48000000 ;;
+            riscv64:virt|riscv64:virt-*) _ramb=0x80000000; _dla=0x84000000; _dra=0x88300000 ;;
+        esac
+        _rb="$(kbl_tree_get "$tree" RAM_BASE)"
+        if [[ -n "$_rb" ]]; then
+            [[ "$_rb" =~ ^0x[0-9a-fA-F]+$ ]] || die "RAM_BASE in $tree/tree.conf is '$_rb'; it is a hex address"
+            _ramb="$_rb"
+        fi
+        la="$(kbl_tree_get "$tree" UBOOT_LOADADDR)"; la="${la:-$_dla}"
+        ra="$(kbl_tree_get "$tree" UBOOT_RDADDR)";   ra="${ra:-$_dra}"
+        [[ -n "$la" && -n "$ra" ]] || die "boot uboot on $arch $machine: state UBOOT_LOADADDR and UBOOT_RDADDR in
+       $tree/tree.conf (only QEMU's virt machine has defaults)"
+        for _a in "$la" "$ra"; do
+            [[ "$_a" =~ ^0x[0-9a-fA-F]+$ ]] || die "boot uboot: '$_a' is not a hex address (UBOOT_LOADADDR / UBOOT_RDADDR)"
+            [[ -n "$_ramb" ]] || continue
+            (( _a >= _ramb )) && { [[ -z "$_membytes" ]] || (( _a < _ramb + _membytes )); } \
+                || die "boot uboot: $_a lies outside this guest's RAM ($_ramb + $MEM); fix UBOOT_LOADADDR / UBOOT_RDADDR"
+        done
         command -v mkimage >/dev/null 2>&1 || die "mkimage (uboot-tools) required for boot uboot"
         command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
         _loadaddr="$la"                                 # attach's HW-bp goes here
@@ -521,12 +587,18 @@ case "$BOOT" in
         # copy) boots grub2 from an ESP disk. Paths per tree; --bios overrides CODE.
         code="${BIOS:-$(kbl_tree_get "$tree" OVMF_CODE)}"; vars="$(kbl_tree_get "$tree" OVMF_VARS)"
         [[ -n "$code" && -n "$vars" ]] || die "boot uefi: state OVMF_CODE= and OVMF_VARS= in $tree/tree.conf"
-        [[ "$code" == /* ]] || code="$tree/$code"; [[ "$vars" == /* ]] || vars="$tree/$vars"
+        code="$(kbl_tree_path "$tree" "$code")"; vars="$(kbl_tree_path "$tree" "$vars")"
         [[ -f "$code" && -f "$vars" ]] || die "OVMF firmware not found: $code / $vars"
-        bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="${bd:-boot/esp.img}"
-        [[ "$bd" == /* ]] || bd="$tree/$bd"
+        bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/esp.img}")"
         [[ -f "$bd" ]] || die "no ESP disk: $bd -- build it first with your workspace's firmware/build-esp.sh (not shipped with kbuildlab; see README)"
-        la="$(kbl_tree_get "$tree" UEFI_ENTRY)"; la="${la:-0x1000000}"
+        # Where the EFI stub puts the kernel's image base.  It is not the boot
+        # protocol's 0x1000000: the stub allocates, and the trees here measured
+        # 0x1800000.  Stated per tree, because a wrong one is a debugger
+        # calibrated to an address the kernel never runs at.
+        la="$(kbl_tree_get "$tree" UEFI_ENTRY)"
+        [[ -n "$la" ]] || die "boot uefi: state UEFI_ENTRY (the image base the EFI stub chooses) in
+       $tree/tree.conf.  Measure it once: boot with --boot uefi --no-kaslr, attach,
+       and read _text's physical address from \`kearly status\`."
         _loadaddr="$la"
         command -v mcopy >/dev/null 2>&1 || die "mtools (mcopy) required for boot uefi"
         _shm_room_for "$bd"
@@ -589,7 +661,7 @@ fi
 # A host->guest:22 forward lets neovim edit files in the guest over SSH
 # (nvim scp://root@localhost:<sshport>//path, password "root").
 if [[ $NET -eq 1 ]]; then
-    [[ -n "$SSHPORT" ]] || SSHPORT=2222
+    [[ -n "$SSHPORT" ]] || SSHPORT="$(kbl_tree_get "$tree" SSH_PORT)"; SSHPORT="${SSHPORT:-2222}"
     if _busy "$SSHPORT"; then
         if [[ $SSHPORT_SET -eq 1 ]]; then
             die "ssh port $SSHPORT is in use (you asked for it); pick another with --ssh-port"
@@ -618,7 +690,10 @@ use_kvm=0
 [[ "$arch" == "x86_64" && "$KVM" -eq 1 && -r /dev/kvm && -w /dev/kvm ]] && use_kvm=1
 # `-cpu host` needs KVM; under TCG (the default, wanted for deterministic early
 # -boot HW breakpoints) fall back to a fully-featured emulated CPU.
-[[ "$cpu" == "host" && $use_kvm -eq 0 ]] && cpu="max"
+if [[ "$cpu" == "host" && $use_kvm -eq 0 ]]; then
+    cpu="max"
+    say "cpu          max (the tree states host, which needs KVM; this run uses TCG)"
+fi
 # Paging profile as CPU features (stated per tree, never hardcoded): the kernel
 # uses the widest paging the CPU advertises, so e.g. CPU_PAGING="la57=off" pins
 # x86 to 4-level and "sv48=off,sv57=off" pins riscv to Sv39 -- no kernel rebuild.
@@ -630,8 +705,8 @@ cpu_paging="$(kbl_tree_get "$tree" CPU_PAGING)"
 # is an unauthenticated read/write channel into the guest's memory -- so the
 # default is the loopback address, and a tree that genuinely wants to be reached
 # from another machine says so with GDB_BIND= rather than every tree being
-# exposed because one of them needed it.  Both readers of this (run-gdb.sh and
-# the editor adapter) already parse the tcp:HOST:PORT form.
+# exposed because one of them needed it.  run-gdb.sh, the one reader of this,
+# parses the tcp:HOST:PORT form.
 _gbind="${KBL_GDB_BIND:-$(kbl_tree_get "$tree" GDB_BIND)}"; _gbind="${_gbind:-127.0.0.1}"
 CMD+=(-gdb "tcp:${_gbind}:${PORT}")
 
@@ -697,16 +772,16 @@ fi
 [[ $RUN -eq 1 ]] || CMD+=(-S)
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
-# Record this run so `attach` -- and the editor adapter -- can match the exact
-# boot combination on this gdb port.  Written here, not earlier, because the ssh
-# port and the final command line are only settled once the NIC and the boot mode
-# have been resolved, and a state file that says "" for a port that was in fact
-# allocated is worse than one that does not exist.
+# Record this run so `attach` (and through it an editor's adapter) can match
+# the exact boot combination on this gdb port.  Written here, not earlier,
+# because the ssh port and the final command line are only settled once the NIC
+# and the boot mode have been resolved, and a state file that says "" for a port
+# that was in fact allocated is worse than one that does not exist.
 #
-# The file name and the KBL_ key format are a published contract: the editor's
-# discover.lua reads /dev/shm/kbl-run-<PORT>.env and parses `KBL_[A-Z0-9_]+=`.
-# Keys are therefore only ADDED here, never renamed, so a reader that knows the
-# older set keeps working against a file a newer launcher wrote.
+# The file name and the KBL_ key format are a contract with the readers (attach,
+# drgn, resume, trees), each of which parses `KBL_[A-Z0-9_]+=` lines.  Keys are
+# therefore only ADDED here, never renamed, so a reader that knows the older set
+# keeps working against a file a newer launcher wrote.
 _write_state() {   # _write_state [QEMU_PID]
     local qpid="${1:-}" tmp
     # The record is line-oriented, so a value containing a newline would end its
@@ -774,6 +849,7 @@ _atree="$(printf '%q' "$(basename "$tree")")"
     && _acmd="kbuildlab attach $_atree" \
     || _acmd="kbuildlab attach $_atree --port $PORT"
 [[ $RUN -eq 1 ]] || say "frozen       attach with: $_acmd"
+say "console      Ctrl-C goes to the guest; Ctrl-A X quits qemu, Ctrl-A C its monitor"
 # Printed frozen or not: drgn reads a booted kernel, so this is what to run once
 # the guest is up, not instead of the attach above.
 if [[ $QMP -eq 1 ]]; then
@@ -797,10 +873,10 @@ fi
 # the terminal; and with it in place, typing root/root at a `kbl run` guest logs
 # in and the guest answers.
 #
-# The rest of the terminal handling is unchanged: job control being off also
-# means the child stays in this shell's process group -- measured inside a pty,
-# same pgid, state S+ -- so -nographic's raw-mode handling and Ctrl-C behave as
-# they did under `exec`.
+# Job control being off also means the child stays in this shell's process
+# group -- measured inside a pty, same pgid, state S+ -- so the console's
+# raw-mode handling is what it was under `exec`.  With signal=off, Ctrl-C reaches
+# neither qemu nor this script; it is a byte on the guest's serial line.
 "${CMD[@]}" <&0 &
 _qpid=$!
 _write_state "$_qpid"
