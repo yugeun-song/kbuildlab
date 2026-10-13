@@ -87,7 +87,7 @@ head.S 최초 명령(MMU off, 물리주소)부터 → MMU 켜지는 순간 → �
 **KASLR:** `b start_kernel; continue`만으로 crossing catcher가 물리→고VA 전이 명령에서 실제 랜덤
 슬라이드를 읽어 전 심볼을 런타임 VA로 재배치 → start_kernel이 shifted VA에서 clean hit (링크VA+슬라이드 교차검증 일치).
 
-**주요 gdbtools 명령:** `kearly bootbreak/where/mmu/regimes[walk]/kaslr/overmmu`, `kp2v/kv2p/sym/kx`,
+**주요 gdbtools 명령:** `kearly bootbreak/where/mmu/regimes[walk]/kaslr/overmmu`, `kp2v/kv2p/addr2sym/kx`,
 `kb/kw`(regime 인지 브레이크/워치), `kpt/kpgd/kpthex`(페이지테이블), `kcensus/ksregs`(제어·시스템 레지스터 전수),
 `mmview`(커널 vmmap), `kdtb`(FDT 덤프), `cfgdis`(분기 화살표 디스어셈).
 
@@ -108,7 +108,7 @@ kbuildlab run v6.12-x86_64 --no-kvm       # x86 조기부팅은 TCG 권장(HW �
 kbuildlab attach v6.12-arm64          # 연결 즉시 kearly bootbreak → _text (--no-bootbreak로 raw)
 (gdb) kearly regimes walk    # MMU 정지점 전부 무장
 (gdb) continue               # 반복 -> entry→mmuon→crossing→virtual→start 순서로 통과
-(gdb) kearly where / kearly mmu / kpt / sym $pc / mmview / kcensus ...
+(gdb) kearly where / kearly mmu / kpt / addr2sym $pc / mmview / kcensus ...
 # KASLR: (gdb) b start_kernel ; continue   # 슬라이드 자동 보정 후 hit
 ```
 `[TREE]` 인자는 트리 이름·경로뿐 아니라 **커널 소스 최상위 폴더 자체**(`.../kernel`, 이름 임의)도 받는다(내용 기반 인식).
