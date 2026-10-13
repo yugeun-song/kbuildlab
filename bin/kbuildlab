@@ -1016,22 +1016,117 @@ _update_report() {   # _update_report TREE BEFORE
     fi
 }
 
-cmd_update() {
-    local tree src before
-    tree="$(kbl_tree "${1:-}")" || exit 1
+# One stage of an update, in a subshell so a `die` inside it ends only that
+# stage, with its outcome and duration appended to the run's record.
+_update_stage() {   # _update_stage RECORD NAME STAGE CMD...
+    local rec="$1" name="$2" stage="$3" t0=$SECONDS rc; shift 3
+    ( "$@" ); rc=$?
+    printf '%s\t%s\t%s\t%s\n' "$name" "$stage" "$([[ $rc -eq 0 ]] && echo ok || echo fail)" \
+        "$((SECONDS - t0))" >> "$rec"
+    return $rc
+}
+
+# What a tree needs before anything runs, said all at once.
+_update_check() {   # _update_check TREE
+    local tree="$1" src v c img
+    kbl_tree_arch "$tree" >/dev/null || exit 1
     src="$(kbl_tree_src "$tree")" || exit 1
-    say "updating     $(basename "$tree")"
-    cmd_sync "$tree"
+    v="$(kbl_tree_get "$tree" VERSION)"
+    [[ -n "$v" ]] || die "$(basename "$tree") states no VERSION to track: kbuildlab set $(basename "$tree") VERSION=<tag or branch>"
+    if [[ -e "$src" ]]; then
+        kbl_is_ksrc "$src" || die "$src is not a kernel source"
+        [[ -d "$src/.git" ]] || die "$src is not a git checkout, so it cannot be synced"
+    fi
+    c="$(kbl_container)" || exit 1
+    img="$(_tree_image "$tree")"
+    "$c" image inspect "$img" >/dev/null 2>&1 || die "container image $img is missing: kbuildlab image"
+    command -v git >/dev/null 2>&1 || die "git is not installed$(kbl_pkg_hint git)"
+    ok "$(basename "$tree"): $(kbl_tree_arch "$tree"), tracks $v, source $src"
+}
+
+_update_one() {   # _update_one TREE RECORD NOTAGS [TAGS-OPTION...]
+    local tree="$1" rec="$2" notags="$3" name src before; shift 3
+    name="$(basename "$tree")"
+    head1 "== $name"
+    _update_stage "$rec" "$name" check _update_check "$tree" || return 1
+    _update_stage "$rec" "$name" sync cmd_sync "$tree" || return 1
+    src="$(kbl_tree_src "$tree")" || return 1
     # Taken before cmd_config, which merges a tree's own fragment.
-    before="$(mktemp)" || die "cannot create a temporary file"
-    _KBL_UPDATE_BEFORE="$before"
-    trap 'rm -f -- "$_KBL_UPDATE_BEFORE"' EXIT
+    before="$(dirname "$rec")/config.before"; rm -f "$before"
     [[ -f "$src/.config" ]] && cp "$src/.config" "$before"
-    cmd_config "$tree"
-    _kmake "$tree" olddefconfig || die "olddefconfig failed"
-    _update_report "$tree" "$before"
-    cmd_build "$tree"
-    cmd_tags "$tree"
+    _update_stage "$rec" "$name" config _update_config "$tree" "$before" || { rm -f "$before"; return 1; }
+    rm -f "$before"
+    _update_stage "$rec" "$name" build cmd_build "$tree" || return 1
+    if [[ "$notags" == 1 ]]; then
+        printf '%s\t%s\t%s\t%s\n' "$name" tags skip 0 >> "$rec"
+    else
+        _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
+    fi
+}
+
+_update_config() {   # _update_config TREE BEFORE
+    cmd_config "$1"
+    _kmake "$1" olddefconfig || die "olddefconfig failed"
+    _update_report "$1" "$2"
+}
+
+_update_summary() {   # _update_summary RECORD
+    local rec="$1" name stage res secs t
+    local -a order=() stages=(check sync config build tags)
+    local -A cell=() total=()
+    while IFS=$'\t' read -r name stage res secs; do
+        [[ -n "${total[$name]+x}" ]] || { order+=("$name"); total[$name]=0; }
+        cell["$name:$stage"]="$res"; total[$name]=$(( ${total[$name]} + secs ))
+    done < "$rec"
+    [[ ${#order[@]} -gt 0 ]] || return 0
+    local w=4; for name in "${order[@]}"; do (( ${#name} > w )) && w=${#name}; done
+    echo
+    printf '%s%-*s  %-6s %-6s %-6s %-6s %-6s %s%s\n' "$KBL_B" "$w" TREE CHECK SYNC CONFIG BUILD TAGS TIME "$KBL_0"
+    # Each mark is one column wide but ✓ and ✗ are three bytes, and printf pads
+    # by bytes, so the mark is printed alone and the column padded after it.
+    for name in "${order[@]}"; do
+        printf '%-*s ' "$w" "$name"
+        for stage in "${stages[@]}"; do
+            case "${cell[$name:$stage]:-}" in
+                ok)   printf ' %s%s%s     ' "$KBL_G" "$KBL_OK" "$KBL_0" ;;
+                fail) printf ' %s%s%s     ' "$KBL_R" "$KBL_NO" "$KBL_0" ;;
+                *)    printf ' %s-%s     ' "$KBL_D" "$KBL_0" ;;
+            esac
+        done
+        t=${total[$name]}
+        printf ' %dm%02ds\n' $((t / 60)) $((t % 60))
+    done
+}
+
+cmd_update() {
+    local all=0 notags=0 t rc=0
+    local -a names=() trees=() tagsopt=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all) all=1; shift ;;
+            --no-tags) notags=1; shift ;;
+            --no-clangd|--no-warm) tagsopt+=("$1"); shift ;;
+            -*) die "update: unknown option '$1'" ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+    if [[ $all -eq 1 ]]; then
+        mapfile -t names < <(kbl_trees)
+        [[ ${#names[@]} -gt 0 ]] || die "update: no trees are registered"
+    fi
+    if [[ ${#names[@]} -eq 0 ]]; then
+        t="$(kbl_tree "")" || exit 1; trees=("$t")
+    else
+        for t in "${names[@]}"; do t="$(kbl_tree "$t")" || exit 1; trees+=("$t"); done
+    fi
+    local tmp rec; tmp="$(mktemp -d)" || die "cannot create a temporary directory"
+    _KBL_UPDATE_TMP="$tmp"; rec="$tmp/record"; : > "$rec"
+    trap 'rm -rf -- "$_KBL_UPDATE_TMP"' EXIT
+    for t in "${trees[@]}"; do
+        _update_one "$t" "$rec" "$notags" "${tagsopt[@]+"${tagsopt[@]}"}" || rc=1
+    done
+    _update_summary "$rec"
+    return $rc
 }
 
 # ---------------------------------------------------------------- run / attach
