@@ -10,7 +10,7 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/common.sh"
 
-PORT=""; PORT_SET=0; BOOTBREAK=1; STOP=""; STOP_AT=""; LIST=0; FIRST=0
+PORT=""; PORT_SET=0; BOOTBREAK=1; STOP=""; STOP_AT=""; LIST=0; FIRST=0; JSON=0
 declare -a REST=() PASS=()
 _usage() {
     cat <<USAGE
@@ -24,9 +24,11 @@ kbuildlab attach [TREE] [options] [-- GDB ARGS]
   --list|-l              list live guests and exit; never prompts
   --first                with several matches, take the lowest port instead of
                          asking (for scripts)
+  --json                 print the session as JSON instead of starting gdb (with
+                         --list: the live guests) -- what the nvim adapter reads
   -- GDB ARGS            pass the rest straight to gdb
 
-  TREE is a name, directory, or kernel source root; omitted, the current tree.
+  TREE is a registered name, or a path inside its source; omitted, the current tree.
   TREE and --port may be given together and must then agree.
 
   With one live guest this behaves exactly as it always has.  With several of the
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --port|-p)            PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
         --list|-l)            LIST=1; shift ;;
         --first)              FIRST=1; shift ;;
+        --json)               JSON=1; shift ;;
         --no-bootbreak|--raw) BOOTBREAK=0; shift ;;   # attach raw (no run-to-_text)
         --bootbreak)          BOOTBREAK=1; shift ;;
         --stop)               STOP="${2:?--stop needs text|firmware|start_kernel}"; shift 2 ;;
@@ -75,6 +78,33 @@ if [[ -n "${REST[0]:-}" ]]; then
 elif [[ $PORT_SET -eq 0 ]]; then
     # No tree named and no port: the current directory decides, exactly as before.
     _want_tree="$(kbl_tree "" 2>/dev/null)" || _want_tree=""
+fi
+
+# --json writes JSON and nothing else to stdout; everything else goes to stderr.
+[[ $JSON -eq 1 ]] && exec 3>&1 1>&2
+if [[ $JSON -eq 1 && $LIST -eq 1 ]]; then
+    while IFS= read -r _row; do
+        [[ -n "$_row" ]] || continue
+        kbl_row_fields "$_row"
+        _bnd="$(kbl_qemu_gdb_bind "$_r_pid")"
+        printf '%s\x1f%s\x1f%s\n' "$_row" "$_bnd" "$(kbl_gdb_attached "$_r_port" "$_r_pid" "$_bnd")"
+    done < <(kbl_instances) | python3 -c '
+import json, sys
+keys = ("port", "pid", "start", "frozen", "qbin", "state", "tree", "name", "boot", "kaslr", "ssh",
+        "bind", "dbg")
+rows = []
+for line in sys.stdin:
+    f = dict(zip(keys, line.rstrip("\n").split("\x1f")))
+    for k in ("port", "pid", "ssh"):
+        f[k] = int(f[k]) if f.get(k, "").isdigit() else None
+    f["frozen"] = f.get("frozen") == "1"
+    f["kaslr"] = {"1": True, "0": False}.get(f.get("kaslr"))
+    host = f.get("bind") or ""
+    f["target"] = "%s:%s" % ("localhost" if host in ("", "0.0.0.0", "::", "[::]") else host, f["port"])
+    rows.append({k: (v if v != "" else None) for k, v in f.items()})
+json.dump(rows, sys.stdout, indent=1)
+print()' >&3 || die "attach --list --json: the guests could not be written as JSON"
+    exit 0
 fi
 
 # 2 means --list printed its table and there is nothing to attach to.  Not a
@@ -118,7 +148,15 @@ vmlinux="$src/vmlinux"
 [[ -f "$vmlinux" ]] || die "no vmlinux at $vmlinux
        build it first: kbuildlab build $(basename "$tree")"
 
-gdb="$(kbl_gdb "$arch")" || exit 1
+# The gdb to run: stated ($KBL_GDB, or GDB= in tree.conf), else the first of
+# the distribution spellings that has a working Python.
+gdb="${KBL_GDB:-$(kbl_tree_get "$tree" GDB)}"
+if [[ -n "$gdb" ]]; then
+    command -v "$gdb" >/dev/null 2>&1 || die "the stated gdb '$gdb' is not found (\$KBL_GDB or GDB= in $tree/tree.conf)"
+    kbl_gdb_python "$gdb" || die "the stated gdb '$gdb' has no working Python"
+else
+    gdb="$(kbl_gdb "$arch")" || exit 1
+fi
 
 # gdbtools, if it is installed, is what makes symbols work before the MMU is on.
 # Absent is a normal answer; a location that is stated and wrong is not.
@@ -135,18 +173,32 @@ elif [[ -r "$_root_file" ]]; then
 fi
 
 # The machine description this tree states, read by kbl_tree_get's grammar and
-# handed over as-is; a value already in the environment wins.  GDBTOOLS_ENTRY_PA
+# handed over as-is; a value already in the environment wins, even an empty one
+# (which gdbtools reads as unset).  GDBTOOLS_ENTRY_PA
 # describes the tree's DEFAULT boot mode and this port may run another, so it is
-# held back and applied below only if no run state says better.  GDBTOOLS_AUTO is
-# always on: arming the session is what this launcher is for.
+# held back and applied below only if no run state says better.  GDBTOOLS_AUTO
+# arms the session, which is what this launcher is for, unless stated otherwise.
 _op_entry="${GDBTOOLS_ENTRY_PA:-}"   # an operator pin; it outranks everything below
 _tree_entry=""                       # what tree.conf states, applied only as a fallback
 while IFS= read -r k; do
     v="$(kbl_tree_get "$tree" "$k")"
     [[ "$k" == GDBTOOLS_ENTRY_PA ]] && { _tree_entry="$v"; continue; }
-    [[ -n "${!k:-}" ]] || export "$k=$v"
+    [[ -n "${!k+x}" ]] || export "$k=$v"
 done < <(kbl_tree_keys "$tree" | grep -E '^GDBTOOLS_[A-Z0-9_]*$')
-export GDBTOOLS_AUTO=1
+[[ -n "${GDBTOOLS_AUTO:-}" ]] || export GDBTOOLS_AUTO=1
+
+# What an attached session does beyond arming it.  gdbtools does none of this
+# unless told, so the session that `attach` has always opened is stated here:
+# the memory guard, pwndbg's guards, the three context panels, the quiet page
+# scan, the arm64 disassembly guard, the shadow symbols, the KASLR slide applied
+# at the first virtual stop, the hidden catcher on the MMU crossing, and plain
+# breakpoints given their physical twins.  The environment and tree.conf win,
+# and an empty value there (GDBTOOLS_PANELS=) turns that behaviour off.
+for _kv in SAFEMEM=auto PWNDBG_GUARDS=1 "PANELS=kgdb flow msysreg" EXPLORE_PAGES=off \
+           SAFERENDER=auto SHADOW=1 KASLR_APPLY=auto CROSSING=1 ADOPT=1; do
+    _k="GDBTOOLS_${_kv%%=*}"
+    [[ -n "${!_k+x}" ]] || export "$_k=${_kv#*=}"
+done
 
 # Match the exact boot combination `run` recorded for this gdb port (mode + load
 # address). In a firmware chain the bootloader lands the kernel entry at a known
@@ -178,7 +230,7 @@ if [[ -r "$_st" ]]; then
         # address ranges do not overlap, so both resolve.
         if [[ "$_bmode" == uboot ]]; then
             _ub="$(kbl_tree_get "$tree" UBOOT)"
-            [[ -n "$_ub" && "$_ub" != /* ]] && _ub="$tree/$_ub"
+            _ub="$(kbl_tree_path "$tree" "$_ub")"
             [[ -n "$_ub" && -f "${_ub%.bin}" ]] && FWSYM="${_ub%.bin}"
         fi
     fi
@@ -186,19 +238,19 @@ fi
 
 # Nothing recorded for this port, or a direct boot: the tree's own address is the
 # only evidence left.  It describes the tree's DEFAULT mode, so it holds only while
-# that is what is running -- the same rule the nvim adapter applies.
+# that is what is running.
 if [[ -z "${GDBTOOLS_ENTRY_PA:-}" && -n "$_tree_entry" ]]; then
     _sboot="$(kbl_tree_get "$tree" BOOT)"; [[ -z "$_sboot" ]] && _sboot=direct
     [[ "${_bmode:-$_sboot}" == "$_sboot" ]] && export GDBTOOLS_ENTRY_PA="$_tree_entry"
 fi
 
-# With no run state -- a guest something else started -- score KASLR from the same
-# evidence discover.lua scores, in the same order, so the terminal and the editor
-# cannot reach opposite verdicts about one guest: the guest's own command line
-# first, the build's .config next, and anything still undecided counts as ON.  The
-# asymmetry is deliberate: a wrong "off" silently skips the base recovery and the
-# session breaks at an address the kernel never uses, while a wrong "on" only runs
-# a recovery that was not needed.
+# With no run state -- a guest something else started -- score KASLR from what is
+# left, in a fixed order: the guest's own command line first, the build's .config
+# next, and anything still undecided counts as ON.  An editor gets this verdict
+# through --json, so the terminal and the editor cannot disagree about one guest.
+# The asymmetry is deliberate: a wrong "off" silently skips the base recovery and
+# the session breaks at an address the kernel never uses, while a wrong "on" only
+# runs a recovery that was not needed.
 #
 # The qemu pid is the one discovery already established for this row, not a fresh
 # search.  A command-line pattern broad enough to catch qemu also catches any
@@ -206,8 +258,8 @@ fi
 # `head -1` then picks whichever has the lower pid.  Discovery found this process
 # by argv[0], which a shell cannot fake, so re-finding it here can only be worse.
 if [[ -z "$_kaslr" ]]; then
-    # Only the -append VALUE decides, as discover.lua does, and it is read from
-    # /proc so argument boundaries survive: matching the whole command line would
+    # Only the -append VALUE decides, and it is read from /proc so argument
+    # boundaries survive: matching the whole command line would
     # let a path like /srv/vm/nokaslr-disk.img answer a question it has nothing to
     # do with.  A firmware chain has no -append at all, which is why the run state
     # records the command line and is consulted first, above.
@@ -235,29 +287,32 @@ if [[ "$arch" == "x86_64" && "$_kaslr" == 1 && -z "$_op_entry" && -n "${GDBTOOLS
     unset GDBTOOLS_ENTRY_PA
 fi
 
+# How this guest was booted: its run state, else the tree's default, else
+# direct.  gdbtools derives from it the hw entry break a firmware chain needs
+# and, on x86, the boot protocol's decompressor address for a direct boot, when
+# nothing states them; both are also stated here, so a gdbtools older than
+# GDBTOOLS_BOOT gets them too.
+_eboot="${_bmode:-$(kbl_tree_get "$tree" BOOT)}"; _eboot="${_eboot:-direct}"
+[[ -n "${GDBTOOLS_BOOT:-}" ]] || export GDBTOOLS_BOOT="$_eboot"
+
 # x86 KASLR recovery reads the decompressor's vmlinux; hand its path over so
-# `kearly kaslr` works in terminal mode too (parity with the nvim-dap adapter).
+# `kearly kaslr` works.
 if [[ "$arch" == "x86_64" ]]; then
     # The recovery is opt-in, and only this launcher knows how the guest was booted:
     # a firmware chain passes the kernel command line itself, so it is not on QEMU's
-    # own command line to be read back.  Stated for every x86 attach, exactly as the
-    # editor's adapter does -- whether the decompressor's vmlinux happens to be on
-    # disk is a separate fact, carried separately below.
+    # own command line to be read back.  Stated for every x86 attach -- whether the
+    # decompressor's vmlinux happens to be on disk is a separate fact, carried
+    # separately below.
     if [[ "${_kaslr:-}" == 1 ]]; then
         [[ -z "${GDBTOOLS_X86_KASLR:-}" ]] && export GDBTOOLS_X86_KASLR=1
     fi
     _decomp="$src/arch/x86/boot/compressed/vmlinux"
     if [[ -f "$_decomp" ]]; then
         [[ -z "${GDBTOOLS_X86_DECOMP_VMLINUX:-}" ]] && export GDBTOOLS_X86_DECOMP_VMLINUX="$_decomp"
-        # DECOMP_PA is the switch between gdbtools' two x86 recoveries, so state it
-        # only for the boot that has a decompressor at a fixed address: `-kernel`
-        # lands the bzImage at the 1MB PA the boot protocol fixes.  A firmware chain
-        # enters the EFI stub instead and never runs those stages, so setting it
-        # there sends the recovery down a walk that cannot fire.  The port's own run
-        # state answers; with none recorded, the tree's stated default does.
-        _dboot="${_bmode:-$(kbl_tree_get "$tree" BOOT)}"
-        [[ -z "$_dboot" ]] && _dboot=direct
-        if [[ "$_dboot" == direct ]]; then
+        # The switch between gdbtools' two x86 recoveries: only a direct boot has
+        # a decompressor at the address the boot protocol fixes, while a firmware
+        # chain enters the EFI stub and never runs those stages.
+        if [[ "$_eboot" == direct ]]; then
             [[ -z "${GDBTOOLS_X86_DECOMP_PA:-}" ]] && export GDBTOOLS_X86_DECOMP_PA=0x100000
         fi
     fi
@@ -274,8 +329,13 @@ fi
 # own scripts/gdb, which resolve `vmlinux` and module paths relative to gdb's
 # working directory.  The log file is pinned to the directory the command was
 # typed in, since the chdir would otherwise put gdb.txt inside the kernel tree.
-declare -a ARGS=(-q -iex "set pagination off" -iex "cd $src"
-                 -iex "set logging file $PWD/gdb.txt")
+# The kernel's own scripts/gdb (lx-*) load from <src>/vmlinux-gdb.py only from a
+# directory gdb trusts; this source is trusted for this session, and nothing is
+# added to any init file.
+declare -a IEX=("set pagination off" "add-auto-load-safe-path $src" "cd $src"
+                "set logging file $PWD/gdb.txt")
+declare -a ARGS=(-q)
+for _x in "${IEX[@]}"; do ARGS+=(-iex "$_x"); done
 [[ -n "$tool" ]] && ARGS+=(-ex "source $tool")
 # Connect to the address the stub was BOUND to, not to an assumed loopback.  The
 # launcher records it (KBL_GDB_BIND) and qemu's own `-gdb tcp:HOST:PORT` carries
@@ -348,6 +408,47 @@ for ((_i = 0; _i < ${#PASS[@]}; _i++)); do
     esac
 done
 ARGS+=("${PASS[@]+"${PASS[@]}"}")
+
+# The session as data, for a front end that starts gdb itself (the nvim adapter
+# runs it under DAP): the same gdb, the same -iex lines, the same environment
+# and the same facts, so the two cannot drift apart.
+if [[ $JSON -eq 1 ]]; then
+    # NUL-separated: the KEY VALUE pairs, then each list as its length and items,
+    # so an argument that looks like a marker (`-- --args`) is still an argument.
+    mapfile -d '' -t _envs < <(env -0 | grep -zE '^GDBTOOLS_[A-Z0-9_]*=')
+    {
+        printf '%s\0' gdb "$gdb" tree "$tree" name "$(basename "$tree")" src "$src" \
+            vmlinux "$vmlinux" arch "$arch" port "$PORT" host "$_gbind" \
+            target "${_gbind}:${PORT}" boot "$_eboot" kaslr "${_kaslr:-}" pid "${_r_pid:-}" \
+            state "${_st:-}" gdbtools "$tool" fwsym "$FWSYM" bootbreak "$_bootbreak" \
+            stop "${STOP:-text}" stop_at "$STOP_AT" --
+        printf '%s\0' "${#IEX[@]}" "${IEX[@]}"
+        printf '%s\0' "${#ARGS[@]}" "${ARGS[@]}"
+        printf '%s\0' "${#_envs[@]}" "${_envs[@]+"${_envs[@]}"}"
+    } | python3 -c '
+import json, sys
+f = [x.decode() for x in sys.stdin.buffer.read().split(b"\0")[:-1]]
+i, out = 0, {}
+while f[i] != "--":
+    out[f[i]] = f[i + 1] or None
+    i += 2
+i += 1
+def take():
+    global i
+    n = int(f[i])
+    items = f[i + 1:i + 1 + n]
+    i += 1 + n
+    return items
+out["iex"], out["args"] = take(), take()
+out["env"] = dict(x.partition("=")[::2] for x in take())
+for k in ("port", "pid"):
+    out[k] = int(out[k]) if out.get(k) and out[k].isdigit() else None
+out["bootbreak"] = out.get("bootbreak") == "1"
+out["kaslr"] = {"1": True, "0": False}.get(out.get("kaslr") or "")
+json.dump(out, sys.stdout, indent=1)
+print()' >&3 || die "attach --json: the session could not be written as JSON"
+    exit 0
+fi
 
 say "attaching    $gdb -> :$PORT"
 [[ -n "$tool" ]] && say "gdbtools     $tool" || say "gdbtools     not installed (plain gdb; pre-MMU symbols will not resolve)"
