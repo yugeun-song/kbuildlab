@@ -10,34 +10,80 @@ on another machine a year later. Targets **arm64**, **riscv64** and **x86_64**.
 
 ```sh
 git clone https://github.com/yugeun-song/kbuildlab
-kbuildlab/bin/kbuildlab doctor          # what is missing, by name
+kbuildlab/install.sh          # ~/.local/bin/kbuildlab; --system: /usr/local/bin (sudo)
+kbuildlab doctor              # what is missing, and the package that provides it
 ```
 
-Put `bin/kbuildlab` on your PATH. Nothing here installs packages or changes a
-system setting: a missing prerequisite is named, and the tool stops.
+`install.sh` links the command into a directory on `PATH` (`--alias kbl` adds a
+second name) and records the checkout in `~/.config/kbuildlab/root`, so an editor
+started without that `PATH` still finds it. It never edits shell files and
+installs no package: `doctor` names what is missing with the install command for
+Arch, Debian/Ubuntu, Fedora/RHEL, Void and openSUSE.
+
+**Assumed:** Linux with `/proc`, bash 4.4, GNU coreutils, Python 3.12, git, one of
+podman/docker/nerdctl, QEMU for each target (8.0 for riscv64's paging properties,
+8.2 for `--emulate`'s virtio sound), and a gdb with a working Python. Outside
+that, a command stops and names what is missing.
 
 ## Use
 
 ```sh
-kbuildlab init --workspace ~/kernels    # where trees live, recorded once
-kbuildlab init arm64-v6.12 --arch arm64 # a tree; --version defaults to v6.12
-kbuildlab image                         # build the container once
+kbuildlab init --workspace ~/kernels     # where `init` clones new trees, recorded once
+kbuildlab init arm64-v6.12 --arch arm64  # register a tree; --version defaults to v6.12
+kbuildlab image                          # build the container once
 
-kbuildlab sync   arm64-v6.12            # fetch the source
-kbuildlab config arm64-v6.12 --preset   # defconfig + the debuggability preset
+kbuildlab sync   arm64-v6.12             # fetch the source
+kbuildlab config arm64-v6.12 --preset    # defconfig + the debuggability preset
 kbuildlab build  arm64-v6.12
-kbuildlab run    arm64-v6.12            # boot, frozen at the reset vector
-kbuildlab attach arm64-v6.12            # gdb, in another terminal
-kbuildlab drgn   arm64-v6.12            # drgn, once the guest has booted
+kbuildlab run    arm64-v6.12             # boot, frozen at the reset vector
+kbuildlab attach arm64-v6.12             # gdb, in another terminal
+kbuildlab drgn   arm64-v6.12             # drgn, once the guest has booted
 ```
 
-`kbuildlab update <tree>` is for a tree you already have: it syncs
-(fast-forwarding a tracked branch, never a pinned tag), rebuilds with **the
-.config you already had**, runs `olddefconfig` so new Kconfig symbols take their
-defaults, and refreshes the indexes (ctags, cscope, gtags where the image ships
-GNU GLOBAL, and clangd). It never re-applies the preset; it only reports what
-olddefconfig changed and any preset line the newer source dropped, and repairs
-neither.
+`kbuildlab update [TREE...|--all]` is the one pass over trees you already have:
+it checks what the tree needs, syncs (fast-forwarding a tracked branch, never a
+pinned tag), keeps **the .config you already had** (`olddefconfig`, then a report
+of what changed and of any preset line the newer source dropped, repairing
+neither), rebuilds incrementally with the modules, and refreshes ctags, cscope,
+gtags and clangd (`--no-tags`, `--no-clangd`, `--no-warm`). Each tree runs on its
+own, and a table at the end says which stages passed.
+
+## Trees
+
+kbuildlab keeps a registry, the way a container runtime keeps images. Its own
+records stay out of the kernel source; only what the kernel's `make` writes there
+(the build, and the ctags, cscope and gtags indexes) lands in the tree:
+
+```
+~/.config/kbuildlab/trees/NAME/tree.conf          what the tree is; edit it by hand
+~/.local/share/kbuildlab/trees/NAME/              boot disks, /persist, modules archive
+```
+
+Both follow `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Every command reads `tree.conf`
+afresh, so an edit applies to the next command. `TREE` is a registered name, or
+any path inside its source (or the directory holding it); omitted, it is the tree
+the current directory belongs to, else the only one. `rm`, `mv` and `rename` take
+a name only.
+
+```
+kbuildlab trees [-q|--json]          NAME ARCH KERNEL REF COMMIT BUILT GUESTS SOURCE
+kbuildlab inspect TREE [--json|--format KEY]
+kbuildlab add DIR [--name N] [--arch A]     register a source you have (arch from .config)
+kbuildlab get|set|unset TREE KEY...         read or write tree.conf keys; edit opens it
+kbuildlab mv TREE DIR [--no-move]           move the source and repoint SRC
+kbuildlab rename OLD NEW
+kbuildlab rm TREE [--purge] [--yes]         unregister; --purge also deletes the source
+kbuildlab prune                             trees whose source is gone, orphaned data
+kbuildlab migrate                           trees that still keep tree.conf beside the source
+```
+
+The kernel version, commit, build time and running guests are read from the tree
+and the host each time, never stored. `rm`, `mv` and `rename` refuse while a guest
+of the tree runs; `rm --purge` asks first (`--yes` for scripts). `SRC` is stored
+as an absolute path (`set SRC=~/linux` expands it). A name whose data directory a
+removed tree left behind is refused until `prune` or you remove it. `prune` keeps
+a tree whose source's parent is missing too (a drive not mounted) or that was
+never built or run, and never deletes a data directory holding a persistent disk.
 
 ### The lab/ record
 
@@ -57,7 +103,9 @@ kbuildlab init --workspace ~/kernels --restore   # files, checkouts, every tree
 kbuildlab sync NAME && kbuildlab config NAME     # config starts from the record
 ```
 
-`init --restore` never overwrites a file that is there. Commit `lab/` to keep it.
+`init --restore` never overwrites a file that is there, and reads a record from
+before the registry (relative paths, no `SRC`) the way `migrate` would. Commit
+`lab/` to keep it.
 
 ### ctags, cscope and gtags
 
@@ -158,10 +206,11 @@ Every command takes `-h`/`--help`.
 kbuildlab run [tree] [options] [-- QEMU ARGS]
   --run                      boot now instead of freezing at the reset vector
   --boot direct|uboot|uefi   boot path (default: the tree's BOOT, else direct)
-  --kaslr | --no-kaslr       randomized vs deterministic base (default --no-kaslr)
+  --kaslr | --no-kaslr       randomized vs deterministic base (default: the tree's KASLR, else off)
   --kvm | --no-kvm           x86 only; TCG by default, for deterministic early-boot HW breakpoints
   --initrd PATH | --no-initrd
   --net | --no-net           user NIC with an ssh forward (default on); --ssh-port N
+                             (default: the tree's SSH_PORT, else 2222)
   --persist | --no-persist   attach the tree's writable /persist disk
   --emulate | --no-emulate   attach emulated controllers for the soft presets' drivers
                              (NVMe, AHCI, virtio-scsi, USB, input, GPU, sound, CAN,
@@ -171,7 +220,8 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --append WORDS             extra kernel command-line words, repeatable
   --qmp-port N | --no-qmp    drgn's channel (default: the tree's QMP_PORT);
                              --no-qmp drops it and the vmcoreinfo device
-  --port|-g N                gdb port (default: the tree's GDB_PORT); --mem|-m, --smp, --bios
+  --port|-g N                gdb port (default: the tree's GDB_PORT)
+  --mem|-m SIZE, --smp N     default: the tree's MEM and SMP, else 1G and 2; --bios PATH
 
 kbuildlab attach [tree] [options] [-- GDB ARGS]
   --no-bootbreak|--raw       attach to an already-booted guest, no run-to-_text
@@ -179,24 +229,41 @@ kbuildlab attach [tree] [options] [-- GDB ARGS]
   --port|-p N                attach by port; the tree comes from the guest's run state
   --list|-l                  list live guests and exit; never prompts
   --first                    with several matches take the lowest port (for scripts)
+  --json                     the session as JSON instead of starting gdb (with --list:
+                             the live guests); the nvim adapter starts gdb from it
 ```
+
+The console is the guest's serial line: **Ctrl-C reaches the guest** (it stops a
+`ping` there), **Ctrl-A X quits qemu**, Ctrl-A C switches to qemu's monitor and back.
+
+`attach` states the session to gdbtools rather than relying on its defaults, which
+are all off: the memory guard, pwndbg's guards, the `kgdb`/`flow`/`msysreg` panels,
+the quiet page scan, the arm64 disassembly guard, the shadow symbols, the KASLR
+slide applied at the first virtual stop, the crossing catcher and breakpoint
+siblings, plus `GDBTOOLS_BOOT`, from which gdbtools derives the hw entry break of a
+firmware boot and x86's direct-boot decompressor address (both also stated, for an
+older gdbtools). The environment and `tree.conf` win over each, an empty value
+too (`GDBTOOLS_PANELS=` turns the panels off). It also passes
+`add-auto-load-safe-path <source>`, so the kernel's `lx-*` commands load for that
+session without any line in an init file.
 
 The gdb-port flag differs by command: `run` names it `-g` (QEMU's spelling),
 `attach` names it `-p`.
 
 The rootfs carries none of the build's modules, so `kbuildlab build` stages them
-beside the tree as `modules.cpio.gz` (stripped), and `run` appends it to the
+in the tree's data directory as `modules.cpio.gz` (stripped), and `run` appends it to the
 initramfs in every boot mode. An init script in the archive loads what the devices
 present at boot ask for, as udev would, so an emulated controller whose driver is a
 module binds. An archive older than the build's modules is left out, and `run` says
 so.
 
 `--boot uboot` and `--boot uefi` need a pre-built disk image (`BOOTDISK`, default
-`boot/uboot.img` or `boot/esp.img`); `--persist` needs an `S45persist` init script
+`boot/uboot.img` or `boot/esp.img` in the data directory); `--persist` needs an
+`S45persist` init script
 in the guest rootfs. The scripts that build these (`firmware/build-bootdisk.sh`,
 `firmware/build-esp.sh`, `rootfs/post-build.sh`) belong to the workspace, not
-kbuildlab; the records under `lab/workspace/` keep a copy, and `init --restore`
-puts them back. Without them a firmware boot stops with a message naming the disk.
+kbuildlab; they take a tree name and ask `kbuildlab inspect` where things are. The
+records under `lab/workspace/` keep a copy, and `init --restore` puts them back. Without them a firmware boot stops with a message naming the disk.
 
 `attach` runs gdb with its working directory in the kernel source, because the
 kernel's own `scripts/gdb` commands resolve `vmlinux` and module paths relative to
@@ -303,8 +370,8 @@ flag, `now` is the live runstate).
 ### The run state
 
 `run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default
-`/dev/shm`), written whole and renamed into place. `attach`, `drgn`, `resume` and
-the editor adapter read it, so its `KBL_*` key format is a contract: keys are
+`/dev/shm`), written whole and renamed into place. `attach`, `drgn` and `resume`
+read it (the editor adapter reads it through `attach --json`); its `KBL_*` keys are
 added, never renamed. It carries the boot mode, the firmware load address, the
 KASLR state, the ssh port, the effective kernel command line (which a firmware
 chain passes itself, so it is nowhere on qemu's command line), the QMP port and
@@ -313,7 +380,7 @@ outlived its guest from the process now on that port.
 
 ### When a guest dies
 
-A guest that is *ended* (Ctrl-C, a closed terminal, kbuildlab tidying up) exits
+A guest that is *ended* (Ctrl-A X, a closed terminal, kbuildlab tidying up) exits
 quietly. A guest that *dies* is reported in this tool's own voice:
 
 ```
@@ -328,47 +395,42 @@ every exit path, since `-nographic`'s raw mode is not put back on a signal death
 
 ## The tree.conf
 
-`kbuildlab init NAME --arch ARCH` writes `<workspace>/NAME/tree.conf` from
-`templates/` — the machine description every command reads, never inferred from
-the directory name. It states what the tree is (`NAME`, `ARCH`, `VERSION`,
-`UPSTREAM`) and the facts the commands consume: `QEMU_BIN`, `MACHINE`, `CPU`,
-`CONSOLE`, `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply
-`SRC_DIR`, `BOOT`, `INITRD`, `PERSIST`, `EMULATE`, `CPU_PAGING` and the firmware
-paths (`UBOOT`, `BOOTDISK`, `OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`), plus two that
-steer the guest itself:
+`init` and `add` write it from `templates/`. It states what the tree is (`NAME`,
+`ARCH`, `VERSION`, `UPSTREAM`, and `SRC`, the absolute path of the kernel source)
+and the facts the commands consume: `QEMU_BIN`, `MACHINE`, `CPU`, `CONSOLE`,
+`KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply `BOOT`, `INITRD`,
+`PERSIST`, `EMULATE`, `CPU_PAGING`, the firmware paths (`UBOOT`, `BOOTDISK`,
+`OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`) and the run defaults `MEM`, `SMP`, `KASLR`,
+`SSH_PORT`. `GDB` names the gdb to use instead of the first that works;
+`CMDLINE_EXTRA` adds kernel command-line words in every boot mode; `GDB_BIND` is
+the gdbstub's address, default `127.0.0.1`, because a gdbstub is an
+unauthenticated read/write channel into guest memory.
 
-- `CMDLINE_EXTRA` — words appended to the kernel command line in every boot mode
-  (`-append` for a direct boot, `setenv bootargs` in the u-boot script, the
-  `linux` line in `grub.cfg`); `run --append` adds more on top.
-- `GDB_BIND` — the address the gdbstub listens on, default `127.0.0.1`, because a
-  gdbstub is an unauthenticated read/write channel into guest memory and qemu's
-  own `tcp::N` spelling binds every interface.
+A path is absolute, `~/`-relative, or relative to the tree's data directory.
+`CPU_PAGING` sets paging as CPU features without a rebuild (`"la57=off"` pins x86
+to 4-level, `"sv48=off,sv57=off"` pins riscv to Sv39). `MEM` and `SMP` go to
+qemu's `-m` and `-smp` as written. A u-boot boot loads the image where
+`UBOOT_LOADADDR`/`UBOOT_RDADDR` say; only QEMU's `virt` machine has defaults
+(arm64 at 1 GiB, riscv64 above u-boot at 2 GiB), and there an address outside the
+guest's RAM is refused. Another machine states both, and `RAM_BASE` (hex) for the
+same check. A UEFI boot needs `UEFI_ENTRY`, the image base the EFI stub chooses;
+it is measured, not assumed.
 
-`CPU_PAGING` sets paging as CPU features without a rebuild: `CPU_PAGING="la57=off"`
-pins x86 to 4-level, `"sv48=off,sv57=off"` pins riscv to Sv39.
+**Grammar.** `KEY`, optional blanks, `=`, optional blanks, the value; the first
+line for a key wins; a value that opens with `"` runs to the next `"`, any other
+ends at the first `#` with trailing blanks dropped. `kbl_tree_get` in
+`lib/common.sh` is the reference, `lib/treeinfo.py` and `lib/clangd.py` read it the
+same way, and `tests/tree-conf.py` checks them against `tests/tree-conf-vectors.json`.
 
-**Grammar.** Every value is read with one rule: `KEY`, optional blanks, `=`,
-optional blanks, the value; the first line for a key wins; a value that opens with
-`"` runs to the next `"`, any other ends at the first `#` with trailing blanks
-dropped. `kbl_tree_get` in `lib/common.sh` is the reference; `clangd.py`, the
-editor adapter and the workspace's firmware scripts read it too, and
-`tests/tree-conf-vectors.json` holds the cases they must all answer alike
-(`tests/tree-conf.py` checks kbuildlab's two).
+Every `GDBTOOLS_*` line is handed to gdb verbatim and wins over what `attach`
+states, except `GDBTOOLS_ENTRY_PA`, which describes the tree's DEFAULT boot mode:
+it applies only when that is what the port runs, and x86 KASLR takes it back.
 
-`attach` also hands the debugger every `GDBTOOLS_*` line verbatim, except
-`GDBTOOLS_ENTRY_PA` (a kernel image base pinned for a target that cannot report
-it): it describes the tree's DEFAULT boot mode, so it applies only when that is
-what this port runs, and x86 KASLR takes it back since the base moves per run. A
-`qemu.conf` symlink points at the same file for older editor configs.
-
-Per-machine settings live outside the repo. `kbuildlab init --workspace DIR`
-records the workspace path in `~/.config/kbuildlab/workspace`, which is never
-committed; `$KBL_WORKSPACE` overrides it. Everything else per machine is a `KBL_*`
-environment variable (`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`,
-`KBL_DOCKER_USER`, ...) — keep them in an untracked file your shell sources.
-`sync` clones with `--depth 1` unless `KBL_FULL_HISTORY=1` asks for the whole
-history, borrowed from a local `KBL_MIRROR` when one is named; a shallow tree
-advances only while it carries no commit of its own.
+Per-machine settings stay out of the repo: `~/.config/kbuildlab/workspace` (from
+`init --workspace`, overridden by `$KBL_WORKSPACE`) and `KBL_*` variables
+(`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`, `KBL_GDB`, ...) in a file your shell
+sources. `sync` clones with `--depth 1` unless `KBL_FULL_HISTORY=1`, borrowing from
+`KBL_MIRROR` when one is named.
 
 ## The debuggability preset
 
@@ -539,11 +601,14 @@ than assumed:
   compiler is `NO CC`, a missing image `MISSING`, and a tree older than 4.19 (no
   `CONFIG_CC_VERSION_TEXT`) `unchecked`. The `Containerfile`'s own `gcc` default is
   checked too and reported `STALE` if it was edited without a rebuild.
-- **The mount.** The workspace is bind-mounted at its host path, so one inside
-  `/usr`, `/etc`, `/var` or another system directory is refused outright.
+- **The mount.** A build sees the tree's source and data directory read-write and
+  its `tree.conf` directory and this repository read-only, each at the path it
+  resolves to and at the spelling it was given; a read-write one inside `/usr`,
+  `/etc`, `/var` or another system directory is refused. Each tree's source and
+  data directory are put through that check here, and searched for root-owned
+  files (the mark of a rootful run).
 - **The host's own config.** `/etc/containers` is checked for unmerged `.pacnew`
-  files, rootless podman for its `subuid`/`subgid` ranges, and the workspace for
-  root-owned files (the mark of a rootful run).
+  files, rootless podman for its `subuid`/`subgid` ranges.
 
 `kbuildlab containers clean` removes the stopped containers made from kbuildlab's
 images and nothing else; `--images` also drops the images kbuildlab built;
@@ -552,9 +617,10 @@ kbuildlab's). Nothing here prunes the runtime wholesale.
 
 ## Dependencies
 
-Required: a container runtime, `qemu-system-<arch>`, and a gdb that can debug the
-target — a cross gdb, or a host gdb built `--enable-targets=all`. A candidate
-whose own Python layer does not start is skipped with gdb's reason.
+Required (see Install for versions): a container runtime, `qemu-system-<arch>`,
+and a gdb that can debug the target -- a cross gdb, `gdb-multiarch`, or a host gdb
+built `--enable-targets=all`. A candidate whose own Python layer does not start is
+skipped with gdb's reason; `GDB` in `tree.conf` or `$KBL_GDB` names one outright.
 
 Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which makes symbols
 resolve before the MMU is on; `kbuildlab attach` finds it if it is installed and
