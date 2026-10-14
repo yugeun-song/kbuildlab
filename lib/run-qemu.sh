@@ -241,6 +241,7 @@ _state="$_statedir/kbl-run-${PORT}.env"
 _loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
 shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""; _ird=""   # per-run scratch
 qmpsock=""                                                 # QMP unix socket, same
+wsock=""; _wpid=""
 
 # The terminal `-nographic` is about to put into raw mode, saved here so it can be
 # put back.  qemu restores it itself when it exits normally and cannot restore it
@@ -267,6 +268,10 @@ _cleanup() {
     # `exec` made this case impossible by replacing this shell; running qemu as a
     # child (which is what lets the state file carry its pid, and what makes the
     # trap fire on a direct boot at all) brought the case with it.
+    if [[ -n "${_wpid:-}" ]]; then
+        kill -TERM "$_wpid" 2>/dev/null
+        wait "$_wpid" 2>/dev/null
+    fi
     if [[ -n "${_qpid:-}" ]] && kill -0 "$_qpid" 2>/dev/null; then
         kill -TERM "$_qpid" 2>/dev/null
         local _i
@@ -286,7 +291,8 @@ _cleanup() {
         [[ "$_owner" == "$$" ]] && rm -f "$_state"
     fi
     rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} ${_ird:+"$_ird"} \
-          ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"}
+          ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"} \
+          ${wsock:+"$wsock"}
     # Last, and only once the guest that owns the terminal is gone.  A no-op on
     # every path where qemu put it back itself, and the difference between a
     # usable shell and an apparently dead one where it did not.
@@ -769,6 +775,15 @@ if [[ "$EMULATE" == 1 ]]; then
     # A second NIC only where the first is wanted: --no-net means no NIC at all.
     [[ $NET -eq 1 ]] && CMD+=(-netdev user,id=kblnet1 -device e1000e,netdev=kblnet1)
 fi
+wsock=""
+if [[ -t 0 ]]; then
+    wsock="$_statedir/kbl-wsz-${PORT}.sock"
+    rm -f "$wsock"
+    case "$arch" in riscv64) _wsdev="virtio-serial-device" ;; *) _wsdev="virtio-serial-pci" ;; esac
+    CMD+=(-chardev "socket,id=kblwsz,path=${wsock},server=on,wait=off"
+          -device "${_wsdev},id=kblwszbus"
+          -device "virtserialport,bus=kblwszbus.0,chardev=kblwsz,name=org.kbuildlab.winsize")
+fi
 [[ $RUN -eq 1 ]] || CMD+=(-S)
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
@@ -850,6 +865,7 @@ _atree="$(printf '%q' "$(kbl_tree_label "$tree")")"
     || _acmd="kbuildlab attach $_atree --port $PORT"
 [[ $RUN -eq 1 ]] || say "frozen       attach with: $_acmd"
 say "console      Ctrl-C goes to the guest; Ctrl-A X quits qemu, Ctrl-A C its monitor"
+[[ -n "$wsock" ]] && say "winsize      the guest console follows this terminal's rows and columns"
 # Printed frozen or not: drgn reads a booted kernel, so this is what to run once
 # the guest is up, not instead of the attach above.
 if [[ $QMP -eq 1 ]]; then
@@ -879,6 +895,10 @@ fi
 # neither qemu nor this script; it is a byte on the guest's serial line.
 "${CMD[@]}" <&0 &
 _qpid=$!
+if [[ -n "$wsock" ]]; then
+    python3 -I "${KBL_REPO}/lib/winsize.py" "$wsock" "$_qpid" 3 3<&0 </dev/null >/dev/null 2>&1 &
+    _wpid=$!
+fi
 _write_state "$_qpid"
 # 2>/dev/null drops bash's own job-termination line, which reports a guest dying as
 # `run-qemu.sh: line NNN: 60816 Segmentation fault (core dumped) "${CMD[@]}" 0<&0`:

@@ -253,6 +253,12 @@ kbuildlab attach [tree] [options] [-- GDB ARGS]
 
 The console is the guest's serial line: **Ctrl-C reaches the guest** (it stops a
 `ping` there), **Ctrl-A X quits qemu**, Ctrl-A C switches to qemu's monitor and back.
+When `run` starts on a terminal, the guest console takes that terminal's rows and
+columns, and follows it when the window is resized: `lib/winsize.py` answers on a
+virtio-serial port named `org.kbuildlab.winsize`, and the rootfs's `S12winsize`
+applies each size to the console tty with `stty`, which sends the shell and any
+full-screen program `SIGWINCH`. A guest without that service, or a run whose
+input is not a terminal, keeps the kernel's default size.
 
 `attach` states the session to gdbtools rather than relying on its defaults, which
 are all off: the memory guard, pwndbg's guards, the `kgdb`/`flow`/`msysreg` panels,

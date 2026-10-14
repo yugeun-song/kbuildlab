@@ -708,7 +708,7 @@ kbl_prune_state() {
     # Every per-run file is named kbl-<what>-<gdb port>[.<suffix>] in the state
     # directory; run-qemu.sh creates no other.
     for f in "$sd"/kbl-run-*.env "$sd"/kbl-boot-*.img "$sd"/kbl-vars-*.fd \
-             "$sd"/kbl-qmp-*.sock "$sd"/kbl-initrd-*.cpio.gz "$sd"/kbl-tmp-*; do
+             "$sd"/kbl-qmp-*.sock "$sd"/kbl-wsz-*.sock "$sd"/kbl-initrd-*.cpio.gz "$sd"/kbl-tmp-*; do
         [[ -e "$f" ]] || continue
         fp="${f##*/kbl-}"; fp="${fp#*-}"; fp="${fp%%.*}"
         [[ "$fp" =~ ^[0-9]+$ ]] || continue
