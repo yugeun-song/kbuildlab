@@ -126,7 +126,7 @@ _index_plain() {   # _index_plain TREE
 
 _index_tree() {   # _index_tree TREE
     local tree="$1" name arch karch src view st up wk mode=full rc
-    name="$(basename "$tree")"
+    name="$(kbl_tree_label "$tree")"
     arch="$(kbl_tree_arch "$tree")" || exit 1; karch="$(_karch "$arch")"
     src="$(kbl_tree_src "$tree")" || exit 1
     if [[ "${KBL_TAGS_VIEW:-1}" == "0" ]]; then _index_plain "$tree"; return; fi

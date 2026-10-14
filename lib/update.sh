@@ -64,9 +64,9 @@ _update_report() {   # _update_report TREE BEFORE
     elif out="$("${KBL_REPO}/presets/verify.sh" "$cfg" "${frags[@]}" 2>&1)"; then
         say "preset       $(tail -1 <<<"$out")"
     else
-        warn "preset drift in $(basename "$tree") -- the update did not change these, the newer
+        warn "preset drift in $(kbl_tree_label "$tree") -- the update did not change these, the newer
        source did.  Nothing was repaired; re-apply deliberately with
-       'kbuildlab config $(basename "$tree") --preset' if that is what you want:"
+       'kbuildlab config $(kbl_tree_label "$tree") --preset' if that is what you want:"
         printf '%s\n' "$out" >&2
     fi
 }
@@ -87,7 +87,7 @@ _update_check() {   # _update_check TREE
     kbl_tree_arch "$tree" >/dev/null || exit 1
     src="$(kbl_tree_src "$tree")" || exit 1
     v="$(kbl_tree_get "$tree" VERSION)"
-    [[ -n "$v" ]] || die "$(basename "$tree") states no VERSION to track: kbuildlab set $(basename "$tree") VERSION=<tag or branch>"
+    [[ -n "$v" ]] || die "$(kbl_tree_label "$tree") states no VERSION to track: kbuildlab set $(kbl_tree_label "$tree") VERSION=<tag or branch>"
     if [[ -e "$src" ]]; then
         kbl_is_ksrc "$src" || die "$src is not a kernel source"
         [[ -d "$src/.git" ]] || die "$src is not a git checkout, so it cannot be synced"
@@ -96,12 +96,12 @@ _update_check() {   # _update_check TREE
     img="$(_tree_image "$tree")"
     "$c" image inspect "$img" >/dev/null 2>&1 || die "container image $img is missing: kbuildlab image"
     command -v git >/dev/null 2>&1 || die "git is not installed$(kbl_pkg_hint git)"
-    ok "$(basename "$tree"): $(kbl_tree_arch "$tree"), tracks $v, source $src"
+    ok "$(kbl_tree_label "$tree"): $(kbl_tree_arch "$tree"), tracks $v, source $src"
 }
 
 _update_one() {   # _update_one TREE RECORD NOTAGS [TAGS-OPTION...]
     local tree="$1" rec="$2" notags="$3" name src before; shift 3
-    name="$(basename "$tree")"
+    name="$(kbl_tree_label "$tree")"
     head1 "== $name"
     _update_stage "$rec" "$name" check _update_check "$tree" || return 1
     _update_stage "$rec" "$name" sync cmd_sync "$tree" || return 1

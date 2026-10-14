@@ -45,12 +45,11 @@ cmd_doctor() {
     if [[ -r /dev/kvm && -w /dev/kvm ]]; then ok "kvm (x86 guests can use it)"
     else printf '  %s-%s kvm not accessible; x86 guests run under TCG\n' "$KBL_D" "$KBL_0"; fi
     say "registry     $KBL_TREES"
-    t="$(kbl_trees | tr '\n' ' ')"
-    say "trees        ${t:-(none)}"
-    w="$(kbl_legacy_trees | tr '\n' ' ')"
-    [[ -n "$w" ]] && { bad "not migrated: $w-- kbuildlab migrate"; rc=1; }
+    local -a ids=(); mapfile -t ids < <(kbl_trees)
+    if [[ ${#ids[@]} -gt 0 ]]; then say "trees        $(_kbl_labels "${ids[@]}")"
+    else say "trees        (none)"; fi
     if w="$(kbl_workspace_opt)"; then say "workspace    $w"
-    else say "workspace    not recorded (needed only to clone: kbuildlab init --workspace DIR)"; fi
+    else say "workspace    not recorded (the lab/ record and init --restore need it: kbuildlab init --workspace DIR)"; fi
     [[ $rc -eq 0 ]] || warn "something above is missing; install it and re-run"
     return $rc
 }

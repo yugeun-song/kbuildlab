@@ -59,7 +59,7 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      tree.conf it is from the tree's data directory
   The console is the guest's serial line: Ctrl-C goes to the guest, Ctrl-A X
   quits qemu, Ctrl-A C switches to qemu's monitor and back.
-  TREE is a registered name or a path inside its source; omitted, the current tree.
+  TREE is a tree's ID (or a unique prefix of 4+ hex digits) or a path inside its source; omitted, the current tree.
 USAGE
 }
 while [[ $# -gt 0 ]]; do
@@ -147,7 +147,7 @@ image_rel="$(kbl_tree_get "$tree" KERNEL_IMAGE_REL)"
 [[ -n "$image_rel" ]] || die "$tree/tree.conf states no KERNEL_IMAGE_REL"
 image="$src/$image_rel"
 [[ -f "$image" ]] || die "no kernel image at $image
-       build it first: kbuildlab build $(basename "$tree")"
+       build it first: kbuildlab build $(kbl_tree_label "$tree")"
 
 qemu="$(kbl_tree_get "$tree" QEMU_BIN)"; qemu="${qemu:-$(kbl_qemu "$arch")}"
 command -v "$qemu" >/dev/null 2>&1 || die "$qemu not found (stated by $tree/tree.conf)"
@@ -334,7 +334,7 @@ if [[ -n "$INITRD" && $MODULES -eq 1 && -f "$_marc" ]]; then
     if [[ "$src/modules.order" -nt "$_marc" \
           || -n "$(find "$src" -name '*.ko' -newer "$_marc" -print -quit 2>/dev/null)" ]]; then
         warn "$_marc is older than the build's modules; booting without them
-       (kbuildlab build $(basename "$tree") stages them again)"
+       (kbuildlab build $(kbl_tree_label "$tree") stages them again)"
     else
         _ird="$_statedir/kbl-initrd-${PORT}.cpio.gz"
         cat "$INITRD" "$_marc" > "$_ird" || die "could not write $_ird"
@@ -792,7 +792,7 @@ _write_state() {   # _write_state [QEMU_PID]
     kbl_state_safe "the kernel command line" "$append"
     local -a rec=(
         "KBL_SCHEMA=2"
-        "KBL_TREE=$tree" "KBL_NAME=$(basename "$tree")" "KBL_ARCH=$arch"
+        "KBL_TREE=$tree" "KBL_ARCH=$arch"
         "KBL_BOOT=$BOOT" "KBL_KASLR=$KASLR" "KBL_GDB_PORT=$PORT"
         "KBL_GDB_BIND=$_gbind" "KBL_FROZEN=$(( RUN == 0 ))"
         # A firmware chain passes the cmdline itself, so it never appears on
@@ -824,7 +824,7 @@ _write_state() {   # _write_state [QEMU_PID]
 }
 _write_state
 
-say "guest        $(basename "$tree") ($arch) on :$PORT"
+say "guest        $(kbl_tree_label "$tree") ($arch) on :$PORT"
 if [[ "$BOOT" == direct ]]; then
     say "boot         direct (-kernel; head.S _text immediately)"
     [[ -n "$INITRD" ]] && say "initrd       $rootfs" \
@@ -844,7 +844,7 @@ fi
 # Copy-pasteable: the name is quoted (it may contain spaces) and the port is
 # named whenever it is not the tree's default -- which is exactly when a second
 # guest of this tree exists and the bare name would land in the chooser.
-_atree="$(printf '%q' "$(basename "$tree")")"
+_atree="$(printf '%q' "$(kbl_tree_label "$tree")")"
 [[ "$PORT" == "$(kbl_tree_get "$tree" GDB_PORT)" ]] \
     && _acmd="kbuildlab attach $_atree" \
     || _acmd="kbuildlab attach $_atree --port $PORT"

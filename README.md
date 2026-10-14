@@ -34,16 +34,17 @@ that, a command stops and names what is missing.
 ## Use
 
 ```sh
-kbuildlab init --workspace ~/kernels     # where `init` clones new trees, recorded once
-kbuildlab init arm64-v6.12 --arch arm64  # register a tree; --version defaults to v6.12
-kbuildlab image                          # build the container once
+kbuildlab init --workspace ~/kernels               # rootfs, firmware and restores, recorded once
+kbuildlab init ~/kernels/v6.18-arm64 --arch arm64  # register a tree in that directory;
+                                                   # --version defaults to v6.18; prints its ID
+kbuildlab image                                    # build the container once
 
-kbuildlab sync   arm64-v6.12             # fetch the source
-kbuildlab config arm64-v6.12 --preset    # defconfig + the debuggability preset
-kbuildlab build  arm64-v6.12
-kbuildlab run    arm64-v6.12             # boot, frozen at the reset vector
-kbuildlab attach arm64-v6.12             # gdb, in another terminal
-kbuildlab drgn   arm64-v6.12             # drgn, once the guest has booted
+kbuildlab sync   2349                              # fetch the source (2349: an ID prefix)
+kbuildlab config 2349 --preset                     # defconfig + the debuggability preset
+kbuildlab build  2349
+kbuildlab run    2349                              # boot, frozen at the reset vector
+kbuildlab attach 2349                              # gdb, in another terminal
+kbuildlab drgn   2349                              # drgn, once the guest has booted
 ```
 
 `kbuildlab update [TREE...|--all]` is the one pass over trees you already have:
@@ -65,42 +66,48 @@ records stay out of the kernel source; only what the kernel's `make` writes ther
 (the build, and the ctags, cscope and gtags indexes) lands in the tree:
 
 ```
-~/.config/kbuildlab/trees/NAME/tree.conf          what the tree is; edit it by hand
-~/.local/share/kbuildlab/trees/NAME/              boot disks, /persist, modules archive
+~/.config/kbuildlab/trees/ID/tree.conf            what the tree is; edit it by hand
+~/.local/share/kbuildlab/trees/ID/                boot disks, /persist, modules archive
 ```
 
 Both follow `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Every command reads `tree.conf`
-afresh, so an edit applies to the next command. `TREE` is a registered name, or
-any path inside its source (or the directory holding it); omitted, it is the tree
-the current directory belongs to, else the only one. `rm`, `mv` and `rename` take
-a name only.
+afresh, so an edit applies to the next command.
+
+A tree has no name. It is known by its ID: 16 hex digits read from `/dev/urandom`
+when it is registered, drawn again if a registered tree, a data directory or a
+lab record already uses them, and never changed after, so moving the source keeps
+it. The ID is shown as its first 12 digits, or as many more as it takes to differ
+from every other tree's. `TREE` is an ID or any unique prefix of it with 4 or more
+digits, or any path inside its source (or the directory holding it); omitted, it
+is the tree the current directory belongs to, else the only one. A word that is
+an existing path is read as the path, and an ambiguous prefix is an error. `rm`
+and `mv` take an ID only, never a path. `init` takes the directory the source is
+cloned into, and the directory name is only a path: two trees may use the same
+one in different places.
 
 ```
-kbuildlab trees [-q|--json|--narrow]        NAME ARCH KERNEL REF COMMIT HASH BUILT GUESTS SOURCE
+kbuildlab trees [-q|--json|--narrow]        ID ARCH KERNEL REF COMMIT HASH BUILT GUESTS SOURCE
 kbuildlab inspect TREE [--json|--format KEY]
-kbuildlab add DIR [--name N] [--arch A]     register a source you have (arch from .config)
+kbuildlab add DIR [--arch A]                register a source you have (arch from .config)
 kbuildlab get|set|unset TREE KEY...         read or write tree.conf keys; edit opens it
-kbuildlab mv TREE DIR [--no-move]           move the source and repoint SRC
-kbuildlab rename OLD NEW
-kbuildlab rm TREE [--purge] [--yes]         unregister; --purge also deletes the source
+kbuildlab mv ID DIR [--no-move]             move the source and repoint SRC
+kbuildlab rm ID [--purge] [--yes]           unregister; --purge also deletes the source
 kbuildlab prune                             trees whose source is gone, orphaned data
-kbuildlab migrate                           trees that still keep tree.conf beside the source
 ```
 
 The kernel version, commit, build time and running guests are read from the tree
 and the host each time, never stored. `trees --narrow` prints each tree as a short
-block instead of a table row, for a terminal narrower than the table. `rm`, `mv`
-and `rename` refuse while a guest of the tree runs; `rm --purge` asks first
-(`--yes` for scripts). `SRC` is stored as an absolute path (`set SRC=~/linux`
-expands it). A name whose data directory a removed tree left behind is refused
-until `prune` or you remove it. `prune` keeps a tree whose source's parent is
-missing too (a drive not mounted) or that was never built or run, and never
-deletes a data directory holding a persistent disk.
+block instead of a table row, for a terminal narrower than the table; `-q` prints
+the IDs only. `rm` and `mv` refuse while a guest of the tree runs; `rm --purge`
+asks first (`--yes` for scripts). `SRC` is stored as an absolute path (`set
+SRC=~/linux` expands it). `prune` keeps a tree whose source's parent is missing
+too (a drive not mounted) or that was never built or run, and never deletes a data
+directory holding a persistent disk.
 
 ### The lab/ record
 
 Every `config` and `update` records the tree in this repository under
-`lab/trees/NAME/`: its `tree.conf`, any `config-fragment`, and its `.config` as
+`lab/trees/ID/`: its `tree.conf`, any `config-fragment`, and its `.config` as
 `savedefconfig` writes it (only what differs from the arch defconfig).
 `lab/workspace/` keeps the workspace's own files (those at its top and at the top
 of each directory a `tree.conf` points into, where the rootfs and firmware are
@@ -112,12 +119,11 @@ So the workspace can be deleted, or kbuildlab cloned onto another machine:
 
 ```sh
 kbuildlab init --workspace ~/kernels --restore   # files, checkouts, every tree
-kbuildlab sync NAME && kbuildlab config NAME     # config starts from the record
+kbuildlab sync ID && kbuildlab config ID         # config starts from the record
 ```
 
-`init --restore` never overwrites a file that is there, and reads a record from
-before the registry (relative paths, no `SRC`) the way `migrate` would. Commit
-`lab/` to keep it.
+`init --restore` never overwrites a file that is there, and brings each tree back
+under the ID it was recorded with. Commit `lab/` to keep it.
 
 ### ctags, cscope and gtags
 
@@ -202,8 +208,8 @@ clangd session (one `didOpen` per file, counting diagnostics) and `regions`
 verifies clangd's inactive `#if` shading against the build.
 
 ```sh
-python3 lib/index/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 --journal /tmp/scan --resume
-python3 lib/index/clangd.py --tree ~/kernels/arm64-v6.12 regions --all -S 60
+python3 lib/index/clangd.py --tree ~/.config/kbuildlab/trees/2349b212ea4a9896 check --all -j 3 --journal /tmp/scan --resume
+python3 lib/index/clangd.py --tree ~/.config/kbuildlab/trees/2349b212ea4a9896 regions --all -S 60
 ```
 
 Both steps are incremental, keyed on the command, the code, clangd, the config and
@@ -274,7 +280,7 @@ so.
 `S45persist` init script
 in the guest rootfs. The scripts that build these (`firmware/build-bootdisk.sh`,
 `firmware/build-esp.sh`, `rootfs/post-build.sh`) belong to the workspace, not
-kbuildlab; they take a tree name and ask `kbuildlab inspect` where things are. The
+kbuildlab; they take a tree ID and ask `kbuildlab inspect` where things are. The
 records under `lab/workspace/` keep a copy, and `init --restore` puts them back. Without them a firmware boot stops with a message naming the disk.
 
 `attach` runs gdb with its working directory in the kernel source, because the
@@ -342,7 +348,7 @@ the first quits (the monitor serves one client).
 table, read from the guest's memory plus the tree's DWARF:
 
 ```
-kbuildlab drgn upstream-arm64 -- scripts/drgn/ops.py shmem_ops
+kbuildlab drgn 3bef -- scripts/drgn/ops.py shmem_ops
   alloc_inode          shmem_alloc_inode     mm/shmem.c:5113:1
   drop_inode           inode_just_drop       fs/inode.c:1956:1
   statfs               shmem_statfs          mm/shmem.c:3794:1
@@ -407,8 +413,8 @@ every exit path, since `-nographic`'s raw mode is not put back on a signal death
 
 ## The tree.conf
 
-`init` and `add` write it from `templates/`. It states what the tree is (`NAME`,
-`ARCH`, `VERSION`, `UPSTREAM`, and `SRC`, the absolute path of the kernel source)
+`init` and `add` write it from `templates/`. It states what the tree is (`ARCH`,
+`VERSION`, `UPSTREAM`, and `SRC`, the absolute path of the kernel source)
 and the facts the commands consume: `QEMU_BIN`, `MACHINE`, `CPU`, `CONSOLE`,
 `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply `BOOT`, `INITRD`,
 `PERSIST`, `EMULATE`, `CPU_PAGING`, the firmware paths (`UBOOT`, `BOOTDISK`,
@@ -633,8 +639,8 @@ kbuildlab's). Nothing here prunes the runtime wholesale.
 ```
 bin/kbuildlab          globals, usage and dispatch
 lib/common.sh          shared helpers: paths, tree resolution, run state, output
-lib/registry.sh        trees, inspect, add, get/set/unset, edit, mv, rename, rm,
-                       prune, migrate (lib/treeinfo.py reads what they report)
+lib/registry.sh        trees, inspect, add, get/set/unset, edit, mv, rm, prune
+                       (lib/treeinfo.py reads what they report)
 lib/build.sh           the build container and its toolchain; sync, config, build,
                        module staging (lib/softconfig.py applies the soft preset)
 lib/lab.sh             init and the lab/ records

@@ -28,7 +28,8 @@ kbuildlab attach [TREE] [options] [-- GDB ARGS]
                          --list: the live guests) -- what the nvim adapter reads
   -- GDB ARGS            pass the rest straight to gdb
 
-  TREE is a registered name, or a path inside its source; omitted, the current tree.
+  TREE is a tree's ID (or a unique prefix of 4+ hex digits), or a path inside its
+  source; omitted, the current tree.
   TREE and --port may be given together and must then agree.
 
   With one live guest this behaves exactly as it always has.  With several of the
@@ -89,8 +90,8 @@ if [[ $JSON -eq 1 && $LIST -eq 1 ]]; then
         _bnd="$(kbl_qemu_gdb_bind "$_r_pid")"
         printf '%s\x1f%s\x1f%s\n' "$_row" "$_bnd" "$(kbl_gdb_attached "$_r_port" "$_r_pid" "$_bnd")"
     done < <(kbl_instances) | python3 -c '
-import json, sys
-keys = ("port", "pid", "start", "frozen", "qbin", "state", "tree", "name", "boot", "kaslr", "ssh",
+import json, os, sys
+keys = ("port", "pid", "start", "frozen", "qbin", "state", "tree", "label", "boot", "kaslr", "ssh",
         "bind", "dbg")
 rows = []
 for line in sys.stdin:
@@ -98,6 +99,7 @@ for line in sys.stdin:
     for k in ("port", "pid", "ssh"):
         f[k] = int(f[k]) if f.get(k, "").isdigit() else None
     f["frozen"] = f.get("frozen") == "1"
+    f["id"] = os.path.basename(f["tree"]) if f.get("tree") else ""
     f["kaslr"] = {"1": True, "0": False}.get(f.get("kaslr"))
     host = f.get("bind") or ""
     f["target"] = "%s:%s" % ("localhost" if host in ("", "0.0.0.0", "::", "[::]") else host, f["port"])
@@ -139,14 +141,14 @@ case "$_dbg" in
        sit unread until its timeout -- after which, if the first client leaves, the
        late replies arrive one packet out of step and the session fails with a
        protocol error rather than attaching.  Detach the other client first, or
-       start a second guest:  kbuildlab run $(basename "$tree")" ;;
+       start a second guest:  kbuildlab run $(kbl_tree_label "$tree")" ;;
 esac
 
 arch="$(kbl_tree_arch "$tree")" || exit 1
 src="$(kbl_tree_src "$tree")" || exit 1
 vmlinux="$src/vmlinux"
 [[ -f "$vmlinux" ]] || die "no vmlinux at $vmlinux
-       build it first: kbuildlab build $(basename "$tree")"
+       build it first: kbuildlab build $(kbl_tree_label "$tree")"
 
 # The gdb to run: stated ($KBL_GDB, or GDB= in tree.conf), else the first of
 # the distribution spellings that has a working Python.
@@ -417,7 +419,8 @@ if [[ $JSON -eq 1 ]]; then
     # so an argument that looks like a marker (`-- --args`) is still an argument.
     mapfile -d '' -t _envs < <(env -0 | grep -zE '^GDBTOOLS_[A-Z0-9_]*=')
     {
-        printf '%s\0' gdb "$gdb" tree "$tree" name "$(basename "$tree")" src "$src" \
+        printf '%s\0' gdb "$gdb" tree "$tree" id "$(kbl_tree_id "$tree")" \
+            label "$(kbl_tree_label "$tree")" src "$src" \
             vmlinux "$vmlinux" arch "$arch" port "$PORT" host "$_gbind" \
             target "${_gbind}:${PORT}" boot "$_eboot" kaslr "${_kaslr:-}" pid "${_r_pid:-}" \
             state "${_st:-}" gdbtools "$tool" fwsym "$FWSYM" bootbreak "$_bootbreak" \

@@ -4,82 +4,71 @@
 
 # ---------------------------------------------------------------- init
 cmd_init() {
-    local name="" arch="" version="$KBL_DEFAULT_VERSION" ws="" restore=0 srcdir=""
+    local arch="" version="$KBL_DEFAULT_VERSION" upstream="" ws="" restore=0 srcdir=""
+    local -a ids=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --workspace) ws="${2:?--workspace needs a directory}"; shift 2 ;;
             --restore)   restore=1; shift ;;
             --arch)      arch="${2:?--arch needs a value}"; shift 2 ;;
             --version)   version="${2:?--version needs a value}"; shift 2 ;;
-            --src)       srcdir="${2:?--src needs a directory}"; shift 2 ;;
+            --upstream)  upstream="${2:?--upstream needs stable or mainline}"; shift 2 ;;
             -*) die "init: unknown option '$1'" ;;
-            *)  name="$1"; shift ;;
+            *)  if [[ $restore -eq 1 ]]; then ids+=("$1"); else srcdir="$1"; fi; shift ;;
         esac
     done
 
-    if [[ -n "$srcdir" ]]; then
-        [[ "$srcdir" == /* || "$srcdir" == "~" || "$srcdir" == "~/"* ]] || srcdir="$PWD/$srcdir"
-        srcdir="$(kbl_norm_src "$srcdir")" || die "init: --src needs a directory path"
-    fi
     if [[ -n "$ws" ]]; then
         mkdir -p "$ws" || die "cannot create $ws"
         ws="$(cd -P "$ws" && pwd)"
         mkdir -p "$KBL_CONFIG_HOME"
         printf '%s\n' "$ws" > "$KBL_CONFIG_HOME/workspace"
         say "workspace    $ws"
-        [[ -z "$name" && $restore -eq 0 ]] && return 0
+        [[ -z "$srcdir" && $restore -eq 0 ]] && return 0
     fi
     if [[ $restore -eq 1 ]]; then
-        _restore_workspace
+        _restore_workspace "${ids[@]+"${ids[@]}"}"
         return 0
     fi
 
-    [[ -n "$name" ]] || die "init: name a tree, or pass --workspace DIR"
-    _kbl_new_name init "$name"
-    local root="$KBL_TREES/$name"
-
-    # A recorded tree comes back as it was, not from the templates.
-    local rec="${KBL_LAB}/trees/${name}"
-    if [[ -f "$rec/tree.conf" ]]; then
-        local was ws_now sd
-        for was in ARCH:"$arch" VERSION:"$version"; do
-            local key="${was%%:*}" want="${was#*:}" got
-            got="$(kbl_tree_get "$rec" "$key")"
-            [[ "$key" == VERSION && "$want" == "$KBL_DEFAULT_VERSION" ]] && continue
-            [[ -z "$want" || "$want" == "$got" ]] \
-                || die "init: $name is recorded with $key=$got; drop the option or pick another name"
-        done
-        ws_now="$(kbl_workspace)" || exit 1
-        mkdir -p "$root" || die "init: cannot create $root"
-        _lab_copy "$rec/tree.conf" "$root/tree.conf" @KBL_WORKSPACE@ "$ws_now" \
-            || die "init: cannot write $root/tree.conf"
-        [[ -f "$rec/config-fragment" ]] \
-            && _lab_copy "$rec/config-fragment" "$root/config-fragment" @KBL_WORKSPACE@ "$ws_now"
-        if [[ -z "$(kbl_tree_get "$root" SRC)" ]]; then
-            # A record from before the registry: its paths are relative to
-            # <workspace>/<name>, which held the source too (SRC_DIR, else kernel/).
-            sd="$(kbl_tree_get "$root" SRC_DIR)"
-            _kbl_legacy_conf "$root/tree.conf" "$root/tree.conf" "$ws_now/$name" \
-                "${srcdir:-$(kbl_norm_src "$ws_now/$name/${sd:-kernel}")}"
-        elif [[ -n "$srcdir" ]]; then
-            _kbl_conf_set "$root/tree.conf" SRC "$srcdir"
-        fi
-        ok "restored $name from $rec"
-        say "source       $(kbl_tree_get "$root" SRC)"
-        say "next         kbuildlab sync $name   (config then starts from the recorded .config)"
-        return 0
-    fi
-
+    [[ -n "$srcdir" ]] || die "init: give the directory the kernel source goes into:
+       kbuildlab init DIR --arch ARCH [--version V], or pass --workspace DIR or --restore"
     [[ -n "$arch" ]] || die "init: --arch is required (arm64, riscv64, x86_64)"
-    case "$arch" in arm64|riscv64|x86_64) ;; *) die "init: unknown arch '$arch'" ;; esac
-    [[ -n "$srcdir" ]] || { srcdir="$(kbl_workspace)/$name" || exit 1; }
-    [[ -e "$srcdir" && ! -d "$srcdir/.git" && -n "$(ls -A "$srcdir" 2>/dev/null)" ]] \
+    case "$arch" in arm64|riscv64|x86_64) ;; aarch64) arch=arm64 ;; *) die "init: unknown arch '$arch'" ;; esac
+    [[ "$srcdir" == /* || "$srcdir" == "~" || "$srcdir" == "~/"* ]] || srcdir="$PWD/$srcdir"
+    srcdir="$(kbl_norm_src "$srcdir")" || die "init: $srcdir is not a usable directory path"
+    [[ -e "$srcdir" && ! -d "$srcdir" ]] && die "init: $srcdir exists and is not a directory"
+    [[ -d "$srcdir" && ! -d "$srcdir/.git" && -n "$(ls -A "$srcdir" 2>/dev/null)" ]] \
         && die "init: $srcdir exists and is not empty; register an existing source with: kbuildlab add $srcdir"
-    mkdir -p "$root"
-    _kbl_new_conf "$root/tree.conf" "$name" "$arch" "$version" "$srcdir"
-    ok "registered $name"
-    say "source       $srcdir (cloned by sync)"
-    say "next         kbuildlab sync $name"
+    local had; had="$(_kbl_src_owner "$srcdir")" \
+        && die "init: $srcdir is already the source of $(kbl_tree_label "$had")"
+    local id root; id="$(kbl_new_id)" || exit 1; root="$KBL_TREES/$id"
+    mkdir -p "$root" || die "init: cannot create $root"
+    _kbl_new_conf "$root/tree.conf" "$arch" "$version" "$srcdir"
+    [[ -n "$upstream" ]] && _kbl_conf_set "$root/tree.conf" UPSTREAM "$upstream"
+    ok "registered $(kbl_tree_label "$root")"
+    if [[ -d "$srcdir/.git" ]]; then say "source       $srcdir (a clone is already there; sync fetches into it)"
+    else say "source       $srcdir (cloned by sync)"; fi
+    say "next         kbuildlab sync $(kbl_tree_label "$root")"
+}
+
+_restore_tree() {   # _restore_tree ID
+    local id="$1" rec="${KBL_LAB}/trees/$1" root ws_now
+    kbl_valid_id "$id" || { warn "not restored: lab/trees/$id is not named by a tree ID"; return 1; }
+    [[ -f "$rec/tree.conf" ]] || { warn "not restored: nothing is recorded as $id"; return 1; }
+    [[ -n "$(kbl_tree_get "$rec" SRC)" ]] \
+        || { warn "not restored: lab/trees/$id predates the registry (no SRC); register its source with kbuildlab add"; return 1; }
+    ws_now="$(kbl_workspace)" || return 1
+    root="$KBL_TREES/$id"
+    kbl_is_tree "$root" && { say "kept         $(kbl_tree_label "$root") (registered)"; return 0; }
+    mkdir -p "$root" || die "init: cannot create $root"
+    _lab_copy "$rec/tree.conf" "$root/tree.conf" @KBL_WORKSPACE@ "$ws_now" \
+        || die "init: cannot write $root/tree.conf"
+    [[ -f "$rec/config-fragment" ]] \
+        && _lab_copy "$rec/config-fragment" "$root/config-fragment" @KBL_WORKSPACE@ "$ws_now"
+    ok "restored $(kbl_tree_label "$root") from $rec"
+    say "source       $(kbl_tree_get "$root" SRC)"
+    say "next         kbuildlab sync $(kbl_tree_label "$root")   (config then starts from the recorded .config)"
 }
 
 # A record spells the workspace's own path as @KBL_WORKSPACE@: it then reads
@@ -151,8 +140,8 @@ _record_workspace() {
 
 # Inverse of the records: the workspace's own files where they are missing (an
 # existing one is never overwritten), each recorded checkout cloned at its
-# commit, and every recorded tree.
-_restore_workspace() {
+# commit, and every recorded tree, or the ones whose IDs are given.
+_restore_workspace() {   # _restore_workspace [ID...]
     local ws rel url commit rec
     ws="$(kbl_workspace)" || exit 1
     [[ -d "$KBL_LAB" ]] || die "init: nothing is recorded in $KBL_LAB"
@@ -174,10 +163,12 @@ _restore_workspace() {
                 || warn "could not restore $ws/$rel from $url at $commit"
         done < "$KBL_LAB/workspace/sources"
     fi
-    for rec in "$KBL_LAB"/trees/*/; do
-        [[ -f "$rec/tree.conf" ]] || continue
-        if kbl_is_tree "$KBL_TREES/$(basename "$rec")"; then say "kept         $(basename "$rec") (registered)"
-        else ( cmd_init "$(basename "$rec")" ) || warn "not restored: $(basename "$rec") (above)"; fi
+    local -a want=("$@")
+    if [[ ${#want[@]} -eq 0 ]]; then
+        for rec in "$KBL_LAB"/trees/*/; do [[ -f "$rec/tree.conf" ]] && want+=("$(basename "$rec")"); done
+    fi
+    for rec in "${want[@]+"${want[@]}"}"; do
+        ( _restore_tree "$rec" ) || warn "not restored: $rec (above)"
     done
 }
 
@@ -185,10 +176,10 @@ _restore_workspace() {
 # tree.conf, the tree's own config-fragment, and the .config as savedefconfig
 # writes it -- only what differs from the arch defconfig, which is how the
 # kernel itself stores a configuration and the form a config change is readable
-# in.  `init NAME` and `config` put them back on any machine.
+# in.  `init --restore` and `config` put them back on any machine.
 _record() {   # _record TREE
-    local tree="$1" name dst src ws
-    name="$(basename "$tree")"; dst="${KBL_LAB}/trees/${name}"
+    local tree="$1" dst src ws
+    dst="${KBL_LAB}/trees/$(kbl_tree_id "$tree")"
     src="$(kbl_tree_src "$tree")" || exit 1; kbl_tree_arch "$tree" >/dev/null || exit 1
     ws="$(kbl_workspace_opt)" || ws="/nonexistent-kbuildlab-workspace"
     mkdir -p "$dst" || { warn "record: cannot write $dst"; return 0; }

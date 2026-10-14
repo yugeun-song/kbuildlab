@@ -35,7 +35,8 @@ kbuildlab drgn [TREE] [options] [-- DRGN ARGS]
   --first            with several matches, take the lowest port instead of asking
   -- DRGN ARGS       passed straight to drgn (a script and its arguments, -e ...)
 
-  TREE is a registered name, or a path inside its source; omitted, the current tree.
+  TREE is a tree's ID (or a unique prefix of 4+ hex digits), or a path inside its
+  source; omitted, the current tree.
 
   drgn reads a BOOTED kernel.  A guest still frozen at its reset vector has none
   yet; this says so rather than letting drgn fail at it.
@@ -115,7 +116,7 @@ qmpsock="$(kbl_state_get "$_r_sf" KBL_QMP_SOCK)"
 qmpport="$(kbl_state_get "$_r_sf" KBL_QMP_PORT)"
 [[ -n "$qmpsock$qmpport" ]] || die "drgn: the guest on :$PORT was started without a QMP monitor
        (--no-qmp, or before this tool grew one), and drgn has no other way in.
-       Restart it:  kbuildlab run $(basename "$tree")"
+       Restart it:  kbuildlab run $(kbl_tree_label "$tree")"
 
 if [[ $TCP -eq 1 ]]; then
     [[ -n "$qmpport" ]] || die "drgn: --tcp, but that run recorded no QMP TCP port"
@@ -132,7 +133,7 @@ src="$(kbl_tree_src "$tree")" || exit 1
 vmlinux="$src/vmlinux"
 if [[ $SYMBOLS -eq 1 ]]; then
     [[ -f "$vmlinux" ]] || die "no vmlinux at $vmlinux
-       build it first: kbuildlab build $(basename "$tree")"
+       build it first: kbuildlab build $(kbl_tree_label "$tree")"
 fi
 
 # Whether this guest is readable is asked, not inferred.  A drgn that only
@@ -206,7 +207,7 @@ if [[ "$_ident" == 0 ]]; then
         grep -qxE 'CONFIG_(VMCORE_INFO|CRASH_CORE|KEXEC_CORE)=y' "$_cfg" \
             || _missing="$_missing CONFIG_VMCORE_INFO"
         [[ -n "$_missing" ]] && warn "       This tree is also built without$_missing, so it would not
-       write the note at any point.  'kbuildlab config $(basename "$tree") --preset',
+       write the note at any point.  'kbuildlab config $(kbl_tree_label "$tree") --preset',
        then rebuild."
     fi
 elif [[ "$_ident" == 1 ]]; then
@@ -230,7 +231,7 @@ declare -a ARGS=(--qemu "$addr")
 [[ $SYMBOLS -eq 1 ]] && ARGS+=(-s "$vmlinux")
 ARGS+=("${PASS[@]+"${PASS[@]}"}")
 
-say "guest        $(basename "$tree") ($arch) on gdb :$PORT"
+say "guest        $(kbl_tree_label "$tree") ($arch) on gdb :$PORT"
 # One client per -qmp chardev: a second session queues in the listen backlog and
 # looks like a hang.  Worth saying where the address is already on screen.
 say "qmp          $addr (one drgn at a time; a second waits for this one to quit)"

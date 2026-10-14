@@ -5,7 +5,10 @@ kernel version, the commit, whether it is built, which guests run it -- is a
 fact of the tree or of the host, so it is looked up rather than remembered.
 
     treeinfo.py list    [--json] [-q] [--narrow]
-    treeinfo.py inspect NAME [--json] [--format KEY]
+    treeinfo.py inspect ID [--json] [--format KEY]
+
+A tree is named by its ID, the 16 hex digits of its registry directory, shown
+as its first 12 or as many more as it takes to differ from every other tree.
 
 The registry, data and state directories come from the environment kbuildlab
 sets (KBL_TREES, KBL_DATA_HOME, KBL_STATE_DIR)."""
@@ -73,12 +76,28 @@ def conf_keys(tree_dir):
     return out
 
 
-def names():
+def ids():
     try:
         return sorted(d for d in os.listdir(TREES)
                       if os.path.isfile(os.path.join(TREES, d, "tree.conf")))
     except OSError:
         return []
+
+
+def label(tid, every=None):
+    every = ids() if every is None else every
+    n = 12
+    while n < len(tid) and any(o != tid and o[:n] == tid[:n] for o in every):
+        n += 1
+    return tid[:n]
+
+
+def resolve(word):
+    w = word.lower()
+    if not re.fullmatch(r"[0-9a-f]{4,16}", w):
+        return None
+    hits = [t for t in ids() if t.startswith(w)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _git(src, *args):
@@ -185,12 +204,13 @@ def norm_src(value):
     return os.path.realpath(value) if os.path.isabs(value) else None
 
 
-def basic(name):
+def basic(tid, every=None):
     """What tree.conf alone says, with no look at the source."""
-    tdir = os.path.join(TREES, name)
+    tdir = os.path.join(TREES, tid)
     raw = conf_get(tdir, "SRC")
     arch = ARCHES.get(conf_get(tdir, "ARCH") or "", conf_get(tdir, "ARCH"))
-    return {"name": name, "config": tdir, "data": os.path.join(DATA, "trees", name),
+    return {"id": tid, "label": label(tid, every), "config": tdir,
+            "data": os.path.join(DATA, "trees", tid),
             "src": norm_src(raw), "src_stated": raw, "arch": arch,
             "ref": conf_get(tdir, "VERSION"), "upstream": conf_get(tdir, "UPSTREAM") or "stable",
             "boot": conf_get(tdir, "BOOT") or "direct",
@@ -198,8 +218,8 @@ def basic(name):
             "problems": []}
 
 
-def info(name, live=None, deep=False):
-    d = basic(name)
+def info(tid, live=None, deep=False, every=None):
+    d = basic(tid, every)
     tdir, src = d["config"], d["src"] or ""
     arch = d["arch"]
     is_src = bool(src) and os.path.isfile(os.path.join(src, "Makefile")) \
@@ -242,28 +262,28 @@ def _age(stamp):
 
 
 def cmd_list(args):
-    rows = names()
+    rows = ids()
     if "-q" in args:
-        print("\n".join(rows))
+        print("\n".join(label(t, rows) for t in rows))
         return 0
     live = guests()
-    infos = [info(n, live) for n in rows]
+    infos = [info(t, live, every=rows) for t in rows]
     if "--json" in args:
         json.dump(infos, sys.stdout, indent=1)
         print()
         return 0
     if not infos:
-        print("no trees are registered (kbuildlab init NAME --arch ARCH, or kbuildlab add DIR)")
+        print("no trees are registered (kbuildlab init DIR --arch ARCH, or kbuildlab add DIR)")
         return 0
     if "--narrow" in args:
         _list_blocks(infos)
         return 0
-    head = ["NAME", "ARCH", "KERNEL", "REF", "COMMIT HASH", "BUILT", "GUESTS", "SOURCE"]
+    head = ["ID", "ARCH", "KERNEL", "REF", "COMMIT HASH", "BUILT", "GUESTS", "SOURCE"]
     table = []
     for d in infos:
         bad = bool(d["problems"])
         table.append([
-            d["name"], d["arch"] or "?", d["release"] or d["version"] or "-", d["ref"] or "-",
+            d["label"], d["arch"] or "?", d["release"] or d["version"] or "-", d["ref"] or "-",
             (d["commit"] or "-")[:12], _age(d["built"]), str(len(d["guests"])) if d["guests"] else "-",
             d["src"] or "-", bad])
     width = [max(len(head[i]), *(len(r[i]) for r in table)) for i in range(len(head) - 1)]
@@ -289,7 +309,7 @@ def cmd_list(args):
 def _problems(infos):
     for d in infos:
         for p in d["problems"]:
-            print(c("31", "%s %s: %s" % (NO, d["name"], p)))
+            print(c("31", "%s %s: %s" % (NO, d["label"], p)))
 
 
 def _home(path):
@@ -301,7 +321,7 @@ def _home(path):
 
 def _list_blocks(infos):
     for d in infos:
-        print("  ".join([c("1;31" if d["problems"] else "1", d["name"]), d["arch"] or "?",
+        print("  ".join([c("1;31" if d["problems"] else "1", d["label"]), d["arch"] or "?",
                          d["release"] or d["version"] or "-"]))
         built = c("32", d["built"]) if d["built"] else c("2", "-")
         if d["guests"]:
@@ -325,34 +345,35 @@ def _tree_line(prefix, last, key, value, width):
 
 def cmd_inspect(args):
     if not args:
-        print("usage: treeinfo.py inspect NAME [--json] [--format KEY]", file=sys.stderr)
+        print("usage: treeinfo.py inspect ID [--json] [--format KEY]", file=sys.stderr)
         return 2
-    name = args[0]
-    if name not in names():
-        print("kbuildlab: no tree named '%s'" % name, file=sys.stderr)
+    tid = args[0] if args[0] in ids() else resolve(args[0])
+    if tid is None:
+        print("kbuildlab: no tree has the ID '%s'" % args[0], file=sys.stderr)
         return 1
     if "--format" in args:
         i = args.index("--format")
         key = args[i + 1] if i + 1 < len(args) else ""
-        d = basic(name)
+        d = basic(tid)
         if key not in d or key == "problems":
             tdir = d["config"]
             d = {k: conf_get(tdir, k) for k in conf_keys(tdir)} if key in conf_keys(tdir) \
-                else info(name, deep=True)
+                else info(tid, deep=True)
         v = d.get(key, d.get("settings", {}).get(key))
         if v is None:
             return 1
         print(v if not isinstance(v, (dict, list)) else json.dumps(v))
         return 0
-    d = info(name, deep=True)
+    d = info(tid, deep=True)
     if "--json" in args:
         json.dump(d, sys.stdout, indent=1)
         print()
         return 0
-    print(c("1", d["name"]) + "  " + (c("32", OK + " ok") if not d["problems"] else
+    print(c("1", d["label"]) + "  " + (c("32", OK + " ok") if not d["problems"] else
                                       c("31", NO + " " + "; ".join(d["problems"]))))
     git = "%s%s" % (d["describe"] or "-", c("33", " (modified)") if d.get("dirty") else "")
     rows = [
+        ("id", d["id"]),
         ("kernel", "%s%s" % (d["version"] or "-", ("  release " + d["release"]) if d["release"] else "")),
         ("arch", d["arch"] or "-"),
         ("source", d["src"] or "-"),

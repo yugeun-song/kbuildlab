@@ -44,25 +44,22 @@ Trees (any directory, any time):
                                             build state, running guests, source;
                                             --narrow prints one block per tree
   kbuildlab inspect TREE [--json|--format K]  everything known about one tree
-  kbuildlab add DIR [--name N] [--arch A]   register a kernel source you already have
-  kbuildlab init NAME --arch ARCH [--version V] [--src DIR]
-                                            register a new tree, to clone with sync
-                                            (default $KBL_DEFAULT_VERSION, into the workspace)
-  kbuildlab init NAME                       recreate a tree recorded in lab/trees
-  kbuildlab init --restore                  recreate the recorded workspace and trees
-  kbuildlab init --workspace DIR            record where new trees are cloned
+  kbuildlab add DIR [--arch A]              register a kernel source you already have
+  kbuildlab init DIR --arch ARCH [--version V]
+                                            register a new tree whose source sync
+                                            clones into DIR (default $KBL_DEFAULT_VERSION)
+  kbuildlab init --restore [ID...]          recreate the recorded workspace and trees
+  kbuildlab init --workspace DIR            record the workspace (rootfs, firmware,
+                                            and the lab/ record's @KBL_WORKSPACE@)
   kbuildlab get TREE [KEY...]               read its tree.conf (all of it, or keys)
   kbuildlab set TREE KEY=VALUE...           write keys into its tree.conf
   kbuildlab unset TREE KEY...               remove keys from its tree.conf
   kbuildlab edit TREE                       open its tree.conf in \$VISUAL / \$EDITOR
-  kbuildlab mv TREE DIR [--no-move]         move its source (or only repoint SRC)
-  kbuildlab rename OLD NEW                  rename a tree
-  kbuildlab rm TREE [--purge] [--yes]       unregister; --purge also deletes the
+  kbuildlab mv ID DIR [--no-move]           move its source (or only repoint SRC)
+  kbuildlab rm ID [--purge] [--yes]         unregister; --purge also deletes the
                                             source, its data and its indexes
   kbuildlab prune [--yes]                   drop trees whose source is gone and data
                                             no tree owns
-  kbuildlab migrate [--dry-run]             move trees that keep tree.conf beside
-                                            their source into the registry
 
 Build:
   kbuildlab update [TREE...|--all] [--no-tags] [--no-clangd] [--no-warm]
@@ -100,9 +97,11 @@ Host:
                                             says the same)
 
 ARCH is one of: arm64, riscv64, x86_64.
-TREE is a registered name, or a path inside a registered source (or the
+Every tree is known by its ID: 16 hex digits drawn when it is registered, shown
+as the first 12 (more only if two trees share those).  TREE is an ID or a
+unique prefix of 4 or more digits, or a path inside a registered source (or the
 directory holding one); omitted, it is the tree the current directory belongs
-to, else the only one registered.  rm, mv and rename take a name only.
+to, else the only one registered.  rm and mv take an ID only.
 Tab completes commands, options, trees and live guests' ports once install.sh
 has put the bash and zsh completions in place.
 USAGE
@@ -161,13 +160,11 @@ case "$cmd" in
     add)    cmd_add "$@" ;;
     rm)     cmd_rm "$@" ;;
     mv)     cmd_mv "$@" ;;
-    rename) cmd_rename "$@" ;;
     get)    cmd_get "$@" ;;
     set)    cmd_set "$@" ;;
     unset)  cmd_unset "$@" ;;
     edit)   cmd_edit "$@" ;;
     prune)  cmd_prune "$@" ;;
-    migrate) cmd_migrate "$@" ;;
     containers) cmd_containers "$@" ;;
     doctor) cmd_doctor ;;
     help|-h|--help) cmd_help "$@" ;;

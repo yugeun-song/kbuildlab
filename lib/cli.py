@@ -23,8 +23,9 @@ import treeinfo  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHES = ("arm64", "riscv64", "x86_64")
-TREE_NOTE = "TREE is a registered name, or a path inside its source; omitted, the current tree."
-NAME_NOTE = "TREE is a registered name; a path is not accepted here."
+TREE_NOTE = ("TREE is a tree's ID or a unique prefix of 4 or more of its hex digits, or a path "
+             "inside its source; omitted, the current tree.")
+ID_NOTE = "TREE is a tree's ID or a unique prefix of it; a path is not accepted here."
 
 
 class Opt:
@@ -64,7 +65,7 @@ class Cmd:
 COMMANDS = [
     Cmd("trees", "every registered tree: kernel, commit, build state, guests, source",
         "[ls] [-q|--json|--narrow]", aliases=["ls"], opts=[
-            Opt("-q", "names only, one per line"),
+            Opt("-q", "IDs only, one per line"),
             Opt("--json", "everything known about each tree, as JSON"),
             Opt("--narrow", "one block per tree instead of a table row, for a terminal "
                             "narrower than the table")]),
@@ -73,26 +74,29 @@ COMMANDS = [
             Opt("--json", "everything known, as JSON"),
             Opt("--format|-f", "print one field (a JSON key or a tree.conf key) and nothing else",
                 "KEY", "fkey")]),
-    Cmd("add", "register a kernel source you already have", "DIR [--name N] [--arch A]",
+    Cmd("add", "register a kernel source you already have, under a new ID",
+        "DIR [--arch A] [--version V] [--upstream U]",
         args=["dir"], opts=[
-            Opt("--name", "the tree's name (default: the directory's, or its parent's for "
-                          "kernel, linux, src, source)", "NAME", "newname"),
             Opt("--arch", "arm64, riscv64 or x86_64 (default: read from DIR/.config)", "ARCH", "arch"),
             Opt("--version", "the tag or branch sync follows (default: what is checked out)",
                 "VERSION", "text:a tag or branch"),
             Opt("--upstream", "where sync fetches from: stable (default) or mainline",
                 "UPSTREAM", "choice:stable,mainline")]),
-    Cmd("init", "register a new tree to clone with sync, recreate recorded ones, or "
-                "record the workspace",
-        "NAME --arch ARCH [--version V] [--src DIR] | NAME | --restore | --workspace DIR",
-        args=["labname"], opts=[
+    Cmd("init", "register a new tree under a new ID, to clone into DIR with sync; recreate "
+                "recorded trees; or record the workspace",
+        "DIR --arch ARCH [--version V] [--upstream U] | --restore [ID...] | --workspace DIR",
+        args=["initarg*"], opts=[
             Opt("--arch", "arm64, riscv64 or x86_64", "ARCH", "arch"),
             Opt("--version", "the tag or branch to clone and follow", "VERSION",
                 "text:a tag or branch"),
-            Opt("--src", "where the source goes (default: NAME/kernel in the workspace)", "DIR", "dir"),
-            Opt("--restore", "recreate the recorded workspace and every recorded tree"),
-            Opt("--workspace", "record where new trees are cloned", "DIR", "dir")],
-        notes=["A NAME recorded in lab/trees is recreated from its record."]),
+            Opt("--upstream", "where sync fetches from: stable (default) or mainline",
+                "UPSTREAM", "choice:stable,mainline"),
+            Opt("--restore", "recreate the recorded workspace and the recorded trees (all, or "
+                             "the IDs given), each under the ID it was recorded with"),
+            Opt("--workspace", "record the workspace: where the rootfs and firmware are built "
+                               "and what the lab/ record spells as @KBL_WORKSPACE@", "DIR", "dir")],
+        notes=["DIR is required: the kernel source goes exactly there, and the tree is known "
+               "by its ID from then on."]),
     Cmd("get", "read a tree's tree.conf, all of it or some keys", "TREE [KEY...]",
         args=["tree", "key*"], notes=[TREE_NOTE]),
     Cmd("set", "write keys into a tree's tree.conf", "TREE KEY=VALUE...",
@@ -101,19 +105,16 @@ COMMANDS = [
         args=["tree", "key*"], notes=[TREE_NOTE, "SRC and ARCH cannot be removed."]),
     Cmd("edit", "open a tree's tree.conf in $VISUAL or $EDITOR", "[TREE]", args=["tree"],
         notes=[TREE_NOTE]),
-    Cmd("mv", "move a tree's source, or only repoint SRC", "TREE DIR [--no-move]",
-        args=["treename", "dir"], notes=[NAME_NOTE], opts=[
+    Cmd("mv", "move a tree's source, or only repoint SRC", "ID DIR [--no-move]",
+        args=["treeid", "dir"], notes=[ID_NOTE], opts=[
             Opt("--no-move|--src-only", "do not move anything: point SRC at DIR, where you "
                                         "moved the source yourself")]),
-    Cmd("rename", "rename a tree", "OLD NEW", args=["treename", "newname"], notes=[NAME_NOTE]),
-    Cmd("rm", "unregister a tree", "TREE [--purge] [--yes]", args=["treename"],
-        notes=[NAME_NOTE], opts=[
+    Cmd("rm", "unregister a tree", "ID [--purge] [--yes]", args=["treeid"],
+        notes=[ID_NOTE], opts=[
             Opt("--purge", "also delete its source, its data and its indexes (asks first)"),
             Opt("--yes|-y", "do not ask")]),
     Cmd("prune", "drop trees whose source is gone and data no tree owns", "[--yes]", opts=[
         Opt("--yes|-y", "do not ask")]),
-    Cmd("migrate", "move trees that keep tree.conf beside their source into the registry",
-        "[--dry-run]", opts=[Opt("--dry-run|-n", "say what would move and change nothing")]),
     Cmd("update", "one pass: check, sync, keep .config, incremental build, modules, indexes, "
                   "then a summary", "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm]",
         args=["tree*"], notes=[TREE_NOTE], opts=[
@@ -305,14 +306,16 @@ def _values(kind, pos, cur):
     if kind.startswith("choice:"):
         for v in kind.split(":", 1)[1].split(","):
             _emit("value", v)
-    elif kind in ("tree", "treename"):
+    elif kind in ("tree", "treeid"):
         live = {os.path.realpath(t): len(g) for t, g in treeinfo.guests().items()}
-        for n in treeinfo.names():
-            b = treeinfo.basic(n)
+        every = treeinfo.ids()
+        for t in every:
+            b = treeinfo.basic(t, every)
             g = live.get(os.path.realpath(b["config"]))
-            _emit("tree", n, "%s %s%s" % (b["arch"] or "?", b["ref"] or "",
-                                          ("  %d guest%s" % (g, "s" if g > 1 else "")) if g else ""))
-        if kind == "tree" and (cur.startswith(("/", ".", "~")) or not treeinfo.names()):
+            _emit("tree", b["label"], "%s %s %s%s" % (
+                b["arch"] or "?", b["ref"] or "", b["src"] or "",
+                ("  %d guest%s" % (g, "s" if g > 1 else "")) if g else ""))
+        if kind == "tree" and (cur.startswith(("/", ".", "~")) or not every):
             print("@dirs")
     elif kind == "dir":
         print("@dirs")
@@ -321,15 +324,14 @@ def _values(kind, pos, cur):
     elif kind == "arch":
         for a in ARCHES:
             _emit("value", a)
-    elif kind == "newname":
-        print("@message\ta new tree name")
-    elif kind == "labname":
+    elif kind == "labid":
         lab = os.path.join(REPO, "lab", "trees")
-        have = set(treeinfo.names())
-        rec = sorted(d for d in os.listdir(lab) if d not in have) if os.path.isdir(lab) else []
+        have = set(treeinfo.ids())
+        rec = sorted(d for d in os.listdir(lab) if d not in have and re.fullmatch(r"[0-9a-f]{16}", d)
+                     and os.path.isfile(os.path.join(lab, d, "tree.conf"))) if os.path.isdir(lab) else []
         for d in rec:
-            _emit("value", d, "recorded in lab/trees")
-        print("@message\ta new tree name%s" % (", or one recorded in lab/trees" if rec else ""))
+            b = treeinfo.conf_get(os.path.join(lab, d), "ARCH") or "?"
+            _emit("value", d, "recorded in lab/trees: %s %s" % (b, treeinfo.conf_get(os.path.join(lab, d), "VERSION") or ""))
     elif kind in ("key", "kv"):
         tdir = _tree_dir(pos[0]) if pos else None
         have = _conf_keys(tdir)
@@ -340,8 +342,8 @@ def _values(kind, pos, cur):
             print("@nospace")
     elif kind == "fkey":
         tdir = _tree_dir(pos[0]) if pos else None
-        name = os.path.basename(tdir) if tdir else (treeinfo.names() or [None])[0]
-        keys = set(treeinfo.info(name, {}).keys()) - {"problems", "guests"} if name else set()
+        tid = os.path.basename(tdir) if tdir else (treeinfo.ids() or [None])[0]
+        keys = set(treeinfo.info(tid, {}).keys()) - {"problems", "guests"} if tid else set()
         for k in sorted(keys | set(_conf_keys(tdir))):
             _emit("key", k)
     elif kind in ("port", "qmpport"):
@@ -408,6 +410,8 @@ def cmd_complete(words):
         return 0
     if not cur.startswith("-"):
         kind = _slot(cmd, len(pos))
+        if kind == "initarg":
+            kind = "labid" if "--restore" in used else ("dir" if not pos else None)
         if kind:
             _values(kind, pos, cur)
     _list_opts(cmd, used, pos)

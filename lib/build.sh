@@ -256,7 +256,7 @@ cmd_config() {
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch src; arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
-    [[ -d "$src" ]] || die "no kernel source at $src -- run: kbuildlab sync $(basename "$tree")"
+    [[ -d "$src" ]] || die "no kernel source at $src -- run: kbuildlab sync $(kbl_tree_label "$tree")"
     local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
 
     local -a frags=() soft=()
@@ -277,7 +277,7 @@ cmd_config() {
             # The hard preset names symbols a kernel older than the one it was
             # verified on lacks or restricts; there it is taken as wishes.
             soft=("${KBL_REPO}/presets/common.config" "$archpreset" "${soft[@]}")
-            say "preset       $(basename "$tree") predates the preset's reference kernel; taken softly"
+            say "preset       $(kbl_tree_label "$tree") predates the preset's reference kernel; taken softly"
         else
             frags=("${KBL_REPO}/presets/common.config" "$archpreset" "${frags[@]+"${frags[@]}"}")
         fi
@@ -347,10 +347,10 @@ cmd_build() {
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch src jobs
     arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
-    [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(basename "$tree") --preset"
+    [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(kbl_tree_label "$tree") --preset"
     jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
     _kmake_args "$tree"
-    say "building     $(basename "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
+    say "building     $(kbl_tree_label "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
     _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
     [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
     say "vmlinux      $src/vmlinux"

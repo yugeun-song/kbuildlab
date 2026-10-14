@@ -268,9 +268,20 @@ kbl_is_ksrc() {
         && grep -qE '^[[:space:]]*SUBLEVEL[[:space:]]*=' "$d/Makefile" 2>/dev/null
 }
 
-# A tree name is a directory name in the registry, so it is what a path segment
-# may be and nothing that would read as an option or climb out of it.
-kbl_valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; }
+# A tree's ID is the name of its registry directory: 16 lowercase hex digits,
+# drawn at random when the tree is registered and never changed after, so moving
+# the source keeps it.
+kbl_valid_id() { [[ "$1" =~ ^[0-9a-f]{16}$ ]]; }
+
+kbl_new_id() {
+    local id
+    while :; do
+        id="$(od -An -N8 -tx8 /dev/urandom | tr -d ' \n')"
+        kbl_valid_id "$id" || die "cannot read random bytes from /dev/urandom"
+        [[ -e "$KBL_TREES/$id" || -e "$KBL_DATA_HOME/trees/$id" || -e "$KBL_LAB/trees/$id" ]] || break
+    done
+    printf '%s\n' "$id"
+}
 
 kbl_trees() {
     local d
@@ -278,18 +289,34 @@ kbl_trees() {
     for d in "$KBL_TREES"/*/; do kbl_is_tree "${d%/}" && basename "${d%/}"; done
 }
 
-kbl_tree_name() { basename "$1"; }
+kbl_tree_id() { basename "$1"; }
 kbl_tree_data() { printf '%s\n' "$KBL_DATA_HOME/trees/$(basename "$1")"; }
 
-# Trees still in the layout before the registry: a tree.conf next to the kernel
-# source, in the workspace.  `kbuildlab migrate` moves them.
-kbl_legacy_trees() {
-    local ws d
-    ws="$(kbl_workspace_opt)" || return 0
-    for d in "$ws"/*/; do
-        d="${d%/}"
-        kbl_is_tree "$d" && ! kbl_is_tree "$KBL_TREES/$(basename "$d")" && printf '%s\n' "$d"
+kbl_tree_label() {   # kbl_tree_label TREE
+    local id n=12 o clash
+    id="$(basename "$1")"
+    while (( n < ${#id} )); do
+        clash=0
+        for o in $(kbl_trees); do
+            [[ "$o" != "$id" && "${o:0:n}" == "${id:0:n}" ]] && { clash=1; break; }
+        done
+        (( clash )) || break
+        n=$((n + 1))
     done
+    printf '%s\n' "${id:0:n}"
+}
+
+_kbl_labels() {   # _kbl_labels ID...
+    local id out=""
+    for id in "$@"; do out+="${out:+ }$(kbl_tree_label "$KBL_TREES/$id")"; done
+    printf '%s\n' "$out"
+}
+
+kbl_trees_by_id() {   # kbl_trees_by_id PREFIX
+    local want="${1,,}" t
+    [[ "$want" =~ ^[0-9a-f]{4,16}$ ]] || return 0
+    for t in $(kbl_trees); do [[ "$t" == "$want"* ]] && printf '%s\n' "$t"; done
+    return 0
 }
 
 # SRC as one absolute path: a leading ~ expanded, then symlinks, . and ..
@@ -317,7 +344,7 @@ _kbl_owning_tree() {
 }
 
 # The registered tree whose source is DIR's immediate child, when exactly one
-# is: the directory a source was cloned into, as in the layout before the registry.
+# is: the directory a source was cloned into, such as <tree>/ for <tree>/kernel.
 _kbl_child_tree() {   # _kbl_child_tree DIR
     local p t s hit="" n=0
     p="$(readlink -f -- "$1" 2>/dev/null)" && [[ -n "$p" && -d "$p" ]] || return 1
@@ -329,29 +356,29 @@ _kbl_child_tree() {   # _kbl_child_tree DIR
 }
 
 _kbl_no_tree() {
-    local legacy have
-    legacy="$(kbl_legacy_trees | tr '\n' ' ')"
-    have="$(kbl_trees | tr '\n' ' ')"
-    [[ -n "$legacy" ]] && die "$1
-       These trees still keep their tree.conf beside the source: $legacy
-       Move them into the registry: kbuildlab migrate"
-    die "$1${have:+
-       have: $have}"
+    local -a have=()
+    mapfile -t have < <(kbl_trees)
+    die "$1${have[0]:+
+       trees: $(_kbl_labels "${have[@]}") (kbuildlab trees describes them)}"
 }
 
-# Resolve what the user named to a tree: a registered name, a path inside a
-# registered source (or the registry directory itself, or the directory holding
-# exactly one source), or, given nothing, the tree the current directory belongs
-# to and then the only tree there is.  Prints the tree's registry directory.
+# Resolve what the user named to a tree: an ID or a unique prefix of one (4 or
+# more hex digits), a path inside a registered source (or the registry directory
+# itself, or the directory holding exactly one source), or, given nothing, the
+# tree the current directory belongs to and then the only tree there is.  A word
+# that is an existing path is read as the path.  Prints the registry directory.
 kbl_tree() {
     local want="${1:-}" t n
-    local -a all=()
+    local -a all=() hits=()
     if [[ -n "$want" ]]; then
-        if [[ "$want" != */* && "$want" != "." && "$want" != ".." ]]; then
-            kbl_is_tree "$KBL_TREES/$want" && { printf '%s\n' "$KBL_TREES/$want"; return 0; }
-            [[ -d "$want" ]] || _kbl_no_tree "no tree named '$want'"
+        if [[ ! -e "$want" ]]; then
+            mapfile -t hits < <(kbl_trees_by_id "$want")
+            case ${#hits[@]} in
+                1) printf '%s\n' "$KBL_TREES/${hits[0]}"; return 0 ;;
+                0) _kbl_no_tree "'$want' is neither the ID of a registered tree nor a path" ;;
+                *) die "the ID prefix '$want' matches several trees: $(_kbl_labels "${hits[@]}")" ;;
+            esac
         fi
-        [[ -e "$want" ]] || _kbl_no_tree "'$want' is neither a tree name nor a path"
         t="$(readlink -f -- "$want")"
         if [[ "$(dirname "$t")" == "$(readlink -f -- "$KBL_TREES" 2>/dev/null)" ]] && kbl_is_tree "$t"; then
             printf '%s\n' "$KBL_TREES/$(basename "$t")"; return 0
@@ -364,10 +391,10 @@ kbl_tree() {
     t="$(_kbl_child_tree "$PWD")" && { printf '%s\n' "$t"; return 0; }
     mapfile -t all < <(kbl_trees)
     case ${#all[@]} in
-        0) _kbl_no_tree "no trees are registered. Create one: kbuildlab init <name> --arch ARCH,
-       or register a kernel source you have: kbuildlab add <dir>" ;;
+        0) die "no trees are registered. Create one: kbuildlab init DIR --arch ARCH,
+       or register a kernel source you have: kbuildlab add DIR" ;;
         1) printf '%s\n' "$KBL_TREES/${all[0]}" ;;
-        *) n="${all[*]}"; die "several trees are registered -- name one: $n" ;;
+        *) n="$(_kbl_labels "${all[@]}")"; die "several trees are registered -- give one's ID: $n" ;;
     esac
 }
 
@@ -423,7 +450,7 @@ kbl_tree_src() {
     local tree="$1" s n
     s="$(kbl_tree_get "$tree" SRC)"
     [[ -n "$s" ]] || die "$tree/tree.conf states no SRC (the kernel source directory)
-       kbuildlab set $(basename "$tree") SRC=/path/to/linux"
+       kbuildlab set $(kbl_tree_label "$tree") SRC=/path/to/linux"
     n="$(kbl_norm_src "$s")" || die "$tree/tree.conf states SRC=$s, which is not an absolute path"
     printf '%s\n' "$n"
 }
@@ -651,7 +678,6 @@ kbl_instances() {
             # A file that names a different process is about a run that has ended.
             if [[ -z "$spid" || ( "$spid" == "$pid" && ( -z "$sstart" || "$sstart" == "$start" ) ) ]]; then
                 tree="$(sed -n 's/^KBL_TREE=//p'     "$sf" | head -1)"
-                name="$(sed -n 's/^KBL_NAME=//p'     "$sf" | head -1)"
                 boot="$(sed -n 's/^KBL_BOOT=//p'     "$sf" | head -1)"
                 kaslr="$(sed -n 's/^KBL_KASLR=//p'   "$sf" | head -1)"
                 ssh="$(sed -n 's/^KBL_SSH_PORT=//p'  "$sf" | head -1)"
@@ -661,7 +687,7 @@ kbl_instances() {
         else
             sf=""
         fi
-        [[ -n "$name" ]] || name="$([[ -n "$tree" ]] && basename "$tree")"
+        name="$([[ -n "$tree" ]] && kbl_tree_label "$tree")"
         printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
             "$port" "$pid" "$start" "$frozen" "$qbin" "$sf" "$tree" "$name" \
             "$boot" "$kaslr" "$ssh"
@@ -783,7 +809,7 @@ kbl_pick_guest() {
                 elif [[ -n "$_treeport" && "$_r_port" == "$_treeport" ]]; then :
                 else continue
                 fi
-                _r_name="${_r_name:-$(basename "$_want_tree")}"
+                _r_name="${_r_name:-$(kbl_tree_label "$_want_tree")}"
                 _r="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
                       "$_r_port" "$_r_pid" "$_r_start" "$_r_frozen" "$_r_qbin" "$_r_sf" \
                       "$_want_tree" "$_r_name" "$_r_boot" "$_r_kaslr" "$_r_ssh")"

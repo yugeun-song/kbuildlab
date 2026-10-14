@@ -1,6 +1,7 @@
 # What this tree is.  Read by every kbuildlab command; never inferred from the
-# directory name, so renaming the directory cannot change what gets built.
-NAME=@NAME@
+# directory name, so renaming the directory cannot change what gets built.  The
+# tree itself is known by its ID, the name of the registry directory this file
+# is in.
 ARCH=@ARCH@
 
 # The tag or branch to track.  A tag is pinned and `kbuildlab sync` will say so.
@@ -14,7 +15,7 @@ UPSTREAM=stable          # stable | mainline
 SRC=@SRC@
 
 # Paths below are absolute, ~/-relative, or relative to the tree's data directory
-# (`kbuildlab inspect <name> --format data` names it), where its boot disks,
+# (`kbuildlab inspect <id> --format data` names it), where its boot disks,
 # persistent disk and module archive live.  kbuildlab's own records never go into
 # the source.
 
