@@ -12,7 +12,7 @@ source "${KBL_REPO}/lib/common.sh"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/registry.sh"
 
-KBL_DEFAULT_VERSION="v6.12"
+KBL_DEFAULT_VERSION="v6.18"
 KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
 KBL_LEGACY_IMAGE="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
 STABLE_URL="${KBL_STABLE_URL:-https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git}"

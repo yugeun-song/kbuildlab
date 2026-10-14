@@ -593,7 +593,7 @@ into it is deliberate.
 
 | tree | builds with | note |
 | --- | --- | --- |
-| `upstream-*`, `v6.12-*` | gcc-16 | nothing found |
+| `mainline-*`, `v6.18-*` | gcc-16 | nothing found |
 | `v4.6-arm64` | gcc-16 + `HOSTCC_FLAGS=-fcommon` | gcc-9 unaided; host tools only |
 
 Only the compiler is versioned: `CROSS_COMPILE` still supplies `ld`, `as` and

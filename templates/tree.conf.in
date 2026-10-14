@@ -4,7 +4,7 @@ NAME=@NAME@
 ARCH=@ARCH@
 
 # The tag or branch to track.  A tag is pinned and `kbuildlab sync` will say so.
-# A stable branch such as linux-6.12.y moves as patches land, which is what
+# A stable branch such as linux-6.18.y moves as patches land, which is what
 # makes `kbuildlab update` meaningful.
 VERSION=@VERSION@
 UPSTREAM=stable          # stable | mainline
