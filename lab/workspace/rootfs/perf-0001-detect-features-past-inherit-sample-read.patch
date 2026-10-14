@@ -1,0 +1,17 @@
+--- a/tools/perf/util/evsel.c
++++ b/tools/perf/util/evsel.c
+@@ -2475,10 +2475,10 @@
+ 
+ 	attr.inherit = true;
+ 	attr.sample_type = PERF_SAMPLE_READ | PERF_SAMPLE_TID;
+-	if (has_attr_feature(&attr, /*flags=*/0))
+-		goto found;
+-	perf_missing_features.inherit_sample_read = true;
+-	pr_debug2("Using PERF_SAMPLE_READ / :S modifier is not compatible with inherit, falling back to no-inherit.\n");
++	if (!has_attr_feature(&attr, /*flags=*/0)) {
++		perf_missing_features.inherit_sample_read = true;
++		pr_debug2("Using PERF_SAMPLE_READ / :S modifier is not compatible with inherit, falling back to no-inherit.\n");
++	}
+ 	attr.inherit = false;
+ 	attr.sample_type = 0;
+ 

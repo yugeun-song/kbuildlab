@@ -232,3 +232,68 @@ case "$1" in
 esac
 EEOF
 chmod 0755 "$ENTROPY"
+
+WINSIZE="$TARGET/etc/init.d/S12winsize"
+cat > "$WINSIZE" <<'WEOF'
+#!/bin/sh
+NAME=org.kbuildlab.winsize
+PIDFILE=/var/run/kbl-winsize.pid
+
+port() {
+    for n in /sys/class/virtio-ports/*/name; do
+        [ -r "$n" ] || continue
+        [ "$(cat "$n" 2>/dev/null)" = "$NAME" ] || continue
+        d=${n%/name}
+        [ -c "/dev/${d##*/}" ] && { echo "/dev/${d##*/}"; return 0; }
+    done
+    return 1
+}
+
+console() {
+    c=
+    for w in $(cat /proc/cmdline); do
+        case "$w" in console=*) c=${w#console=}; c=${c%%,*} ;; esac
+    done
+    [ -n "$c" ] && [ -c "/dev/$c" ] && echo "/dev/$c"
+}
+
+serve() {
+    exec 3<>"$1"
+    while echo "?" >&3; do
+        while read -r rows cols rest <&3; do
+            case "$rows$cols" in ""|*[!0-9]*) continue ;; esac
+            [ "$rows" -gt 0 ] && [ "$cols" -gt 0 ] || continue
+            stty -F "$2" rows "$rows" cols "$cols" 2>/dev/null
+        done
+    done
+}
+
+start() {
+    dev=$(port) || return 0
+    tty=$(console) || return 0
+    serve "$dev" "$tty" </dev/null >/dev/null 2>&1 &
+    echo $! > "$PIDFILE"
+}
+
+stop() {
+    [ -r "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+    return 0
+}
+
+case "$1" in
+    start|"") start ;;
+    stop)     stop ;;
+    restart)  stop; start ;;
+    *)        echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+WEOF
+chmod 0755 "$WINSIZE"
+
+FSTAB="$TARGET/etc/fstab"
+if [ -f "$FSTAB" ]; then
+    grep -q '[[:space:]]/sys/kernel/debug[[:space:]]' "$FSTAB" \
+        || printf 'debugfs\t\t/sys/kernel/debug\tdebugfs\tdefaults\t0\t0\n' >> "$FSTAB"
+    grep -q '[[:space:]]/sys/kernel/tracing[[:space:]]' "$FSTAB" \
+        || printf 'tracefs\t\t/sys/kernel/tracing\ttracefs\tdefaults\t0\t0\n' >> "$FSTAB"
+fi
