@@ -66,7 +66,7 @@ the current directory belongs to, else the only one. `rm`, `mv` and `rename` tak
 a name only.
 
 ```
-kbuildlab trees [-q|--json]          NAME ARCH KERNEL REF COMMIT BUILT GUESTS SOURCE
+kbuildlab trees [-q|--json]          NAME ARCH KERNEL REF COMMIT HASH BUILT GUESTS SOURCE
 kbuildlab inspect TREE [--json|--format KEY]
 kbuildlab add DIR [--name N] [--arch A]     register a source you have (arch from .config)
 kbuildlab get|set|unset TREE KEY...         read or write tree.conf keys; edit opens it

@@ -254,7 +254,7 @@ def cmd_list(args):
     if not infos:
         print("no trees are registered (kbuildlab init NAME --arch ARCH, or kbuildlab add DIR)")
         return 0
-    head = ["NAME", "ARCH", "KERNEL", "REF", "COMMIT", "BUILT", "GUESTS", "SOURCE"]
+    head = ["NAME", "ARCH", "KERNEL", "REF", "COMMIT HASH", "BUILT", "GUESTS", "SOURCE"]
     table = []
     for d in infos:
         bad = bool(d["problems"])
