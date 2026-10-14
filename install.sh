@@ -6,10 +6,12 @@
 #
 #   ./install.sh                  ~/.local/bin (XDG_BIN_HOME), for this user
 #   ./install.sh --system         /usr/local/bin, for every user who can read
-#                                 this checkout (run with sudo; it only links)
-#   ./install.sh --prefix DIR     DIR/bin
+#                                 this checkout; run it as yourself and it asks
+#                                 sudo for the links only, then records as you
+#   ./install.sh --prefix DIR     DIR/bin (through sudo too when you cannot write it)
+#   ./install.sh --sudo CMD       what asks for root: sudo, else doas, else run0
 #   ./install.sh --alias NAME     also install it as NAME (repeatable), e.g. kbl
-#   ./install.sh --record         only record this checkout (after a --system install)
+#   ./install.sh --record         only record this checkout (after `sudo ./install.sh --system`)
 #   ./install.sh --check | --uninstall
 #
 # Both default directories are on PATH on Debian, Ubuntu, Fedora, RHEL and
@@ -20,7 +22,7 @@
 set -euo pipefail
 REPO="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 NAME=kbuildlab
-MODE=install; WHERE=user; PREFIX=""
+MODE=install; WHERE=user; PREFIX=""; SUDO_CMD=""
 declare -a ALIASES=()
 
 while [[ $# -gt 0 ]]; do
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --system) WHERE=system; shift ;;
         --prefix) WHERE=prefix; PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
         --alias) ALIASES+=("${2:?--alias needs a name}"); shift 2 ;;
+        --sudo) SUDO_CMD="${2:?--sudo needs a command}"; shift 2 ;;
         --record) MODE=record; shift ;;
         --check) MODE=check; shift ;;
         --uninstall) MODE=uninstall; shift ;;
@@ -74,38 +77,94 @@ dangling() { [[ -L "$1" && ! -e "$1" ]]; }
 
 record() { mkdir -p "$(dirname "$POINTER")" && printf '%s\n' "$REPO" > "$POINTER" && ok "recorded in $POINTER"; }
 
+# A link into a directory this user cannot write (--system, or a root-owned
+# --prefix) goes through sudo, asked once before anything changes; the record
+# stays this user's.  Never for ~/.local/bin: a root-owned link there is wrong.
+declare -a ELEVATE=()
+ask_root() {
+    local d="$BIN" cmd
+    [[ "$(id -u)" -ne 0 && "$WHERE" != user ]] || return 0
+    while [[ ! -d "$d" ]]; do d="$(dirname "$d")"; done
+    [[ -w "$d" ]] && return 0
+    if [[ -n "$SUDO_CMD" ]]; then
+        read -ra ELEVATE <<<"$SUDO_CMD"
+    else
+        for cmd in sudo doas run0; do command -v "$cmd" >/dev/null 2>&1 && { ELEVATE=("$cmd"); break; }; done
+    fi
+    if [[ ${#ELEVATE[@]} -eq 0 ]]; then
+        bad "cannot write $d, and none of sudo, doas, run0 is installed; --sudo CMD names another"; exit 1
+    fi
+    command -v "${ELEVATE[0]}" >/dev/null 2>&1 || { bad "--sudo: ${ELEVATE[0]} is not installed"; exit 1; }
+    say root "cannot write $d; asking ${ELEVATE[0]##*/} for the links only"
+    if [[ "${ELEVATE[0]}" == sudo ]]; then
+        "${ELEVATE[@]}" -v || { bad "sudo did not authenticate; nothing was changed"; exit 1; }
+    fi
+}
+as_root() { "${ELEVATE[@]+"${ELEVATE[@]}"}" "$@"; }
+
+# The first directory on the way to this checkout that other users cannot enter.
+reach_block() {
+    local d="$REPO/bin"
+    while [[ "$d" != / && -n "$d" ]]; do
+        [[ "$(stat -c %A "$d" 2>/dev/null)" == *[xt] ]] || { printf '%s\n' "$d"; return 0; }
+        d="$(dirname "$d")"
+    done
+    return 1
+}
+reach_warn() {
+    local blk
+    [[ "$WHERE" != user ]] && blk="$(reach_block)" || return 0
+    bad "other users cannot enter $blk ($(stat -c %A "$blk")), so the link works only for $(stat -c %U "$REPO")"
+}
+
 case "$MODE" in
     record) record ;;
     check)
         for n in "$NAME" "${ALIASES[@]+"${ALIASES[@]}"}"; do
             if mine "$BIN/$n"; then ok "$BIN/$n -> $TARGET"; else bad "$BIN/$n is not this checkout's $NAME"; fi
         done
+        reach_warn
         if [[ -r "$POINTER" && "$(<"$POINTER")" == "$REPO" ]]; then ok "recorded in $POINTER"
         else bad "not recorded in $POINTER"; fi
         path_hint ;;
     uninstall)
+        declare -a links=()
         for n in "$NAME" "${ALIASES[@]+"${ALIASES[@]}"}"; do
-            if mine "$BIN/$n"; then rm -f "$BIN/$n" && ok "removed $BIN/$n"
+            if mine "$BIN/$n"; then links+=("$BIN/$n")
             else say kept "$BIN/$n (not a link to this checkout)"; fi
         done
+        if [[ ${#links[@]} -gt 0 ]]; then
+            ask_root
+            as_root rm -f -- "${links[@]}" || { bad "could not remove the links from $BIN"; exit 1; }
+            for l in "${links[@]}"; do ok "removed $l"; done
+        fi
         if user_scope && [[ -r "$POINTER" && "$(<"$POINTER")" == "$REPO" ]]; then
             rm -f "$POINTER" && ok "removed $POINTER"
         fi ;;
     install)
-        if [[ ! -d "$BIN" ]]; then
-            mkdir -p "$BIN" 2>/dev/null || { bad "cannot create $BIN$([[ $WHERE == system ]] && echo ' -- run with sudo')"; exit 1; }
-        fi
-        [[ -w "$BIN" ]] || { bad "$BIN is not writable$([[ $WHERE == system ]] && echo ' -- run with sudo')"; exit 1; }
+        declare -a links=()
         for n in "$NAME" "${ALIASES[@]+"${ALIASES[@]}"}"; do
+            if mine "$BIN/$n"; then ok "$BIN/$n -> $TARGET"; continue; fi
             if [[ -e "$BIN/$n" && ! -L "$BIN/$n" ]]; then bad "$BIN/$n exists and is not a symlink; skipped"; continue; fi
-            if [[ -L "$BIN/$n" ]] && ! mine "$BIN/$n" && ! dangling "$BIN/$n"; then
+            if [[ -L "$BIN/$n" ]] && ! dangling "$BIN/$n"; then
                 bad "$BIN/$n points at $(readlink -f "$BIN/$n"), another checkout; skipped"; continue
             fi
             dangling "$BIN/$n" && say replaced "$BIN/$n (it pointed at $(readlink "$BIN/$n"), which is gone)"
-            ln -sfn "$TARGET" "$BIN/$n" && ok "$BIN/$n -> $TARGET"
+            links+=("$BIN/$n")
         done
-        if user_scope; then record
-        else say next "as yourself, not root: $REPO/install.sh --record"; fi
-        path_hint
-        printf '  %snext: kbuildlab doctor%s\n' "$D" "$N" ;;
+        if [[ ${#links[@]} -gt 0 ]]; then
+            ask_root
+            # shellcheck disable=SC2016
+            as_root sh -c 't="$1"; shift; mkdir -p "$(dirname "$1")" || exit; for l; do ln -sfn "$t" "$l" || exit; done' \
+                sh "$TARGET" "${links[@]}" || { bad "could not link into $BIN"; exit 1; }
+            for l in "${links[@]}"; do ok "$l -> $TARGET"; done
+        fi
+        reach_warn
+        if user_scope; then
+            record
+            path_hint
+            printf '  %snext: kbuildlab doctor%s\n' "$D" "$N"
+        else
+            say next "as yourself: $REPO/install.sh --record, then kbuildlab doctor"
+        fi ;;
 esac

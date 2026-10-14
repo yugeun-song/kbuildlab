@@ -10,15 +10,18 @@ on another machine a year later. Targets **arm64**, **riscv64** and **x86_64**.
 
 ```sh
 git clone https://github.com/yugeun-song/kbuildlab
-kbuildlab/install.sh          # ~/.local/bin/kbuildlab; --system: /usr/local/bin (sudo)
+kbuildlab/install.sh          # ~/.local/bin/kbuildlab; --system: /usr/local/bin
 kbuildlab doctor              # what is missing, and the package that provides it
 ```
 
 `install.sh` links the command into a directory on `PATH` (`--alias kbl` adds a
 second name) and records the checkout in `~/.config/kbuildlab/root`, so an editor
-started without that `PATH` still finds it. It never edits shell files and
-installs no package: `doctor` names what is missing with the install command for
-Arch, Debian/Ubuntu, Fedora/RHEL, Void and openSUSE.
+started without that `PATH` still finds it. Run as yourself, `--system` asks sudo
+(else doas or run0; `--sudo CMD` names another) for the link into `/usr/local/bin`
+alone and records the checkout as you; another user can follow that link only if
+they can enter the checkout. It never edits shell files and installs no package:
+`doctor` names what is missing with the install command for Arch, Debian/Ubuntu,
+Fedora/RHEL, Void and openSUSE.
 
 **Assumed:** Linux with `/proc`, bash 4.4, GNU coreutils, Python 3.12, git, one of
 podman/docker/nerdctl, QEMU for each target (8.0 for riscv64's paging properties,
