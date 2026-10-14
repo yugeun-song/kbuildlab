@@ -284,9 +284,9 @@ def cmd_list(args):
     return 0
 
 
-def _tree_line(prefix, last, key, value):
+def _tree_line(prefix, last, key, value, width):
     branch = ("└─ " if last else "├─ ") if _utf8() else ("`- " if last else "|- ")
-    return "%s%s%s %s" % (prefix, c("2", branch), c("36", key.ljust(9)), value)
+    return "%s%s%s %s" % (prefix, c("2", branch), c("36", key.ljust(width)), value)
 
 
 def cmd_inspect(args):
@@ -322,7 +322,7 @@ def cmd_inspect(args):
         ("kernel", "%s%s" % (d["version"] or "-", ("  release " + d["release"]) if d["release"] else "")),
         ("arch", d["arch"] or "-"),
         ("source", d["src"] or "-"),
-        ("commit", "%s  %s" % (d["commit"] or "-", git)),
+        ("commit hash", "%s  %s" % (d["commit"] or "-", git)),
         ("tracks", "%s (%s)%s" % (d["ref"] or "-", d["upstream"],
                                   ("  origin " + d["origin"]) if d.get("origin") else "")),
         ("built", "%s%s" % (d["built"] or "no vmlinux", ("  " + d["compiler"]) if d["compiler"] else "")),
@@ -336,8 +336,9 @@ def cmd_inspect(args):
             for g in d["guests"])))
     else:
         rows.append(("guests", "none running"))
+    width = max(len(k) for k, _ in rows) + 3
     for i, (k, v) in enumerate(rows):
-        print(_tree_line("", i == len(rows) - 1, k, v))
+        print(_tree_line("", i == len(rows) - 1, k, v, width))
     return 0
 
 
