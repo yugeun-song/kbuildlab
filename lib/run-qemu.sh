@@ -201,6 +201,19 @@ _claim_port() {
         _try
     ) 9>>"$_statedir/kbl-claim.lock"
 }
+_claim_aux() {   # _claim_aux KIND PORT
+    local f="$_statedir/kbl-$1-$2.claim"
+    _try_aux() { ( set -o noclobber
+                   printf 'KBL_LAUNCHER_PID=%s\nKBL_LAUNCHER_START=%s\n' "$$" "$(kbl_proc_starttime $$ || echo)" > "$f" ) 2>/dev/null; }
+    if _try_aux || ( flock -w 10 9 || exit 1
+                     kbl_launcher_alive "$f" && exit 1
+                     rm -f "$f" 2>/dev/null
+                     _try_aux ) 9>>"$_statedir/kbl-claim.lock"; then
+        _claims+=("$f")
+        return 0
+    fi
+    return 1
+}
 # Prune per-run scratch whose guest is gone.  The rule (a live qemu carries that
 # gdb port, AND something is listening on it) lives in common.sh so `attach`
 # applies exactly the same one -- a port that an unrelated process has taken must
@@ -241,7 +254,7 @@ _state="$_statedir/kbl-run-${PORT}.env"
 _loadaddr=""   # set by a firmware chain below; recorded with the rest of the state
 shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""; _ird=""   # per-run scratch
 qmpsock=""                                                 # QMP unix socket, same
-wsock=""; _wpid=""
+wsock=""; _wpid=""; _claims=()
 
 # The terminal `-nographic` is about to put into raw mode, saved here so it can be
 # put back.  qemu restores it itself when it exits normally and cannot restore it
@@ -292,7 +305,7 @@ _cleanup() {
     fi
     rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} ${_ird:+"$_ird"} \
           ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"} \
-          ${wsock:+"$wsock"}
+          ${wsock:+"$wsock"} ${_claims[@]+"${_claims[@]}"}
     # Last, and only once the guest that owns the terminal is gone.  A no-op on
     # every path where qemu put it back itself, and the difference between a
     # usable shell and an apparently dead one where it did not.
@@ -371,7 +384,8 @@ if [[ "$PERSIST" == 1 ]]; then
     _psize="$(kbl_tree_get "$tree" PERSIST_SIZE)"; _psize="${_psize:-2G}"
     if ! mkdir -p "$(dirname "$persist_disk")" 2>/dev/null; then
         say "persist      cannot create $(dirname "$persist_disk") -- booting without /persist"
-    elif _persist_busy "$persist_disk"; then
+    elif _persist_busy "$persist_disk" \
+         || ! _claim_aux persist "$(printf '%s' "$persist_disk" | sha1sum | cut -c1-16)"; then
         say "persist      $persist_disk is in use by another run -- booting without /persist"
     else
         _pfresh=0
@@ -668,12 +682,16 @@ fi
 # (nvim scp://root@localhost:<sshport>//path, password "root").
 if [[ $NET -eq 1 ]]; then
     [[ -n "$SSHPORT" ]] || SSHPORT="$(kbl_tree_get "$tree" SSH_PORT)"; SSHPORT="${SSHPORT:-2222}"
-    if _busy "$SSHPORT"; then
-        if [[ $SSHPORT_SET -eq 1 ]]; then
-            die "ssh port $SSHPORT is in use (you asked for it); pick another with --ssh-port"
-        fi
+    if [[ $SSHPORT_SET -eq 1 ]]; then
+        { ! _busy "$SSHPORT" && _claim_aux ssh "$SSHPORT"; } \
+            || die "ssh port $SSHPORT is in use (you asked for it); pick another with --ssh-port"
+    else
         _so="$SSHPORT"; SSHPORT=""
-        for _p in $(seq $((_so + 1)) $((_so + 128))); do _busy "$_p" || { SSHPORT="$_p"; break; }; done
+        for _p in "$_so" $(seq $((_so + 1)) $((_so + 128))); do
+            _busy "$_p" && continue
+            _claim_aux ssh "$_p" || continue
+            SSHPORT="$_p"; break
+        done
         [[ -n "$SSHPORT" ]] || die "no free ssh-forward port near $_so"
     fi
     # virtio NIC transport: PCIe on x86 (pc) and arm64 (virt); MMIO on riscv,
@@ -729,14 +747,18 @@ if [[ $QMP -eq 1 ]]; then
     [[ -n "$QMPPORT" ]] || die "no qmp port: state QMP_PORT in $tree/tree.conf, pass
        --qmp-port, or run with --no-qmp (which also drops the vmcoreinfo device
        and leaves drgn no way in)"
-    if _busy "$QMPPORT"; then
-        if [[ $QMPPORT_SET -eq 1 ]]; then
-            die "qmp port $QMPPORT is in use (you asked for it); pick another with --qmp-port"
-        fi
+    if [[ $QMPPORT_SET -eq 1 ]]; then
+        { ! _busy "$QMPPORT" && _claim_aux qmp "$QMPPORT"; } \
+            || die "qmp port $QMPPORT is in use (you asked for it); pick another with --qmp-port"
+    else
         _qo="$QMPPORT"; QMPPORT=""
-        for _p in $(seq $((_qo + 1)) $((_qo + 128))); do _busy "$_p" || { QMPPORT="$_p"; break; } done
+        for _p in "$_qo" $(seq $((_qo + 1)) $((_qo + 128))); do
+            _busy "$_p" && continue
+            _claim_aux qmp "$_p" || continue
+            QMPPORT="$_p"; break
+        done
         [[ -n "$QMPPORT" ]] || die "no free qmp port in $_qo..$((_qo + 128))"
-        say "qmp          $_qo busy -> using $QMPPORT"
+        [[ "$QMPPORT" == "$_qo" ]] || say "qmp          $_qo busy -> using $QMPPORT"
     fi
     qmpsock="$_statedir/kbl-qmp-${PORT}.sock"
     rm -f "$qmpsock"

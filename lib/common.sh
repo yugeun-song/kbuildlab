@@ -725,6 +725,10 @@ kbl_prune_state() {
         kbl_launcher_alive "$sd/kbl-run-${fp}.env" && continue
         rm -f "$f"
     done
+    for f in "$sd"/kbl-ssh-*.claim "$sd"/kbl-qmp-*.claim "$sd"/kbl-persist-*.claim; do
+        [[ -e "$f" ]] || continue
+        kbl_launcher_alive "$f" || rm -f "$f"
+    done
 }
 
 # --- which guest ------------------------------------------------------------
