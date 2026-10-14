@@ -441,7 +441,8 @@ it applies only when that is what the port runs, and x86 KASLR takes it back.
 Per-machine settings stay out of the repo: `~/.config/kbuildlab/workspace` (from
 `init --workspace`, overridden by `$KBL_WORKSPACE`) and `KBL_*` variables
 (`KBL_CONTAINER`, `KBL_IMAGE`, `KBL_JOBS`, `KBL_GDB`, ...) in a file your shell
-sources. `sync` clones with `--depth 1` unless `KBL_FULL_HISTORY=1`, borrowing from
+sources, such as `~/.config/kbuildlab/env`. That file is for settings, not
+secrets: the shell exports them to every program it starts. `sync` clones with `--depth 1` unless `KBL_FULL_HISTORY=1`, borrowing from
 `KBL_MIRROR` when one is named.
 
 ## The debuggability preset
