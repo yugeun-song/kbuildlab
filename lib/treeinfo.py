@@ -13,6 +13,7 @@ as its first 12 or as many more as it takes to differ from every other tree.
 The registry, data and state directories come from the environment kbuildlab
 sets (KBL_TREES, KBL_DATA_HOME, KBL_STATE_DIR)."""
 
+import concurrent.futures
 import json
 import os
 import re
@@ -218,7 +219,7 @@ def basic(tid, every=None):
             "problems": []}
 
 
-def info(tid, live=None, deep=False, every=None):
+def info(tid, live=None, deep=False, every=None, describe=True):
     d = basic(tid, every)
     tdir, src = d["config"], d["src"] or ""
     arch = d["arch"]
@@ -237,9 +238,10 @@ def info(tid, live=None, deep=False, every=None):
     d["version"] = makefile_version(src) if is_src else None
     d["release"] = _read(os.path.join(src, "include/config/kernel.release")) if is_src else None
     git = is_src and os.path.exists(os.path.join(src, ".git"))
-    d["commit"] = _git(src, "rev-parse", "HEAD") if git else None
-    d["describe"] = _git(src, "describe", "--tags", "--always") if git else None
-    d["branch"] = _git(src, "rev-parse", "--abbrev-ref", "HEAD") if git else None
+    heads = (_git(src, "rev-parse", "HEAD", "--abbrev-ref", "HEAD") or "").splitlines() if git else []
+    d["commit"] = heads[0] if len(heads) == 2 else None
+    d["branch"] = heads[1] if len(heads) == 2 else None
+    d["describe"] = _git(src, "describe", "--tags", "--always") if git and describe else None
     vm = os.path.join(src, "vmlinux") if is_src else None
     try:
         d["built"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(vm))) if vm else None
@@ -267,7 +269,9 @@ def cmd_list(args):
         print("\n".join(label(t, rows) for t in rows))
         return 0
     live = guests()
-    infos = [info(t, live, every=rows) for t in rows]
+    full = "--json" in args
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(16, len(rows)))) as pool:
+        infos = list(pool.map(lambda t: info(t, live, every=rows, describe=full), rows))
     if "--json" in args:
         json.dump(infos, sys.stdout, indent=1)
         print()
