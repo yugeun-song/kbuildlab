@@ -66,7 +66,7 @@ the current directory belongs to, else the only one. `rm`, `mv` and `rename` tak
 a name only.
 
 ```
-kbuildlab trees [-q|--json]          NAME ARCH KERNEL REF COMMIT HASH BUILT GUESTS SOURCE
+kbuildlab trees [-q|--json|--narrow]        NAME ARCH KERNEL REF COMMIT HASH BUILT GUESTS SOURCE
 kbuildlab inspect TREE [--json|--format KEY]
 kbuildlab add DIR [--name N] [--arch A]     register a source you have (arch from .config)
 kbuildlab get|set|unset TREE KEY...         read or write tree.conf keys; edit opens it
@@ -78,12 +78,14 @@ kbuildlab migrate                           trees that still keep tree.conf besi
 ```
 
 The kernel version, commit, build time and running guests are read from the tree
-and the host each time, never stored. `rm`, `mv` and `rename` refuse while a guest
-of the tree runs; `rm --purge` asks first (`--yes` for scripts). `SRC` is stored
-as an absolute path (`set SRC=~/linux` expands it). A name whose data directory a
-removed tree left behind is refused until `prune` or you remove it. `prune` keeps
-a tree whose source's parent is missing too (a drive not mounted) or that was
-never built or run, and never deletes a data directory holding a persistent disk.
+and the host each time, never stored. `trees --narrow` prints each tree as a short
+block instead of a table row, for a terminal narrower than the table. `rm`, `mv`
+and `rename` refuse while a guest of the tree runs; `rm --purge` asks first
+(`--yes` for scripts). `SRC` is stored as an absolute path (`set SRC=~/linux`
+expands it). A name whose data directory a removed tree left behind is refused
+until `prune` or you remove it. `prune` keeps a tree whose source's parent is
+missing too (a drive not mounted) or that was never built or run, and never
+deletes a data directory holding a persistent disk.
 
 ### The lab/ record
 

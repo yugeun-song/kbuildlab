@@ -4,7 +4,7 @@ every time: the registry holds only tree.conf, and everything else -- the
 kernel version, the commit, whether it is built, which guests run it -- is a
 fact of the tree or of the host, so it is looked up rather than remembered.
 
-    treeinfo.py list    [--json] [-q]
+    treeinfo.py list    [--json] [-q] [--narrow]
     treeinfo.py inspect NAME [--json] [--format KEY]
 
 The registry, data and state directories come from the environment kbuildlab
@@ -254,6 +254,9 @@ def cmd_list(args):
     if not infos:
         print("no trees are registered (kbuildlab init NAME --arch ARCH, or kbuildlab add DIR)")
         return 0
+    if "--narrow" in args:
+        _list_blocks(infos)
+        return 0
     head = ["NAME", "ARCH", "KERNEL", "REF", "COMMIT HASH", "BUILT", "GUESTS", "SOURCE"]
     table = []
     for d in infos:
@@ -278,10 +281,40 @@ def cmd_list(args):
                 cell = c("36", cell)
             cells.append(cell)
         print("  ".join(cells))
+    _problems(infos)
+    return 0
+
+
+def _problems(infos):
     for d in infos:
         for p in d["problems"]:
             print(c("31", "%s %s: %s" % (NO, d["name"], p)))
-    return 0
+
+
+def _home(path):
+    home = os.path.expanduser("~")
+    if path and home != "/" and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
+def _list_blocks(infos):
+    for d in infos:
+        print("  ".join([c("1;31" if d["problems"] else "1", d["name"]), d["arch"] or "?",
+                         d["release"] or d["version"] or "-"]))
+        built = c("32", d["built"]) if d["built"] else c("2", "-")
+        if d["guests"]:
+            built += "  " + c("33", "guests %d" % len(d["guests"]))
+        head = ([c("36", d["commit"][:12])] if d["commit"] else []) + ([d["ref"]] if d["ref"] else [])
+        rows = [
+            ("commit hash", "  ".join(head) or "-"),
+            ("built", built),
+            ("source", _home(d["src"]) or "-"),
+        ]
+        width = max(len(k) for k, _ in rows) + 1
+        for i, (k, v) in enumerate(rows):
+            print(_tree_line("", i == len(rows) - 1, k, v, width))
+    _problems(infos)
 
 
 def _tree_line(prefix, last, key, value, width):

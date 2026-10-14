@@ -29,8 +29,9 @@ usage() {
 kbuildlab -- register, build, boot and debug Linux kernel trees
 
 Trees (any directory, any time):
-  kbuildlab trees [-q|--json]               every registered tree: kernel, commit,
-                                            build state, running guests, source
+  kbuildlab trees [-q|--json|--narrow]      every registered tree: kernel, commit,
+                                            build state, running guests, source;
+                                            --narrow prints one block per tree
   kbuildlab inspect TREE [--json|--format K]  everything known about one tree
   kbuildlab add DIR [--name N] [--arch A]   register a kernel source you already have
   kbuildlab init NAME --arch ARCH [--version V] [--src DIR]

@@ -159,11 +159,15 @@ _kbl_new_conf() {   # _kbl_new_conf FILE NAME ARCH VERSION SRC
 }
 
 cmd_trees() {
-    case "${1:-}" in
-        ""|ls|list) shift || true; _treeinfo list "$@" ;;
-        -q|--json) _treeinfo list "$@" ;;
-        *) die "trees: unknown option '$1' (trees [-q|--json])" ;;
-    esac
+    [[ "${1:-}" == ls || "${1:-}" == list ]] && shift
+    local a
+    for a in "$@"; do
+        case "$a" in
+            -q|--json|--narrow) ;;
+            *) die "trees: unknown option '$a' (trees [-q|--json|--narrow])" ;;
+        esac
+    done
+    _treeinfo list "$@"
 }
 
 cmd_inspect() {
