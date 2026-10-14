@@ -123,6 +123,7 @@ import time
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import kbuildinfo
 import inactive_regions
 import treeinfo
@@ -1591,7 +1592,7 @@ def read_user_config() -> str:
 
 
 WORKSPACE_FRAGMENT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                  os.pardir, "presets", "clangd", "workspace.yaml")
+                                  os.pardir, os.pardir, "presets", "clangd", "workspace.yaml")
 
 
 def write_workspace_block(workspace: str) -> None:

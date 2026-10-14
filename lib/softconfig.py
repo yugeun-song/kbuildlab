@@ -25,7 +25,7 @@ import shlex
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "index"))
 import kbuildinfo  # noqa: E402
 
 _SET = re.compile(r"^CONFIG_(\w+)=(.*)$")

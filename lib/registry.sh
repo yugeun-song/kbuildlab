@@ -259,7 +259,7 @@ cmd_rm() {
     ok "unregistered $name"
     local cache="${XDG_CACHE_HOME:-$HOME/.cache}/kbuildlab"
     if [[ $purge -eq 1 ]]; then
-        python3 "${KBL_REPO}/lib/clangd.py" drop "$name" >/dev/null 2>&1 || true
+        python3 "${KBL_REPO}/lib/index/clangd.py" drop "$name" >/dev/null 2>&1 || true
         if rm -rf -- "$data" "$cache/clangd/$name" "$cache/view/$name"; then ok "deleted its data and indexes"
         else bad "could not delete all of $data and its indexes"; rc=1; fi
         if rm -rf -- "$src"; then ok "deleted $src"
@@ -318,7 +318,7 @@ cmd_rename() {
         [[ -e "$d/$old" ]] || continue
         mv -T -- "$d/$old" "$d/$new" || warn "rename: could not move $d/$old to $d/$new"
     done
-    python3 "${KBL_REPO}/lib/clangd.py" drop "$old" >/dev/null 2>&1 || true
+    python3 "${KBL_REPO}/lib/index/clangd.py" drop "$old" >/dev/null 2>&1 || true
     ok "renamed $old -> $new"
     say "next         kbuildlab tags $new   (clangd's config names trees by name)"
 }

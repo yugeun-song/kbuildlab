@@ -34,7 +34,7 @@ Two headers are worth intercepting:
   asm-generic/sections.h  the linker-defined symbols, annotated from the
                           architecture's vmlinux.lds.S
 
-Used by setup-clangd.py; runnable on its own to inspect what was extracted:
+Used by clangd.py; runnable on its own to inspect what was extracted:
     ./kbuildinfo.py <kernel-dir> [symbol ...]
 """
 

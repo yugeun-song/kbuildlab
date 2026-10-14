@@ -12,7 +12,7 @@ import tempfile
 
 here = os.path.dirname(os.path.abspath(__file__))
 repo = os.path.dirname(here)
-sys.path.insert(0, os.path.join(repo, "lib"))
+sys.path.insert(0, os.path.join(repo, "lib", "index"))
 import clangd  # noqa: E402
 
 failed = 0

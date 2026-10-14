@@ -47,7 +47,7 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
     if [[ "$phase" != warm ]]; then
         say "indexing     clangd (compile_commands.json, out of tree)"
-        python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" "${wsopt[@]+"${wsopt[@]}"}" "${peers[@]}" \
+        python3 "${KBL_REPO}/lib/index/clangd.py" --tree "$tree" "${wsopt[@]+"${wsopt[@]}"}" "${peers[@]}" \
             --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force "${jobs[@]+"${jobs[@]}"}" \
             || { warn "clangd index failed"; return 1; }
     fi
@@ -66,7 +66,7 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     # already the slow command, and the wait is visible and interruptible.
     [[ "${KBL_CLANGD_WARM:-1}" == "0" ]] && { say "clangd       index left cold (KBL_CLANGD_WARM=0)"; return 0; }
     say "indexing     clangd background index"
-    python3 "${KBL_REPO}/lib/clangd.py" --tree "$tree" warm "${jobs[@]+"${jobs[@]}"}" \
+    python3 "${KBL_REPO}/lib/index/clangd.py" --tree "$tree" warm "${jobs[@]+"${jobs[@]}"}" \
         || warn "clangd index warming did not finish (the editor will resume it)"
 }
 
@@ -105,7 +105,7 @@ _index_plain() {   # _index_plain TREE
     arch="$(kbl_tree_arch "$tree")" || exit 1; karch="$(_karch "$arch")"
     src="$(kbl_tree_src "$tree")" || exit 1
     if command -v python3 >/dev/null 2>&1; then
-        python3 "${KBL_REPO}/lib/tagview.py" --tree "$tree" --view "$(_view_dir "$tree")" forget \
+        python3 "${KBL_REPO}/lib/index/tagview.py" --tree "$tree" --view "$(_view_dir "$tree")" forget \
             || die "cannot remove the view's indexes"
     fi
     local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
@@ -144,12 +144,12 @@ _index_tree() {   # _index_tree TREE
        && { ln -f "$src/tags" "$st/tags.prev" 2>/dev/null || cp --reflink=auto "$src/tags" "$st/tags.prev"; }; then
         mode=merge
     fi
-    local -a py=(python3 "${KBL_REPO}/lib/tagview.py" --tree "$tree" --view "$view")
+    local -a py=(python3 "${KBL_REPO}/lib/index/tagview.py" --tree "$tree" --view "$view")
     "${py[@]}" harvest --drop || die "cannot clear $up"
     _container_run "$src" -v "$src:$src:O,upperdir=$up,workdir=$wk" -v "$st:$st" -e "KBL_TAGS_STATE=$st" || exit 1
     local -a over=("${_KBL_RUN[@]}")
     say "indexing     the sources scripts/tags.sh lists for $karch"
-    "${over[@]}" bash -c "PATH=${KBL_REPO}/lib/ctags-shim:\$PATH; exec make ARCH=$karch tags" >/dev/null \
+    "${over[@]}" bash -c "PATH=${KBL_REPO}/lib/index/ctags-shim:\$PATH; exec make ARCH=$karch tags" >/dev/null \
         || die "scripts/tags.sh could not list the sources of $name"
     [[ -s "$st/keys" ]] || die "scripts/tags.sh ran no ctags in $_KBL_ACTIVE_IMAGE; is ctags installed there?"
     "${py[@]}" harvest --drop || die "cannot clear $up"
@@ -166,7 +166,7 @@ _index_tree() {   # _index_tree TREE
     [[ $rc -eq 0 ]] || die "the view of $name could not be built"
     say "indexing     ctags ($mode), cscope and gtags over that view"
     "${py[@]}" stage || die "cannot stage the indexes of $name in $up"
-    "${over[@]}" bash "${KBL_REPO}/lib/tags-index.sh" "$karch" "$mode"; rc=$?
+    "${over[@]}" bash "${KBL_REPO}/lib/index/tags-index.sh" "$karch" "$mode"; rc=$?
     # 1 means an indexer failed and tags-index.sh withdrew what it wrote; any other
     # failure is the script's own, and nothing it left is trusted.
     if [[ $rc -le 1 ]]; then

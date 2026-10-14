@@ -73,8 +73,9 @@ SRC=@SRC@
 # Every line here is read as  ^\s* KEY \s*=\s* VALUE , with a trailing # comment
 # and trailing space stripped and one layer of surrounding double quotes removed.
 # Every reader uses exactly that grammar (kbuildlab's kbl_tree_get and its
-# GDBTOOLS_ passthrough, lib/treeinfo.py and lib/clangd.py), so a line that
-# works in one works in all of them.  `kbuildlab set NAME KEY=VALUE` writes it.
+# GDBTOOLS_ passthrough, lib/treeinfo.py and lib/index/clangd.py), so a line
+# that works in one works in all of them.  `kbuildlab set NAME KEY=VALUE`
+# writes it.
 
 # --- the guest's own command line --------------------------------------------
 # Words appended to the kernel command line, in every boot mode: -append for a

@@ -187,16 +187,16 @@ kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
 KBL_CLANGD=0 / KBL_CLANGD_WARM=0        the same two, from the environment
 KBL_CLANGD_JOBS=N                       cap the parallel work of both steps
 
-python3 lib/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
+python3 lib/index/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
 ```
 
-`lib/clangd.py` can also report what an editor would see: `check` runs a real
+`lib/index/clangd.py` can also report what an editor would see: `check` runs a real
 clangd session (one `didOpen` per file, counting diagnostics) and `regions`
 verifies clangd's inactive `#if` shading against the build.
 
 ```sh
-python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 --journal /tmp/scan --resume
-python3 lib/clangd.py --tree ~/kernels/arm64-v6.12 regions --all -S 60
+python3 lib/index/clangd.py --tree ~/kernels/arm64-v6.12 check --all -j 3 --journal /tmp/scan --resume
+python3 lib/index/clangd.py --tree ~/kernels/arm64-v6.12 regions --all -S 60
 ```
 
 Both steps are incremental, keyed on the command, the code, clangd, the config and
@@ -424,8 +424,8 @@ it is measured, not assumed.
 **Grammar.** `KEY`, optional blanks, `=`, optional blanks, the value; the first
 line for a key wins; a value that opens with `"` runs to the next `"`, any other
 ends at the first `#` with trailing blanks dropped. `kbl_tree_get` in
-`lib/common.sh` is the reference, `lib/treeinfo.py` and `lib/clangd.py` read it the
-same way, and `tests/tree-conf.py` checks them against `tests/tree-conf-vectors.json`.
+`lib/common.sh` is the reference, `lib/treeinfo.py` and `lib/index/clangd.py` read it
+the same way, and `tests/tree-conf.py` checks them against `tests/tree-conf-vectors.json`.
 
 Every `GDBTOOLS_*` line is handed to gdb verbatim and wins over what `attach`
 states, except `GDBTOOLS_ENTRY_PA`, which describes the tree's DEFAULT boot mode:
