@@ -96,11 +96,15 @@ Run and debug:
 Host:
   kbuildlab doctor                          what is installed, and what is missing
   kbuildlab containers [status|clean]       what the container runtime holds
+  kbuildlab help COMMAND                    one command's options (COMMAND --help
+                                            says the same)
 
 ARCH is one of: arm64, riscv64, x86_64.
 TREE is a registered name, or a path inside a registered source (or the
 directory holding one); omitted, it is the tree the current directory belongs
 to, else the only one registered.  rm, mv and rename take a name only.
+Tab completes commands, options, trees and live guests' ports once install.sh
+has put the bash and zsh completions in place.
 USAGE
 }
 
@@ -110,11 +114,36 @@ cmd_attach() { exec "${KBL_REPO}/lib/run-gdb.sh" "$@"; }
 cmd_drgn()   { exec "${KBL_REPO}/lib/run-drgn.sh" "$@"; }
 cmd_resume() { exec "${KBL_REPO}/lib/resume.sh" "$@"; }
 
+# ---------------------------------------------------------------- help
+# One command's options come from lib/cli.py, which the shell completions also
+# read; run, attach, drgn and resume print their own.  -h or --help anywhere
+# before a `--` asks for it, so a half-typed command answers instead of running.
+_kbl_cli() { python3 "${KBL_REPO}/lib/cli.py" "$@"; }
+_kbl_wants_help() {
+    local a
+    for a in "$@"; do
+        [[ "$a" == -- ]] && return 1
+        [[ "$a" == -h || "$a" == --help ]] && return 0
+    done
+    return 1
+}
+cmd_help() {
+    [[ $# -gt 0 ]] || { usage; return 0; }
+    case "$1" in
+        run|attach|drgn|resume) "cmd_$1" --help ;;
+        *) _kbl_cli help "$1" ;;
+    esac
+}
+
 # ---------------------------------------------------------------- dispatch
 # Braced and ended with exit, so bash has read all of it before running any:
 # editing this file during a long update cannot change what runs after it.
 {
 cmd="${1:-help}"; shift || true
+case "$cmd" in
+    run|attach|drgn|resume|help|-h|--help|__complete) ;;
+    *) if _kbl_wants_help "$@"; then _kbl_cli help "$cmd"; exit; fi ;;
+esac
 case "$cmd" in
     init)   cmd_init "$@" ;;
     image)  cmd_image "$@" ;;
@@ -141,7 +170,8 @@ case "$cmd" in
     migrate) cmd_migrate "$@" ;;
     containers) cmd_containers "$@" ;;
     doctor) cmd_doctor ;;
-    help|-h|--help) usage ;;
+    help|-h|--help) cmd_help "$@" ;;
+    __complete) _kbl_cli complete "$@" ;;
     *) echo "kbuildlab: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
 esac
 exit

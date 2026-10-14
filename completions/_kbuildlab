@@ -1,0 +1,48 @@
+#compdef kbuildlab
+# zsh completion for kbuildlab.  It asks kbuildlab itself (`kbuildlab __complete`,
+# lib/cli.py) what may come next, so the candidates follow the checkout: commands,
+# options, registered trees, tree.conf keys and the ports of live guests.
+
+_kbuildlab() {
+    local -a reply cmds opts trees keys vals
+    local line tag rest value desc dirs=0 files=0 nospace=0 msg= ret=1
+    reply=("${(@f)$("${words[1]}" __complete "${(@)words[2,CURRENT]}" 2>/dev/null)}")
+    for line in $reply; do
+        tag=${line%%$'\t'*}
+        rest=${line#*$'\t'}
+        case $tag in
+            @dirs) dirs=1; continue ;;
+            @files) files=1; continue ;;
+            @nospace) nospace=1; continue ;;
+            @message) msg=$rest; continue ;;
+            '') continue ;;
+        esac
+        value=${${rest%%$'\t'*}//:/\\:}
+        desc=${rest#*$'\t'}
+        [[ -n $desc ]] && value+=":$desc"
+        case $tag in
+            command) cmds+=("$value") ;;
+            option) opts+=("$value") ;;
+            tree) trees+=("$value") ;;
+            key) keys+=("$value") ;;
+            *) vals+=("$value") ;;
+        esac
+    done
+    (( $#cmds )) && _describe -t commands 'command' cmds && ret=0
+    (( $#trees )) && _describe -t trees 'tree' trees && ret=0
+    (( $#vals )) && _describe -t values 'value' vals && ret=0
+    if (( $#keys )); then
+        if (( nospace )); then
+            _describe -t keys 'key' keys -S '' && ret=0
+        else
+            _describe -t keys 'key' keys && ret=0
+        fi
+    fi
+    (( dirs )) && _files -/ && ret=0
+    (( files )) && _files && ret=0
+    (( $#opts )) && _describe -t options 'option' opts && ret=0
+    [[ -n $msg ]] && _message -r "$msg"
+    return ret
+}
+
+_kbuildlab "$@"

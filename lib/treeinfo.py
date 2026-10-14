@@ -162,7 +162,8 @@ def guests():
             "port": int(st["KBL_GDB_PORT"]) if st.get("KBL_GDB_PORT", "").isdigit() else None,
             "pid": int(pid), "boot": st.get("KBL_BOOT") or None,
             "frozen": st.get("KBL_FROZEN") == "1",
-            "ssh": int(st["KBL_SSH_PORT"]) if st.get("KBL_SSH_PORT", "").isdigit() else None})
+            "ssh": int(st["KBL_SSH_PORT"]) if st.get("KBL_SSH_PORT", "").isdigit() else None,
+            "qmp": int(st["KBL_QMP_PORT"]) if st.get("KBL_QMP_PORT", "").isdigit() else None})
     return out
 
 

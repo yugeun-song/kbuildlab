@@ -291,7 +291,6 @@ _containers_clean() {
         case "$a" in
             --images)   drop_images=1 ;;
             --dangling) drop_dangling=1 ;;
-            -h|--help)  echo "kbuildlab containers clean [--images] [--dangling]"; return 0 ;;
             *) die "containers clean: unknown option '$a' (known: --images, --dangling)" ;;
         esac
     done
@@ -346,7 +345,6 @@ cmd_containers() {
     case "${1:-status}" in
         status|"") shift || true; _containers_status "$@" ;;
         clean)     shift;         _containers_clean  "$@" ;;
-        -h|--help) echo "kbuildlab containers [status|clean] -- see 'kbuildlab help'" ;;
         *) die "containers: unknown subcommand '$1' (known: status, clean)" ;;
     esac
 }
