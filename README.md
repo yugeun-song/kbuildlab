@@ -15,13 +15,16 @@ kbuildlab doctor              # what is missing, and the package that provides i
 ```
 
 `install.sh` links the command into a directory on `PATH` (`--alias kbl` adds a
-second name) and records the checkout in `~/.config/kbuildlab/root`, so an editor
-started without that `PATH` still finds it. Run as yourself, `--system` asks sudo
-(else doas or run0; `--sudo CMD` names another) for the link into `/usr/local/bin`
-alone and records the checkout as you; another user can follow that link only if
-they can enter the checkout. It never edits shell files and installs no package:
-`doctor` names what is missing with the install command for Arch, Debian/Ubuntu,
-Fedora/RHEL, Void and openSUSE.
+second name), puts its bash and zsh completions where bash-completion and zsh
+look, and records the checkout in `~/.config/kbuildlab/root`, so an editor started
+without that `PATH` still finds it. Run as yourself, `--system` asks sudo (else
+doas or run0; `--sudo CMD` names another) for the links under `/usr/local` alone
+and records the checkout as you; another user can follow those links only if they
+can enter the checkout. zsh reads a user's completions from
+`~/.local/share/zsh/site-functions` only once that is on `$fpath`, and
+`install.sh` says how when it is not. It never edits shell files and installs no
+package: `doctor` names what is missing with the install command for Arch,
+Debian/Ubuntu, Fedora/RHEL, Void and openSUSE.
 
 **Assumed:** Linux with `/proc`, bash 4.4, GNU coreutils, Python 3.12, git, one of
 podman/docker/nerdctl, QEMU for each target (8.0 for riscv64's paging properties,
@@ -50,6 +53,10 @@ of what changed and of any preset line the newer source dropped, repairing
 neither), rebuilds incrementally with the modules, and refreshes ctags, cscope,
 gtags and clangd (`--no-tags`, `--no-clangd`, `--no-warm`). Each tree runs on its
 own, and a table at the end says which stages passed.
+
+`kbuildlab help COMMAND`, or `COMMAND --help`, prints one command's options. Tab
+lists what may come next: commands, options and their values, registered trees,
+`tree.conf` keys and the ports of live guests.
 
 ## Trees
 
@@ -619,6 +626,27 @@ than assumed:
 images and nothing else; `--images` also drops the images kbuildlab built;
 `--dangling` additionally removes every untagged image on the host (not only
 kbuildlab's). Nothing here prunes the runtime wholesale.
+
+## Layout
+
+```
+bin/kbuildlab          globals, usage and dispatch
+lib/common.sh          shared helpers: paths, tree resolution, run state, output
+lib/registry.sh        trees, inspect, add, get/set/unset, edit, mv, rename, rm,
+                       prune, migrate (lib/treeinfo.py reads what they report)
+lib/build.sh           the build container and its toolchain; sync, config, build,
+                       module staging (lib/softconfig.py applies the soft preset)
+lib/lab.sh             init and the lab/ records
+lib/tags.sh            tags: ctags, cscope, gtags and the clangd index
+lib/update.sh          update
+lib/host.sh            doctor, image, containers
+lib/run-qemu.sh        run; run-gdb.sh, run-drgn.sh and resume.sh are attach, drgn
+                       and resume, each a program of its own (lib/qmp.py talks QMP)
+lib/cli.py             every command's options, for --help and Tab completion
+lib/index/             the indexers: clangd.py, the tag view, the build readers
+completions/           the bash and zsh completions install.sh puts in place
+tests/                 tree.conf grammar and cli.py against the parsers
+```
 
 ## Dependencies
 
