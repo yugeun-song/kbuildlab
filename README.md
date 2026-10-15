@@ -134,7 +134,9 @@ file records is replayed with `-fdirectives-only`, a line no unit compiled is
 blanked and a file no unit read is emptied (line numbers kept). The copies live in
 `$XDG_CACHE_HOME/kbuildlab/view/<tree>/`; podman overlays them on the tree so the
 kernel's own `make tags cscope gtags` run unchanged, and the finished indexes move
-into the tree. cscope and gtags stay incremental; ctags is merged. Other runtimes
+into the tree. cscope and gtags stay incremental; ctags is merged into the old
+`tags`, or built afresh when that file was made in another directory (a moved
+tree) or by another ctags. Other runtimes
 have no overlay volumes and index the tree as it is on disk, as `KBL_TAGS_VIEW=0`
 does.
 

@@ -7,6 +7,9 @@ new=$d/tags.new
 [[ -s $prev ]] || { echo "tags-merge: no $prev" >&2; exit 1; }
 [[ -s $d/keys ]] || { echo "tags-merge: the shim recorded no ctags run" >&2; exit 1; }
 compgen -G "$d/files.*" >/dev/null || { echo "tags-merge: the shim recorded no file" >&2; exit 1; }
+origin() { LC_ALL=C awk -F'\t' '$1 == "!_TAG_PROC_CWD" || $1 == "!_TAG_PROGRAM_VERSION"' | LC_ALL=C sort; }
+[[ "$(origin < "$prev")" == "$(ctags --extras=+p -o - /dev/null 2>/dev/null | origin)" ]] \
+    || { echo "tags-merge: $prev was made in another directory or by another ctags" >&2; exit 1; }
 
 LC_ALL=C awk -F'\t' '!/^!_TAG_/ && !seen[$2]++ { print $2 }' "$prev" | LC_ALL=C sort -u > "$d/old.files"
 : > "$d/now.files"
