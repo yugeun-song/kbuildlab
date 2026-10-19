@@ -268,7 +268,8 @@ def _emit(tag, value, desc=""):
 def _tree_dir(word):
     """The registered tree a TREE word names, or None (paths are not resolved:
     completing a path argument never needs the tree it lies in)."""
-    return os.path.join(treeinfo.TREES, word) if word in treeinfo.names() else None
+    tid = treeinfo.resolve(word)
+    return os.path.join(treeinfo.TREES, tid) if tid else None
 
 
 def _conf_keys(tdir):
@@ -288,7 +289,7 @@ def _code_keys():
                         keys.update(pat.findall(fh.read()))
                 except OSError:
                     pass
-    for t in treeinfo.names():
+    for t in treeinfo.ids():
         keys.update(k for k in _conf_keys(os.path.join(treeinfo.TREES, t)) if k.startswith("GDBTOOLS_"))
     return keys
 
