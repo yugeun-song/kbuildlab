@@ -144,6 +144,9 @@ COMMANDS = [
             Opt("--run", "boot now instead of freezing at reset"),
             Opt("--boot", "direct, uboot or uefi (default: the tree's BOOT)", "MODE",
                 "choice:direct,uboot,uefi"),
+            Opt("--board", "boot on a real SoC's machine model from boards/ instead of the tree's "
+                           "machine; alone, list the boards for the tree's arch", "NAME", "board",
+                optional=True),
             Opt("--kaslr", "boot with KASLR active"),
             Opt("--no-kaslr", "deterministic base (the default unless the tree's KASLR says otherwise)"),
             Opt("--kvm", "x86 only: KVM, faster and less deterministic"),
@@ -328,6 +331,13 @@ def _values(kind, pos, cur):
     elif kind == "arch":
         for a in ARCHES:
             _emit("value", a)
+    elif kind == "board":
+        d = os.path.join(REPO, "boards")
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else ():
+            if f.endswith(".conf"):
+                p = os.path.join(d, f)
+                _emit("value", f[:-5], "%s %s" % (treeinfo.conf_file_get(p, "ARCH") or "?",
+                                                  treeinfo.conf_file_get(p, "MACHINE") or ""))
     elif kind == "labid":
         lab = os.path.join(REPO, "lab", "trees")
         have = set(treeinfo.ids())
@@ -402,7 +412,8 @@ def cmd_complete(words):
                 if i + 1 == len(rest):
                     pending = o
                     break
-                if not o.optional or rest[i + 1].isdigit():
+                if not o.optional or rest[i + 1].isdigit() or (
+                        o.kind == "board" and not rest[i + 1].startswith("-")):
                     i += 1
         elif not w.startswith("-"):
             pos.append(w)

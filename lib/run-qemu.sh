@@ -19,6 +19,7 @@ declare -a APPEND_EXTRA=()   # extra kernel command-line words (--append, CMDLIN
 PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot)
 EMULATE=""; EMULATE_SET=0   # emulated controllers for the preset's drivers to bind
 MODULES=1                   # append the modules kbuildlab build staged to the initramfs
+BOARD=""; BOARD_SET=0       # --board: a real SoC's machine model (boards/NAME.conf)
 declare -a EXTRA=()
 declare -a REST=()
 _usage() {
@@ -53,6 +54,9 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      initramfs (with ROOT=disk, put them on the boot partition),
                      those the devices present ask for loaded at boot
                      (default: on whenever the build has modules)
+  --board [NAME]     boot on a real SoC's machine model, boards/NAME.conf, in
+                     place of the tree's machine: direct boot, the tree's
+                     initramfs; without NAME, list the boards for the tree's arch
   --port|-g N        gdb port (default: the tree's GDB_PORT)
   --qmp-port N       QMP port (default: the tree's QMP_PORT); this is drgn's
                      way in -- `kbuildlab drgn` uses it, and unlike the gdbstub
@@ -98,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         --no-emulate) EMULATE=0; EMULATE_SET=1; shift ;;
         --modules)    MODULES=1; shift ;;
         --no-modules) MODULES=0; shift ;;
+        --board)      BOARD_SET=1; if [[ $# -gt 1 && "$2" != -* ]]; then BOARD="$2"; shift; fi; shift ;;
         --) shift; EXTRA=("$@"); break ;;
         -*) die "run: unknown option '$1' (pass QEMU arguments after --)" ;;
         *)  REST+=("$1"); shift ;;
@@ -108,6 +113,67 @@ tree="$(kbl_tree "${REST[0]:-}")" || exit 1
 arch="$(kbl_tree_arch "$tree")" || exit 1
 src="$(kbl_tree_src "$tree")" || exit 1
 _statedir="$(kbl_statedir)" || exit 1
+
+# --board NAME: a real SoC's machine model in place of the tree's machine, so its
+# embedded buses run on real controllers.  boards/NAME.conf states it in the
+# tree.conf grammar, and its values win over the tree's for this run.
+board=""; _bconf=""; _buart=0; _bdtb=""; _bnic=""; _bpdrive=""; _nofwcfg=0; _nopci=0; _bdrop=()
+_bget() { kbl_conf_get "$_bconf" "$1"; }
+if [[ $BOARD_SET -eq 1 ]]; then
+    _bl=()
+    for _f in "$KBL_REPO"/boards/*.conf; do
+        [[ -f "$_f" && "$(kbl_conf_get "$_f" ARCH)" == "$arch" ]] && _bl+=("$(basename "$_f" .conf)")
+    done
+    if [[ -z "$BOARD" ]]; then
+        [[ ${#_bl[@]} -gt 0 ]] || die "no board in $KBL_REPO/boards serves $arch"
+        printf 'boards for %s (kbuildlab run %s --board NAME):\n' "$arch" "$(kbl_tree_label "$tree")"
+        printf '  %s\n' "${_bl[@]}"
+        exit 0
+    fi
+    _bconf="$KBL_REPO/boards/$BOARD.conf"
+    [[ "$BOARD" =~ ^[A-Za-z0-9._-]+$ && -f "$_bconf" ]] \
+        || die "no board '$BOARD'; boards for $arch: ${_bl[*]:-none}"
+    _barch="$(_bget ARCH)"
+    [[ "$_barch" == "$arch" ]] || die "board $BOARD is for ${_barch:-no stated ARCH}, and $(kbl_tree_label "$tree") is $arch
+       boards for $arch: ${_bl[*]:-none}"
+    board="$BOARD"
+    [[ -z "$BOOT" || "$BOOT" == direct ]] || die "--boot $BOOT: a board boots directly (--board $board)"
+    [[ "$ROOT" != disk ]] || die "--root disk: a board boots the tree's initramfs (--board $board)"
+    BOOT=direct
+    _bmachine="$(_bget MACHINE)"; [[ -n "$_bmachine" ]] || die "$_bconf states no MACHINE"
+    _bcpu="$(_bget CPU)"
+    _bconsole="$(_bget CONSOLE)"; [[ -n "$_bconsole" ]] || die "$_bconf states no CONSOLE"
+    _buart="$(_bget CONSOLE_UART)"; _buart="${_buart:-0}"
+    [[ "$_buart" =~ ^[0-9]+$ ]] || die "CONSOLE_UART in $_bconf is '$_buart'; it is a UART's index, from 0"
+    for _k in FW_CFG PCI; do
+        _v="$(_bget "$_k")"
+        [[ "$_v" == 0 || "$_v" == 1 ]] || die "$_k in $_bconf is '$_v'; it is 1 when the machine has one, else 0"
+    done
+    [[ "$(_bget FW_CFG)" == 1 ]] || _nofwcfg=1
+    [[ "$(_bget PCI)" == 1 ]] || _nopci=1
+    _bnic="$(_bget NIC_MODEL)"
+    [[ $NET -eq 0 || -n "$_bnic" ]] || die "$_bconf states no NIC_MODEL (the board's own NIC); pass --no-net"
+    _bpdrive="$(_bget PERSIST_DRIVE)"
+    [[ -n "$MEM" ]] || MEM="$(_bget MEM)"
+    [[ -n "$SMP" ]] || SMP="$(_bget SMP)"
+    read -r -a _bkc <<<"$(_bget KCONFIG)"
+    if [[ ${#_bkc[@]} -gt 0 ]]; then
+        [[ -f "$src/.config" ]] || die "no .config in $src to check $board's KCONFIG against"
+        _miss=()
+        for _s in "${_bkc[@]}"; do
+            [[ "$_s" =~ ^CONFIG_[A-Za-z0-9_]+$ ]] || die "KCONFIG in $_bconf names '$_s', which is not a CONFIG_ symbol"
+            grep -Eqx "${_s}=[ym]" "$src/.config" || _miss+=("$_s")
+        done
+        [[ ${#_miss[@]} -eq 0 ]] || die "$(kbl_tree_label "$tree") cannot run on $board: its .config lacks
+       ${_miss[*]} (KCONFIG in $_bconf)"
+    fi
+    _bdtb="$(_bget DTB)"
+    if [[ -n "$_bdtb" ]]; then
+        [[ "$_bdtb" == /* ]] || _bdtb="$src/$_bdtb"
+        [[ -f "$_bdtb" ]] || die "no device tree at $_bdtb (DTB in $_bconf)
+       build it first: kbuildlab build $(kbl_tree_label "$tree")"
+    fi
+fi
 
 # What the tree states for its runs; a flag wins over it, and the values after
 # :- are the defaults when neither says.
@@ -164,6 +230,7 @@ command -v "$qemu" >/dev/null 2>&1 || die "$qemu not found (stated by $tree/tree
 machine="$(kbl_tree_get "$tree" MACHINE)"; [[ -n "$machine" ]] || die "$tree/tree.conf states no MACHINE"
 cpu="$(kbl_tree_get "$tree" CPU)"
 console="$(kbl_tree_get "$tree" CONSOLE)"; [[ -n "$console" ]] || die "$tree/tree.conf states no CONSOLE"
+[[ -n "$board" ]] && { machine="$_bmachine"; cpu="$_bcpu"; console="$_bconsole"; }
 [[ -n "$PORT" ]] || PORT="$(kbl_tree_get "$tree" GDB_PORT)"
 [[ -n "$PORT" ]] || die "no gdb port: state GDB_PORT in $tree/tree.conf or pass --port"
 
@@ -353,6 +420,10 @@ trap _cleanup EXIT HUP INT TERM
 [[ "$ROOT" == initramfs || "$ROOT" == disk ]] \
     || die "ROOT is '$ROOT' ($tree/tree.conf or --root); it is initramfs or disk"
 [[ $INITRD_SET -eq 1 || $NO_INITRD -eq 1 ]] && ROOT=initramfs
+if [[ -n "$board" && "$ROOT" == disk ]]; then
+    ROOT=initramfs
+    say "root         initramfs: $board boots the tree's INITRD (its ROOT=disk needs a system disk)"
+fi
 [[ $RESET_SYSDISK -eq 0 || "$ROOT" == disk ]] \
     || die "--reset-sysdisk: this run boots no system disk (ROOT=initramfs, --initrd or --no-initrd)"
 
@@ -525,14 +596,16 @@ fi
 # in tree.conf); its path/size are stated by the tree, never hardcoded here. The
 # guest's S45persist init script finds it by the serial set below and mounts it.
 # Every failure here is non-fatal -- the guest just boots without /persist --
-# except a size an SD card (STORAGE=emmc) cannot have.
+# except a size an SD card (STORAGE=emmc, or a board's SD slot) cannot have.
 persist_ok=0; persist_disk=""; persist_dev=""
 [[ $PERSIST_SET -eq 1 ]] || PERSIST="$(kbl_tree_get "$tree" PERSIST)"
 if [[ "$PERSIST" == 1 ]]; then
     persist_disk="$(kbl_tree_get "$tree" PERSIST_DISK)"; persist_disk="${persist_disk:-disk/persist.img}"
     persist_disk="$(kbl_tree_path "$tree" "$persist_disk")"
     _psize="$(kbl_tree_get "$tree" PERSIST_SIZE)"; _psize="${_psize:-2G}"
-    if ! mkdir -p "$(dirname "$persist_disk")" 2>/dev/null; then
+    if [[ -n "$board" && -z "$_bpdrive" ]]; then
+        say "persist      $board states no PERSIST_DRIVE -- booting without /persist"
+    elif ! mkdir -p "$(dirname "$persist_disk")" 2>/dev/null; then
         say "persist      cannot create $(dirname "$persist_disk") -- booting without /persist"
     elif _persist_busy "$persist_disk" \
          || ! _claim_aux persist "$(printf '%s' "$persist_disk" | sha1sum | cut -c1-16)"; then
@@ -550,15 +623,18 @@ if [[ "$PERSIST" == 1 ]]; then
         if [[ -f "$persist_disk" ]]; then
             # QEMU's sd-card takes only a power-of-two size, and rounding would
             # change the disk, so any other size is refused.
-            if [[ "$STORAGE" == emmc ]]; then
+            _sdwhy=""
+            if [[ -n "$board" ]]; then [[ ",$_bpdrive," == *,if=sd,* ]] && _sdwhy="on $board"
+            elif [[ "$STORAGE" == emmc ]]; then _sdwhy="with STORAGE=emmc"; fi
+            if [[ -n "$_sdwhy" ]]; then
                 _pb="$(stat -c%s "$persist_disk" 2>/dev/null)" || _pb=0
                 if (( _pb == 0 || (_pb & (_pb - 1)) != 0 )); then
                     if [[ $_pfresh -eq 1 ]]; then
                         rm -f "$persist_disk"
-                        die "PERSIST_SIZE in $tree/tree.conf is $_psize; with STORAGE=emmc the persistent
+                        die "PERSIST_SIZE in $tree/tree.conf is $_psize; $_sdwhy the persistent
        disk is an SD card, whose size QEMU wants a power of two"
                     fi
-                    die "$persist_disk is $_pb bytes; with STORAGE=emmc it is an SD card, whose size
+                    die "$persist_disk is $_pb bytes; $_sdwhy it is an SD card, whose size
        QEMU wants a power of two (resize it, or remove it and state such a PERSIST_SIZE)"
                 fi
             fi
@@ -642,8 +718,10 @@ done
 # every device the guest has is stated here: it drops QEMU's default CD-ROM,
 # floppy, parallel port and VGA.
 declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic -nodefaults
-                -chardev stdio,id=kblcon,mux=on,signal=off -serial chardev:kblcon
-                -mon chardev=kblcon,mode=readline)
+                -chardev stdio,id=kblcon,mux=on,signal=off)
+# On a board the console is one of its UARTs; the UARTs before it get a null backend.
+for ((_u = 0; _u < _buart; _u++)); do CMD+=(-serial null); done
+CMD+=(-serial chardev:kblcon -mon chardev=kblcon,mode=readline)
 
 # An entropy source.  A headless guest has no keyboard, no disk seek noise and no
 # hardware RNG, so its CRNG is seeded by whatever the kernel can manufacture on
@@ -662,7 +740,8 @@ declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic -no
 # window, so the guest waits with a full pool.  The rootfs's S00entropy drops the
 # interval and forces one refill; that is the half of the fix the launcher cannot
 # do, because there is no way to set a sysctl from a 4.6 kernel command line.
-CMD+=(-device virtio-rng-pci)
+if [[ $_nopci -eq 0 ]]; then CMD+=(-device virtio-rng-pci)
+else _bdrop+=("rng          none: $board has no PCI bus for virtio-rng-pci"); fi
 
 
 
@@ -683,6 +762,7 @@ case "$BOOT" in
     direct)
         CMD+=(-kernel "$image" -append "$append")
         [[ -n "$INITRD" ]] && CMD+=(-initrd "$INITRD")
+        [[ -n "$_bdtb" ]] && CMD+=(-dtb "$_bdtb")
         if [[ "$ROOT" == disk ]]; then
             _bdisk="$_sdboot"
             _bvirt="virtio-blk-pci"
@@ -873,9 +953,12 @@ esac
 [[ -n "$_bdisk" ]] && _disk sys hd0 "$_bdisk" "$_bvirt"
 # Attach the persistent disk (after any boot disk, so it never displaces hd0). The
 # serial is how the guest tells it apart from the boot disk regardless of which
-# /dev/vdX each lands on; nvme and emmc carry none, and there the guest finds it by
-# its ext4 label kblpersist. Not in the cleanup trap: this image is meant to persist.
-if [[ $persist_ok -eq 1 ]]; then
+# /dev/vdX each lands on; nvme, emmc and a board's slot carry none, and there the guest
+# finds it by its ext4 label kblpersist. Not in the cleanup trap: this image is meant
+# to persist.
+if [[ $persist_ok -eq 1 && -n "$board" ]]; then
+    CMD+=(-drive "file=${persist_disk},format=raw,id=kblpersist,${_bpdrive}")
+elif [[ $persist_ok -eq 1 ]]; then
     _disk persist kblpersist "$persist_disk" "$persist_dev" serial=kblpersist
 fi
 # ROOT=disk: today's modules archive goes on the boot partition as
@@ -914,12 +997,20 @@ if [[ $NET -eq 1 ]]; then
     # another device type.
     _nicdev="$(kbl_tree_get "$tree" NIC_DEVICE)"; _nicsay="${_nicdev:-virtio}"
     _nicdev="${_nicdev:-virtio-net-pci}"
-    CMD+=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSHPORT}-:22"
-          -device "${_nicdev},netdev=net0")
+    # A board's NIC is on the SoC, so it takes its backend from -nic.
+    if [[ -n "$board" ]]; then
+        _nicsay="$_bnic"; CMD+=(-nic "user,model=${_bnic},hostfwd=tcp:127.0.0.1:${SSHPORT}-:22")
+    else
+        CMD+=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSHPORT}-:22"
+              -device "${_nicdev},netdev=net0")
+    fi
     # LAN_NICS: more ports of the guest's own on one private segment (hub 1; the
     # legacy -net options use hub 0), so XDP and RDMA can run between them; qemu
     # warns that this hub reaches no host network, which is the point.
     read -r -a _lan <<<"$(kbl_tree_get "$tree" LAN_NICS)"
+    if [[ $_nopci -eq 1 && ${#_lan[@]} -gt 0 ]]; then
+        _bdrop+=("lan          none: $board has no PCI bus for ${_lan[*]}"); _lan=()
+    fi
     _n=0
     for _t in ${_lan[@]+"${_lan[@]}"}; do
         CMD+=(-netdev "hubport,id=kbllan${_n},hubid=1" -device "${_t},netdev=kbllan${_n}")
@@ -986,18 +1077,22 @@ if [[ $QMP -eq 1 ]]; then
     qmpsock="$_statedir/kbl-qmp-${PORT}.sock"
     rm -f "$qmpsock"
     CMD+=(-qmp "unix:${qmpsock},server=on,wait=off"
-          -qmp "tcp:127.0.0.1:${QMPPORT},server=on,wait=off"
-          # advertises the guest's VMCOREINFO note; the guest half is
-          # CONFIG_FW_CFG_SYSFS + CONFIG_VMCORE_INFO
-          -device vmcoreinfo)
+          -qmp "tcp:127.0.0.1:${QMPPORT},server=on,wait=off")
+    # advertises the guest's VMCOREINFO note; the guest half is
+    # CONFIG_FW_CFG_SYSFS + CONFIG_VMCORE_INFO
+    if [[ $_nofwcfg -eq 0 ]]; then CMD+=(-device vmcoreinfo)
+    else _bdrop+=("vmcoreinfo   none: $board has no fw_cfg -- drgn has no way in"); fi
 fi
 # Hardware the guest can have without owning any: controllers QEMU emulates,
 # each driven by its real driver (presets/soft/emulated.config builds them), so
 # probe, DMA and interrupt paths are all there to trace.  Disks are null-co --
 # reads return zeros, writes vanish -- so nothing is created on the host; the
 # watchdog is told to do nothing when it fires; the three CAN controllers share
-# one bus and hear each other.  All PCI, which every machine here has.
+# one bus and hear each other.  All PCI, so a board without a PCI bus has none.
 [[ $EMULATE_SET -eq 1 ]] || EMULATE="$(kbl_tree_get "$tree" EMULATE)"
+if [[ "$EMULATE" == 1 && $_nopci -eq 1 ]]; then
+    EMULATE=0; _bdrop+=("emulate      none: $board has no PCI bus for the emulated controllers")
+fi
 if [[ "$EMULATE" == 1 ]]; then
     # Beside STORAGE=nvme's controller this one needs a serial of its own: QEMU
     # derives the subsystem NQN from it, and Linux rejects a second controller
@@ -1025,7 +1120,9 @@ if [[ "$EMULATE" == 1 ]]; then
     [[ $NET -eq 1 ]] && CMD+=(-netdev user,id=kblnet1 -device e1000e,netdev=kblnet1)
 fi
 wsock=""
-if [[ -t 0 ]]; then
+if [[ -t 0 && $_nopci -eq 1 ]]; then
+    _bdrop+=("winsize      none: $board has no PCI bus for the virtio-serial port")
+elif [[ -t 0 ]]; then
     wsock="$_statedir/kbl-wsz-${PORT}.sock"
     rm -f "$wsock"
     _wsdev="virtio-serial-pci"
@@ -1034,8 +1131,15 @@ if [[ -t 0 ]]; then
           -device "virtserialport,bus=kblwszbus.0,chardev=kblwsz,name=org.kbuildlab.winsize")
 fi
 [[ $RUN -eq 1 ]] || CMD+=(-S)
-# QEMU_ARGS: the tree's extra qemu arguments, split on blanks, before -- ARGS.
-read -r -a _qargs <<<"$(kbl_tree_get "$tree" QEMU_ARGS)"
+# QEMU_ARGS: the tree's extra qemu arguments, split on blanks, before -- ARGS.  A
+# board's own replace them: they attach its peripherals, the tree's suit its machine.
+if [[ -n "$board" ]]; then
+    read -r -a _qargs <<<"$(_bget QEMU_ARGS)"
+    [[ -n "$(kbl_tree_get "$tree" QEMU_ARGS)" ]] \
+        && _bdrop+=("qemu args    the tree's QEMU_ARGS left out on $board; -- ARGS still apply")
+else
+    read -r -a _qargs <<<"$(kbl_tree_get "$tree" QEMU_ARGS)"
+fi
 CMD+=(${_qargs[@]+"${_qargs[@]}"})
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
@@ -1076,6 +1180,7 @@ _write_state() {   # _write_state [QEMU_PID]
     [[ $persist_ok -eq 1 ]] && rec+=("KBL_PERSIST=$persist_disk")
     rec+=("KBL_ROOT=$ROOT")
     [[ -n "$_sdboot" ]] && rec+=("KBL_SYSDISK=$_sdboot")
+    [[ -n "$board" ]] && rec+=("KBL_BOARD=$board")
     if [[ -n "$qpid" ]]; then
         # pid alone is not an identity: pids are reused.  The process start time
         # from /proc pins it, so a state file that outlives its guest can be told
@@ -1094,6 +1199,8 @@ _write_state() {   # _write_state [QEMU_PID]
 _write_state
 
 say "guest        $(kbl_tree_label "$tree") ($arch) on :$PORT"
+[[ -n "$board" ]] && say "board        $board (-M $machine${_bdtb:+, -dtb $_bdtb})"
+for _d in "${_bdrop[@]+"${_bdrop[@]}"}"; do say "$_d"; done
 if [[ "$BOOT" == direct ]]; then
     say "boot         direct (-kernel; head.S _text immediately)"
     if [[ "$ROOT" == initramfs ]]; then
@@ -1106,7 +1213,7 @@ else
     say "boot         $BOOT firmware chain; rootfs on boot disk"
 fi
 [[ "$ROOT" == disk ]] && say "root         disk $_sdboot (PARTUUID $_puuid)"
-[[ "$STORAGE" != virtio ]] && say "storage      $STORAGE (every disk this run attaches)"
+[[ -z "$board" && "$STORAGE" != virtio ]] && say "storage      $STORAGE (every disk this run attaches)"
 [[ -n "$mods" && -z "$_mfw" ]] && say "modules      $mods appended; loaded at boot for the devices present"
 [[ -n "$_mfw" ]] && say "modules      $mods on the boot partition (/modules.cpio.gz); the rootfs installs it"
 [[ $NET -eq 1 ]] && say "net          user/$_nicsay (guest 10.0.2.15); ssh -p $SSHPORT root@localhost (pw: root)" \
@@ -1114,7 +1221,7 @@ fi
 [[ ${#_lan[@]} -gt 0 ]] && say "lan          ${_lan[*]} on one private segment inside the guest"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
 [[ "$EMULATE" == 1 ]] && say "emulate      nvme, ahci, virtio-scsi, usb, virtio input/gpu/sound/crypto/balloon/console, hda, pci uart, i6300esb, can x3$([[ $NET -eq 1 ]] && echo ', e1000e')"
-[[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock (drgn reads the guest here; it does not pause it)" \
+[[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock$([[ $_nofwcfg -eq 0 ]] && echo ' (drgn reads the guest here; it does not pause it)')" \
                  || say "qmp          none (--no-qmp) -- drgn has no way in"
 [[ $KASLR -eq 1 ]] && say "kaslr        on (randomized; 'kearly kaslr auto' calibrates the slide)" \
                    || say "kaslr        off (nokaslr, deterministic)"
@@ -1130,7 +1237,7 @@ say "console      Ctrl-C goes to the guest; Ctrl-A X quits qemu, Ctrl-A C its mo
 [[ -n "$wsock" ]] && say "winsize      the guest console follows this terminal's rows and columns"
 # Printed frozen or not: drgn reads a booted kernel, so this is what to run once
 # the guest is up, not instead of the attach above.
-if [[ $QMP -eq 1 ]]; then
+if [[ $QMP -eq 1 && $_nofwcfg -eq 0 ]]; then
     [[ "$QMPPORT" == "$(kbl_tree_get "$tree" QMP_PORT)" ]] \
         && _dcmd="kbuildlab drgn $_atree" \
         || _dcmd="kbuildlab drgn $_atree --qmp-port $QMPPORT"

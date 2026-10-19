@@ -420,9 +420,11 @@ kbl_tree_path() {   # kbl_tree_path TREE VALUE
 #   KEY, optional blanks, '=', optional blanks, VALUE; the first such line wins.
 #   A VALUE that starts with '"' runs to the next '"'; any other ends at the
 #   first '#', trailing blanks stripped.
-kbl_tree_get() {
-    local tree="$1" key="$2" v
-    v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$tree/tree.conf" | head -1)"
+# kbl_conf_get reads any file in that grammar, such as a boards/<name>.conf.
+kbl_tree_get() { kbl_conf_get "$1/tree.conf" "$2"; }
+kbl_conf_get() {   # kbl_conf_get FILE KEY
+    local file="$1" key="$2" v
+    v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" | head -1)"
     if [[ "$v" == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
     else v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
     printf '%s\n' "$v"

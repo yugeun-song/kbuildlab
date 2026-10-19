@@ -249,6 +249,20 @@ if [[ -r "$_st" ]]; then
     fi
 fi
 
+# A board whose kernel runs on a second CPU cluster (sifive_u: the E51, then the
+# U54s) shows each cluster to gdb as an inferior of its own, and only an
+# extended-remote session that attaches that one can stop the kernel.  pwndbg,
+# which the init file loads, aborts gdb 18.1 on the switch to an inferior that has
+# no thread yet, so that session skips the init file and keeps gdbtools.
+_board=""; _binf=""
+if [[ -r "$_st" ]]; then
+    _board="$(sed -n 's/^KBL_BOARD=//p' "$_st" | head -1)"
+    [[ -n "$_board" && -r "$KBL_REPO/boards/$_board.conf" ]] \
+        && _binf="$(kbl_conf_get "$KBL_REPO/boards/$_board.conf" GDB_INFERIOR)"
+    [[ -z "$_binf" || "$_binf" =~ ^[1-9][0-9]*$ ]] \
+        || die "GDB_INFERIOR in $KBL_REPO/boards/$_board.conf is '$_binf'; it is the gdb inferior that runs the kernel, from 1"
+fi
+
 # Nothing recorded for this port, or a direct boot: the tree's own address is the
 # only evidence left.  It describes the tree's DEFAULT mode, so it holds only while
 # that is what is running.
@@ -348,6 +362,10 @@ fi
 declare -a IEX=("set pagination off" "add-auto-load-safe-path $src" "cd $src"
                 "set logging file $PWD/gdb.txt")
 declare -a ARGS=(-q)
+if [[ -n "$_binf" ]]; then
+    ARGS+=(-nx)
+    say "init file    skipped: on $_board the kernel runs in gdb inferior $_binf, and pwndbg aborts gdb on the switch to it"
+fi
 for _x in "${IEX[@]}"; do ARGS+=(-iex "$_x"); done
 [[ -n "$tool" ]] && ARGS+=(-ex "source $tool")
 # Connect to the address the stub was BOUND to, not to an assumed loopback.  The
@@ -362,7 +380,16 @@ if [[ -z "$_gbind" && -n "${_r_pid:-}" ]]; then
     [[ "$_gdev" == tcp:* ]] && { _gbind="${_gdev#tcp:}"; _gbind="${_gbind%:*}"; }
 fi
 case "$_gbind" in ""|"0.0.0.0"|"::"|"[::]") _gbind="localhost" ;; esac
-ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
+if [[ -n "$_binf" ]]; then
+    # vmlinux goes into that inferior only: a copy in the other one puts a second
+    # location at every address, qemu's breakpoints stop every CPU, and the thread
+    # stepping over its own location hit the twin and stopped there again.
+    ARGS+=(-ex "target extended-remote ${_gbind}:${PORT}" -ex "add-inferior"
+           -ex "inferior $_binf" -ex "attach $_binf" -ex "file $vmlinux"
+           -ex "set schedule-multiple on")
+else
+    ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
+fi
 [[ -n "$FWSYM" ]] && ARGS+=(-ex "add-symbol-file $FWSYM -o 0")
 # Default: run straight to the kernel's very first instruction (head.S _text),
 # past the QEMU reset shim -- where early-boot debugging begins, and where the

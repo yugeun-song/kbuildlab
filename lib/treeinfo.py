@@ -49,9 +49,14 @@ def c(code, text):
 
 def conf_get(tree_dir, key):
     """kbl_tree_get's grammar (lib/common.sh), held to it by tests/tree-conf-vectors.json."""
+    return conf_file_get(os.path.join(tree_dir, "tree.conf"), key)
+
+
+def conf_file_get(path, key):
+    """conf_get on any file in that grammar, such as a boards/<name>.conf."""
     line_re = re.compile(rf"^[ \t\r\f\v]*{re.escape(key)}[ \t\r\f\v]*=[ \t\r\f\v]*(.*)$")
     try:
-        with open(os.path.join(tree_dir, "tree.conf"), encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 m = line_re.match(line.rstrip("\n"))
                 if m:

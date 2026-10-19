@@ -241,6 +241,8 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --modules | --no-modules   append the modules `kbuildlab build` staged to the initramfs
                              (the boot partition under ROOT=disk; default on whenever the build
                              has modules)
+  --board [NAME]             a real SoC's machine model from boards/ in place of the
+                             tree's machine (NAME omitted: the boards for its arch)
   --append WORDS             extra kernel command-line words, repeatable
   --qmp-port N | --no-qmp    drgn's channel (default: the tree's QMP_PORT);
                              --no-qmp drops it and the vmcoreinfo device
@@ -404,7 +406,8 @@ flag, `now` is the live runstate).
 `/dev/shm`), written whole and renamed into place. `attach`, `drgn` and `resume`
 read it (the editor adapter reads it through `attach --json`); its `KBL_*` keys are
 added, never renamed. It carries the boot mode, the root file system (`KBL_ROOT`,
-and `KBL_SYSDISK`, the system disk booted), the firmware load address, the
+and `KBL_SYSDISK`, the system disk booted), a `--board` run's board (`KBL_BOARD`),
+the firmware load address, the
 KASLR state, the ssh port, the effective kernel command line (which a firmware
 chain passes itself, so it is nowhere on qemu's command line), the QMP port and
 socket, and qemu's pid with its `/proc` start time — which tells a file that
@@ -424,6 +427,47 @@ dispatches into a device model SIGSEGVs it, which gdbtools' `kearly safemem` gua
 exists to prevent. The launcher reports the signal in its own voice (bash's
 job-control line names only this script's internals) and restores the terminal on
 every exit path, since `-nographic`'s raw mode is not put back on a signal death.
+
+### Boards
+
+`run --board NAME` boots the tree on a real SoC's machine model in place of its
+own machine, to study I2C, SPI, GPIO and UART on real controllers. A board is
+`boards/NAME.conf` in the tree.conf grammar, and its values win over the tree's
+for that run. `--board` alone lists the boards for the tree's arch. A board for
+another arch is refused, and so is a tree whose `.config` lacks any symbol the
+board's `KCONFIG` lists, naming each. The boot is direct (`--boot uboot` and
+`uefi` are refused) on the tree's `INITRD` with the staged modules appended; a
+`ROOT=disk` tree boots its initramfs and says so. Ports, QMP, KASLR and the run
+state, which gains `KBL_BOARD`, are as on the tree's own machine.
+
+| board | machine | console | buses and devices |
+| --- | --- | --- | --- |
+| `imx8mp-evk` | NXP i.MX 8M Plus EVK on the tree's own `imx8mp-evk.dtb`; QEMU runs no U-Boot or TF-A there | `ttymxc1` | UART x3, I2C x3, GPIO x5, USDHC (`/persist` in the SD slot), FEC Ethernet, DesignWare PCIe |
+| `sifive_u` | SiFive HiFive Unleashed (FU540) under OpenSBI, on QEMU's own device tree | `ttySIF0` | UART x2, SPI x2 (an is25wp256 NOR on spi0, `/persist` as an SD card on spi1), GPIO, GEM Ethernet |
+
+Neither board has fw_cfg, so there is no `vmcoreinfo` and drgn has no way in.
+Neither has a PCI bus `run` can fill (the i.MX 8M Plus's one DesignWare root port
+takes a single device), so virtio-rng, the winsize port, `--emulate` and
+`LAN_NICS` are left out, each said in one line. The NIC is the board's own, with
+the ssh forward; `/persist` is an SD card, whose size QEMU wants a power of two;
+the board's `QEMU_ARGS` replace the tree's.
+
+QEMU shows each CPU cluster of `sifive_u` to gdb as an inferior of its own: the
+E51 is inferior 1 and the U54s, which run the kernel, are inferior 2. The board's
+`GDB_INFERIOR` makes `attach` connect with `target extended-remote`, attach that
+inferior, load `vmlinux` into it and resume both clusters together. That session
+skips gdb's init files, and so pwndbg: gdb 18.1 aborts when pwndbg is loaded and
+gdb switches to an inferior that has no thread yet. gdbtools stays.
+
+On `imx8mp-evk` the device tree's `pca6416` GPIO expander (I2C3, 0x20) is a QEMU
+`pca9535`, and `gpiodetect` lists it. Three more devices on I2C3, Linux's `i2c-2`,
+wait for userspace to bind them:
+
+```sh
+echo tmp105 0x48 > /sys/bus/i2c/devices/i2c-2/new_device   # temperature sensor
+echo 24c02 0x50 > /sys/bus/i2c/devices/i2c-2/new_device    # 256-byte EEPROM
+echo ds1338 0x68 > /sys/bus/i2c/devices/i2c-2/new_device   # RTC
+```
 
 ## The tree.conf
 
@@ -695,6 +739,7 @@ lib/run-qemu.sh        run; run-gdb.sh, run-drgn.sh and resume.sh are attach, dr
                        and resume, each a program of its own (lib/qmp.py talks QMP)
 lib/cli.py             every command's options, for --help and Tab completion
 lib/index/             the indexers: clangd.py, the tag view, the build readers
+boards/                the real SoC machine models run --board boots, one file each
 completions/           the bash and zsh completions install.sh puts in place
 tests/                 tree.conf grammar and cli.py against the parsers
 ```
