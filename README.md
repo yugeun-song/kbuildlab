@@ -519,8 +519,17 @@ fails loudly instead.
 - **Devices without the hardware.** `soft/simulators.config` turns on what the
   kernel can stand in for (`IRQ_SIM`, IIO, null_blk, scsi_debug, netdevsim,
   wireless/Bluetooth/NFC, V4L2/CEC/DVB test devices, virtual KMS, dummy sound and
-  USB, uinput/uhid, a virtual TPM, ...); `soft/emulated.config` builds the drivers
-  for what `run --emulate` emulates, so real drivers probe real controller models.
+  USB, uinput/uhid, a virtual TPM, ...); scsi_debug is a module, since built in it
+  attaches a fake SCSI disk at boot. `soft/emulated.config` builds the drivers for
+  what `run --emulate` emulates, so real drivers probe real controller models.
+- **Networks and buses to experiment on.** `soft/network.config` adds AF_XDP, the BPF
+  classifier and action with clsact, veth, and the RDMA core with Soft-RoCE (rxe)
+  and Soft-iWARP (siw), which run verbs over any Ethernet port (QEMU has no
+  InfiniBand adapter). `soft/embedded.config` adds the user-space ends of the
+  embedded buses (i2c-dev, spidev, the GPIO character device, CAN raw, BCM, gateway,
+  ISO-TP and J1939), bit-banged I2C and SPI over GPIO, and drivers of common I2C and
+  SPI peripherals (LM75/TMP105, TMP421, EMC1413, AT24, DS1307/DS1338, PCA953x,
+  DPS310, SPI NOR).
 - **The root disk.** `kbuildlab config --preset` merges `storage/<bus>.config` for
   the tree's `STORAGE` (`virtio`, `nvme`, `emmc`) as a hard fragment, because the
   driver of the disk holding the root file system cannot be a module.
