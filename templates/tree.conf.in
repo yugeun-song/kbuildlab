@@ -24,6 +24,7 @@ SRC=@SRC@
 # a login shell (or pass --no-initrd for early-boot debugging that never needs
 # userspace):
 # INITRD=/path/to/rootfs/<arch>/images/rootfs.cpio.gz
+# ROOT=disk, further down, boots a GPT system disk instead.
 
 # Toolchain.  Both optional.  IMAGE names the container image this tree builds
 # in, GCC the compiler version inside it; unset means the default image and its
@@ -100,6 +101,34 @@ SRC=@SRC@
 # does nothing when it fires, three CAN controllers on one bus, and an e1000e.
 # --emulate and --no-emulate decide for one run.
 # EMULATE=1
+
+# --- a guest that boots like a device ----------------------------------------
+# STORAGE is the bus of every disk `run` attaches: virtio (the default), nvme
+# (one controller, a namespace per disk) or emmc (an eMMC for the system or boot
+# disk, an SD card for /persist, whose size QEMU then wants a power of two).
+# STORAGE=nvme
+#
+# ROOT=disk boots a GPT system disk instead of an initramfs.  `run` makes SYSDISK
+# when it does not exist: partition 1 "boot", FAT32 of BOOTPART_SIZE, which takes
+# the kernel and boot.scr or grub.cfg on every run, and partition 2 "rootfs", a
+# copy of the ext4 image ROOTFS_IMAGE; `run --reset-sysdisk` makes it again.  A
+# uefi boot also needs EFI_LOADER, a GRUB EFI binary whose embedded config runs
+# `search --file /grub.cfg` and `configfile /grub.cfg`.  A desktop or server
+# x86_64 is BOOT=uefi STORAGE=nvme; an embedded arm64 or riscv64 board is
+# BOOT=uboot STORAGE=emmc, with a U-Boot built for MMC over PCI.
+# ROOT=disk
+# ROOTFS_IMAGE=/path/to/rootfs/<arch>/images/rootfs.ext4
+# SYSDISK=disk/system.img
+# BOOTPART_SIZE=256M
+# EFI_LOADER=/path/to/grubx64.efi
+#
+# NIC_DEVICE replaces the primary NIC's device type.  LAN_NICS adds NICs on one
+# private segment inside the guest, so XDP and RDMA can run between its own
+# ports.  QEMU_ARGS goes to qemu, split on blanks, after kbuildlab's own
+# arguments and before `run -- ARGS`.
+# NIC_DEVICE=e1000e
+# LAN_NICS=virtio-net-pci virtio-net-pci
+# QEMU_ARGS=-device virtio-iommu-pci
 
 # --- a u-boot boot -------------------------------------------------------------
 # Where boot.scr loads the kernel image and the initramfs.  QEMU's virt machine

@@ -229,6 +229,9 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --kaslr | --no-kaslr       randomized vs deterministic base (default: the tree's KASLR, else off)
   --kvm | --no-kvm           x86 only; TCG by default, for deterministic early-boot HW breakpoints
   --initrd PATH | --no-initrd
+  --root initramfs|disk      root fs (default: the tree's ROOT, else initramfs); disk is
+                             partition 2 of the tree's GPT system disk
+  --reset-sysdisk            delete the system disk and make it again from ROOTFS_IMAGE
   --net | --no-net           user NIC with an ssh forward (default on); --ssh-port N
                              (default: the tree's SSH_PORT, else 2222)
   --persist | --no-persist   attach the tree's writable /persist disk
@@ -236,7 +239,8 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
                              (NVMe, AHCI, virtio-scsi, USB, input, GPU, sound, CAN,
                              e1000e, ...; default: the tree's EMULATE)
   --modules | --no-modules   append the modules `kbuildlab build` staged to the initramfs
-                             (default on whenever the build has modules)
+                             (the boot partition under ROOT=disk; default on whenever the build
+                             has modules)
   --append WORDS             extra kernel command-line words, repeatable
   --qmp-port N | --no-qmp    drgn's channel (default: the tree's QMP_PORT);
                              --no-qmp drops it and the vmcoreinfo device
@@ -278,13 +282,14 @@ The gdb-port flag differs by command: `run` names it `-g` (QEMU's spelling),
 
 The rootfs carries none of the build's modules, so `kbuildlab build` stages them
 in the tree's data directory as `modules.cpio.gz` (stripped), and `run` appends it to the
-initramfs in every boot mode. An init script in the archive loads what the devices
-present at boot ask for, as udev would, so an emulated controller whose driver is a
-module binds. An archive older than the build's modules is left out, and `run` says
-so.
+initramfs in every boot mode; with `ROOT=disk` it writes the archive to the system
+disk's boot partition as `/modules.cpio.gz`, beside the kernel, and the rootfs
+installs it. An init script in the archive loads what the devices present at boot
+ask for, as udev would, so an emulated controller whose driver is a module binds. An
+archive older than the build's modules is left out, and `run` says so.
 
 `--boot uboot` and `--boot uefi` need a pre-built disk image (`BOOTDISK`, default
-`boot/uboot.img` or `boot/esp.img` in the data directory); `--persist` needs an
+`boot/uboot.img` or `boot/esp.img` in the data directory) unless `ROOT=disk`; `--persist` needs an
 `S45persist` init script
 in the guest rootfs. The scripts that build these (`firmware/build-bootdisk.sh`,
 `firmware/build-esp.sh`, `rootfs/post-build.sh`) belong to the workspace, not
@@ -398,7 +403,8 @@ flag, `now` is the live runstate).
 `run` records what it started in `$KBL_STATE_DIR/kbl-run-<port>.env` (default
 `/dev/shm`), written whole and renamed into place. `attach`, `drgn` and `resume`
 read it (the editor adapter reads it through `attach --json`); its `KBL_*` keys are
-added, never renamed. It carries the boot mode, the firmware load address, the
+added, never renamed. It carries the boot mode, the root file system (`KBL_ROOT`,
+and `KBL_SYSDISK`, the system disk booted), the firmware load address, the
 KASLR state, the ssh port, the effective kernel command line (which a firmware
 chain passes itself, so it is nowhere on qemu's command line), the QMP port and
 socket, and qemu's pid with its `/proc` start time — which tells a file that
@@ -441,6 +447,23 @@ qemu's `-m` and `-smp` as written. A u-boot boot loads the image where
 guest's RAM is refused. Another machine states both, and `RAM_BASE` (hex) for the
 same check. A UEFI boot needs `UEFI_ENTRY`, the image base the EFI stub chooses;
 it is measured, not assumed.
+
+`run` passes `-nodefaults` and states every device itself. `STORAGE` is the bus of
+every disk it attaches: `virtio` (the default), `nvme` (one controller, a namespace
+per disk) or `emmc` (an eMMC for the system or boot disk, an SD card for `/persist`
+whose size QEMU wants a power of two, each behind a PCI SD host on a PCIe root
+port). `ROOT=disk` boots a GPT system disk instead of an initramfs, as a device
+does. `SYSDISK` (default `disk/system.img`) is made when absent: partition 1 FAT32
+of `BOOTPART_SIZE`, partition 2 a copy of the ext4 image `ROOTFS_IMAGE`, mounted by
+`root=PARTUUID=`. Every run writes the kernel and its `boot.scr` or `grub.cfg` into
+partition 1, and on a UEFI boot `EFI_LOADER` (a GRUB whose embedded config loads
+`/grub.cfg`) as `/EFI/BOOT/BOOTX64.EFI`. A disk another run holds boots as a
+throwaway copy; `run --reset-sysdisk` makes it again. A desktop or server x86_64 is
+`BOOT=uefi STORAGE=nvme ROOT=disk`, an embedded arm64 or riscv64 board
+`BOOT=uboot STORAGE=emmc ROOT=disk` (U-Boot built for MMC over PCI). `NIC_DEVICE`
+replaces the primary NIC's device type, `LAN_NICS` adds NICs on one private segment
+inside the guest (XDP and RDMA between its own ports), and `QEMU_ARGS` goes to qemu
+after kbuildlab's own arguments and before `-- ARGS`.
 
 **Grammar.** `KEY`, optional blanks, `=`, optional blanks, the value; the first
 line for a key wins; a value that opens with `"` runs to the next `"`, any other
@@ -686,6 +709,7 @@ skipped with gdb's reason; `GDB` in `tree.conf` or `$KBL_GDB` names one outright
 Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which makes symbols
 resolve before the MMU is on; `kbuildlab attach` finds it if it is installed and
 says so if it is not. `clangd` and `python3` on the host, for the clangd index;
-absent, `kbuildlab tags` says so and builds the other three.
+absent, `kbuildlab tags` says so and builds the other three. `sgdisk`, `sfdisk` and
+mtools, for a `ROOT=disk` guest.
 
 Nothing is installed for you, and no system setting is changed.

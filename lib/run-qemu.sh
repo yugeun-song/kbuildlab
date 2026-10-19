@@ -13,6 +13,7 @@ source "${KBL_REPO}/lib/common.sh"
 RUN=0; PORT=""; PORT_SET=0; MEM=""; SMP=""; KVM=0; KASLR=""; NET=1
 QMP=1; QMPPORT=""; QMPPORT_SET=0   # QMP monitor: what drgn attaches through
 INITRD=""; INITRD_SET=0; NO_INITRD=0; SSHPORT=""; SSHPORT_SET=0
+ROOT=""; RESET_SYSDISK=0    # root fs (initramfs|disk); --reset-sysdisk remakes its disk
 BOOT=""; BIOS=""   # boot mode (direct|uboot); --bios overrides the firmware
 declare -a APPEND_EXTRA=()   # extra kernel command-line words (--append, CMDLINE_EXTRA)
 PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot)
@@ -31,6 +32,9 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      KASLR, else off)
   --kvm|--no-kvm     x86 only; default TCG for deterministic early-boot HW bp
   --initrd PATH | --no-initrd    root fs image, or none (early-boot only)
+  --root KIND        initramfs | disk (default: the tree's ROOT, else initramfs);
+                     disk boots partition 2 of the tree's GPT system disk
+  --reset-sysdisk    delete the system disk and make it again from ROOTFS_IMAGE
   --append WORDS     extra kernel command-line words, repeatable; added after
                      the tree's CMDLINE_EXTRA. Reaches the guest in every boot
                      mode: -append (direct), boot.scr bootargs (u-boot),
@@ -46,8 +50,9 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      that does nothing when it fires, Kvaser and CTU CAN on one
                      bus, and an e1000e (default: the tree's EMULATE)
   --modules|--no-modules   append the modules `kbuildlab build` staged to the
-                     initramfs, those the devices present ask for loaded at
-                     boot (default: on whenever the build has modules)
+                     initramfs (with ROOT=disk, put them on the boot partition),
+                     those the devices present ask for loaded at boot
+                     (default: on whenever the build has modules)
   --port|-g N        gdb port (default: the tree's GDB_PORT)
   --qmp-port N       QMP port (default: the tree's QMP_PORT); this is drgn's
                      way in -- `kbuildlab drgn` uses it, and unlike the gdbstub
@@ -79,6 +84,8 @@ while [[ $# -gt 0 ]]; do
         --initrd)    INITRD="${2:?--initrd needs a path}"; INITRD="$(realpath -m -s -- "$INITRD")"
                      INITRD_SET=1; shift 2 ;;
         --no-initrd) NO_INITRD=1; shift ;;  # boot without a root fs (early-boot debug)
+        --root)      ROOT="${2:?--root needs initramfs or disk}"; shift 2 ;;
+        --reset-sysdisk) RESET_SYSDISK=1; shift ;;
         --append)    APPEND_EXTRA+=("${2:?--append needs a string}"); shift 2 ;;
         --net)       NET=1; shift ;;
         --no-net)    NET=0; shift ;;        # no NIC at all
@@ -131,14 +138,17 @@ _membytes="$(_mem_bytes "$MEM")" || _membytes=""
 # ext4 on it corrupts. QEMU's own image lock would refuse the second guest and
 # abort its boot; check first so the second run degrades gracefully (boots without
 # persistence) instead. Matches the exact -drive file= a live QEMU would carry.
-_persist_busy() {
-    local disk="$1" c
+# The system disk of ROOT=disk is checked the same way, under its drive id hd0.
+_persist_busy() {   # _persist_busy DISK [DRIVE-ID]
+    local disk="$1" id="${2:-kblpersist}" c
     for c in /proc/[0-9]*/cmdline; do
         [[ -r "$c" ]] || continue
         # The live -drive arg is "if=none,file=<disk>,format=raw,id=kblpersist"; match
         # that identifying tail as a substring (not a whole-line -x match, which the
         # if=none, prefix would defeat).
-        tr '\0' '\n' < "$c" 2>/dev/null | grep -qF "file=${disk},format=raw,id=kblpersist" && return 0
+        # A process can exit between the glob and the read; bash itself would
+        # report the failed redirection, so the group takes the message.
+        { tr '\0' '\n' < "$c"; } 2>/dev/null | grep -qF "file=${disk},format=raw,id=${id}" && return 0
     done
     return 1
 }
@@ -255,6 +265,9 @@ _loadaddr=""   # set by a firmware chain below; recorded with the rest of the st
 shmdisk=""; shmvars=""; _bc=""; _bs=""; _gc=""; _qpid=""; _ird=""   # per-run scratch
 qmpsock=""                                                 # QMP unix socket, same
 wsock=""; _wpid=""; _claims=()
+# A throwaway copy of a busy system disk, and a system disk being made; neither
+# ever names SYSDISK itself, so the cleanup cannot remove it.
+_sdcopy=""; _sdnew=""
 
 # The terminal `-nographic` is about to put into raw mode, saved here so it can be
 # put back.  qemu restores it itself when it exits normally and cannot restore it
@@ -305,7 +318,8 @@ _cleanup() {
     fi
     rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} ${_ird:+"$_ird"} \
           ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"} \
-          ${wsock:+"$wsock"} ${_claims[@]+"${_claims[@]}"}
+          ${wsock:+"$wsock"} ${_sdcopy:+"$_sdcopy"} ${_sdnew:+"$_sdnew"} \
+          ${_claims[@]+"${_claims[@]}"}
     # Last, and only once the guest that owns the terminal is gone.  A no-op on
     # every path where qemu put it back itself, and the difference between a
     # usable shell and an apparently dead one where it did not.
@@ -330,12 +344,24 @@ _cleanup() {
 # actually typed.
 trap _cleanup EXIT HUP INT TERM
 
+# What the root file system is: an initramfs (below), or with ROOT=disk
+# partition 2 of a GPT system disk, as on a device.  --initrd and --no-initrd
+# keep their meaning, so with either one this run boots no system disk.
+[[ "$ROOT" == disk && ( $INITRD_SET -eq 1 || $NO_INITRD -eq 1 ) ]] \
+    && die "--root disk contradicts --initrd and --no-initrd"
+[[ -n "$ROOT" ]] || ROOT="$(kbl_tree_get "$tree" ROOT)"; ROOT="${ROOT:-initramfs}"
+[[ "$ROOT" == initramfs || "$ROOT" == disk ]] \
+    || die "ROOT is '$ROOT' ($tree/tree.conf or --root); it is initramfs or disk"
+[[ $INITRD_SET -eq 1 || $NO_INITRD -eq 1 ]] && ROOT=initramfs
+[[ $RESET_SYSDISK -eq 0 || "$ROOT" == disk ]] \
+    || die "--reset-sysdisk: this run boots no system disk (ROOT=initramfs, --initrd or --no-initrd)"
+
 # Root filesystem, handed to the kernel as an initramfs.  Stated per tree with
 # INITRD= in tree.conf (absolute, or relative to the tree's data directory); overridden by
 # --initrd, suppressed by --no-initrd.  Without one the kernel panics at "mount
 # root" the moment it is continued, so a missing-but-requested initrd is fatal
 # here, not a surprise 30 seconds into boot.
-if [[ $NO_INITRD -eq 0 ]]; then
+if [[ $NO_INITRD -eq 0 && "$ROOT" == initramfs ]]; then
     [[ $INITRD_SET -eq 1 ]] || INITRD="$(kbl_tree_get "$tree" INITRD)"
     if [[ -n "$INITRD" ]]; then
         INITRD="$(kbl_tree_path "$tree" "$INITRD")"
@@ -346,14 +372,20 @@ fi
 
 # The build's modules, staged beside the tree by `kbuildlab build`, follow the
 # rootfs as a second archive: the kernel unpacks concatenated archives as one.
+# With ROOT=disk there is no initramfs to follow, so the archive rides on the
+# system disk's boot partition beside the kernel, and the rootfs installs it from
+# there.  (Not fw_cfg: the kernel reads a fw_cfg file a page at a time, skipping
+# to each page byte by byte, which takes hours for a 30 MB archive.)
 # An archive older than the build's own modules would not load into this
 # kernel, so it is left out and said so.
-rootfs="$INITRD"; mods=""; _marc="$(kbl_tree_data "$tree")/modules.cpio.gz"
-if [[ -n "$INITRD" && $MODULES -eq 1 && -f "$_marc" ]]; then
+rootfs="$INITRD"; mods=""; _mfw=""; _marc="$(kbl_tree_data "$tree")/modules.cpio.gz"
+if [[ ( -n "$INITRD" || "$ROOT" == disk ) && $MODULES -eq 1 && -f "$_marc" ]]; then
     if [[ "$src/modules.order" -nt "$_marc" \
           || -n "$(find "$src" -name '*.ko' -newer "$_marc" -print -quit 2>/dev/null)" ]]; then
         warn "$_marc is older than the build's modules; booting without them
        (kbuildlab build $(kbl_tree_label "$tree") stages them again)"
+    elif [[ "$ROOT" == disk ]]; then
+        _mfw="$_marc"; mods="$_marc"
     else
         _ird="$_statedir/kbl-initrd-${PORT}.cpio.gz"
         cat "$INITRD" "$_marc" > "$_ird" || die "could not write $_ird"
@@ -371,11 +403,129 @@ if [[ "$BOOT" == uefi && "$arch" == x86_64 && "$machine" == pc ]]; then
     say "machine      q35 for this UEFI boot (the tree states pc; OVMF wants q35)"
 fi
 
+# The bus of every disk this run attaches (STORAGE): virtio as always; nvme, one
+# controller with a namespace per disk; or emmc, an eMMC for the system or boot
+# disk and an SD card for the persistent one, each behind its own PCI SD host on
+# a PCIe root port (chassis 101 and 102), so no machine's root bus is named.
+STORAGE="$(kbl_tree_get "$tree" STORAGE)"; STORAGE="${STORAGE:-virtio}"
+[[ "$STORAGE" == virtio || "$STORAGE" == nvme || "$STORAGE" == emmc ]] \
+    || die "STORAGE in $tree/tree.conf is '$STORAGE'; it is virtio, nvme or emmc"
+_nvmens=0
+_disk() {   # _disk sys|persist DRIVE-ID FILE VIRTIO-DEVICE [VIRTIO-PROPERTIES]
+    local n=0 dev=emmc
+    CMD+=(-drive "if=none,file=$3,format=raw,id=$2")
+    case "$STORAGE" in
+        virtio) CMD+=(-device "$4,drive=$2${5:+,$5}") ;;
+        nvme)
+            [[ $_nvmens -gt 0 ]] || CMD+=(-device nvme,id=kblnvme,serial=kblnvme)
+            _nvmens=$((_nvmens + 1))
+            CMD+=(-device "nvme-ns,drive=$2,bus=kblnvme,nsid=$_nvmens") ;;
+        emmc)
+            [[ "$1" == sys ]] || { n=1; dev=sd-card; }
+            CMD+=(-device "pcie-root-port,id=kblrp$n,chassis=$((101 + n))"
+                  -device "sdhci-pci,id=kblmmc$n,bus=kblrp$n"
+                  -device "$dev,drive=$2,bus=kblrp$n/kblmmc$n/sd-bus") ;;
+    esac
+}
+
+# ROOT=disk: a GPT system disk, as on a device.  Partition 1 "boot" (FAT32)
+# takes the kernel and the boot configuration on every run; partition 2
+# "rootfs" holds a copy of the ext4 image ROOTFS_IMAGE.  Made when SYSDISK does
+# not exist and never overwritten; --reset-sysdisk makes it again.  Offsets and
+# the PARTUUID are always read back from the disk itself.
+_sdboot=""; _p1off=""; _puuid=""
+_part() {   # _part DISK N: partition N's byte offset, byte size and PARTUUID
+    sfdisk --json -- "$1" 2>/dev/null | python3 -I -c 'if True:
+        import json, sys
+        t = json.load(sys.stdin)["partitiontable"]; s = t.get("sectorsize", 512)
+        p = t["partitions"][int(sys.argv[1]) - 1]
+        print(p["start"] * s, p["size"] * s, p.get("uuid", "").lower())' "$2" 2>/dev/null
+}
+# Built under a temporary name and renamed into place, so a failure halfway
+# leaves no disk that a later run would trust.
+_mksysdisk() {
+    local bps rsz ptype out p1off p1size p2off p2size
+    local -a attr=(-A 1:set:2)
+    bps="$(kbl_tree_get "$tree" BOOTPART_SIZE)"
+    [[ -n "$bps" ]] || die "ROOT=disk: state BOOTPART_SIZE (the size of the FAT32 boot partition,
+       e.g. 256M) in $tree/tree.conf"
+    [[ "$bps" =~ ^[1-9][0-9]*[KMGT]$ ]] \
+        || die "BOOTPART_SIZE in $tree/tree.conf is '$bps'; it is a whole number of K, M, G or T"
+    [[ -f "$_rimg" ]] || die "rootfs image not found: $_rimg (ROOTFS_IMAGE in $tree/tree.conf)"
+    rsz="$(stat -L -c%s "$_rimg")" || rsz=0     # Buildroot's rootfs.ext4 is a symlink
+    (( rsz > 0 && rsz % 512 == 0 )) || die "$_rimg is not a whole number of 512-byte sectors"
+    command -v sgdisk  >/dev/null 2>&1 || die "sgdisk (gptfdisk) required to make the system disk"
+    command -v mformat >/dev/null 2>&1 || die "mtools (mformat) required to make the system disk"
+    ptype=0700; [[ "$BOOT" == uefi ]] && { ptype=EF00; attr=(); }
+    _sdnew="$(mktemp -p "$(dirname "$_sysdisk")" ".$(basename "$_sysdisk").XXXXXX")" \
+        || die "cannot create a file beside $_sysdisk"
+    { truncate -s "$bps" "$_sdnew" && truncate -s "+$rsz" "$_sdnew" && truncate -s +2M "$_sdnew"; } \
+        || die "cannot size $_sdnew"
+    # Alignment 1, so partition 2 ends exactly where the image does; partition 1
+    # starts at 1 MiB all the same.
+    out="$(sgdisk -o -a 1 -n "1:2048:+$bps" -t "1:$ptype" -c 1:boot ${attr[@]+"${attr[@]}"} \
+                  -n "2:0:+$((rsz / 512))" -t 2:8300 -c 2:rootfs "$_sdnew" 2>&1)" \
+        || die "sgdisk could not partition $_sdnew: $out"
+    read -r p1off p1size _ < <(_part "$_sdnew" 1)
+    read -r p2off p2size _ < <(_part "$_sdnew" 2)
+    [[ -n "$p1off" && -n "$p2off" ]] || die "sfdisk --json reads no partitions back from $_sdnew"
+    [[ "$p2size" == "$rsz" ]] || die "partition 2 of $_sdnew is $p2size bytes; $_rimg is $rsz"
+    out="$(mformat -i "${_sdnew}@@${p1off}" -F -T "$((p1size / 512))" -h 64 -s 32 -v BOOT :: 2>&1)" \
+        || die "mformat could not make FAT32 in partition 1 (BOOTPART_SIZE=$bps; FAT32 needs about 33M): $out"
+    dd if="$_rimg" of="$_sdnew" bs=64K seek="$p2off" oflag=seek_bytes conv=notrunc,sparse status=none \
+        || die "could not copy $_rimg into partition 2 of $_sdnew"
+    mv -f "$_sdnew" "$_sysdisk" || die "could not rename $_sdnew to $_sysdisk"
+    _sdnew=""
+    say "sysdisk      made $_sysdisk: boot $bps FAT32 (type $ptype), rootfs from $_rimg"
+}
+if [[ "$ROOT" == disk ]]; then
+    _rimg="$(kbl_tree_get "$tree" ROOTFS_IMAGE)"
+    [[ -n "$_rimg" ]] || die "ROOT=disk: state ROOTFS_IMAGE (an ext4 file-system image) in $tree/tree.conf"
+    _rimg="$(kbl_tree_path "$tree" "$_rimg")"
+    _sysdisk="$(kbl_tree_get "$tree" SYSDISK)"
+    _sysdisk="$(kbl_tree_path "$tree" "${_sysdisk:-disk/system.img}")"
+    if [[ "$BOOT" == uefi ]]; then
+        _efil="$(kbl_tree_get "$tree" EFI_LOADER)"
+        [[ -n "$_efil" ]] || die "ROOT=disk with boot uefi: state EFI_LOADER (a GRUB EFI binary whose
+       embedded config loads /grub.cfg) in $tree/tree.conf"
+        _efil="$(kbl_tree_path "$tree" "$_efil")"
+        [[ -f "$_efil" ]] || die "EFI loader not found: $_efil (EFI_LOADER in $tree/tree.conf)"
+    fi
+    command -v sfdisk  >/dev/null 2>&1 || die "sfdisk (util-linux) required for ROOT=disk"
+    command -v mcopy   >/dev/null 2>&1 || die "mtools (mcopy) required for ROOT=disk"
+    command -v python3 >/dev/null 2>&1 || die "python3 required for ROOT=disk (it reads sfdisk --json)"
+    mkdir -p "$(dirname "$_sysdisk")" || die "cannot create $(dirname "$_sysdisk")"
+    # Claimed like the persistent disk.  When another run holds it, this run
+    # boots a throwaway copy, which the cleanup removes.
+    if ! _persist_busy "$_sysdisk" hd0 \
+       && _claim_aux sysdisk "$(printf '%s' "$_sysdisk" | sha1sum | cut -c1-16)"; then
+        if [[ $RESET_SYSDISK -eq 1 ]]; then rm -f "$_sysdisk" || die "could not remove $_sysdisk"; fi
+        [[ -e "$_sysdisk" ]] || _mksysdisk
+        _sdboot="$_sysdisk"
+    else
+        [[ $RESET_SYSDISK -eq 0 ]] || die "--reset-sysdisk: $_sysdisk is in use by another run"
+        _tdata="$(kbl_tree_data "$tree")"; mkdir -p "$_tdata" || die "cannot create $_tdata"
+        _sdcopy="$(mktemp -p "$_tdata" --suffix=.img "sysdisk-${PORT}.XXXXXX")" \
+            || die "cannot create a throwaway copy of $_sysdisk in $_tdata"
+        cp --reflink=auto --sparse=always -f "$_sysdisk" "$_sdcopy" \
+            || die "could not copy $_sysdisk to $_sdcopy"
+        say "sysdisk      $_sysdisk is in use by another run -- booting a throwaway copy"
+        _sdboot="$_sdcopy"
+    fi
+    [[ -f "$_rimg" && "$_rimg" -nt "$_sysdisk" ]] \
+        && say "sysdisk      $_rimg is newer than $_sysdisk; --reset-sysdisk makes the disk again from it"
+    read -r _p1off _ _ < <(_part "$_sdboot" 1)
+    read -r _ _ _puuid < <(_part "$_sdboot" 2)
+    [[ -n "$_p1off" && -n "$_puuid" ]] || die "sfdisk --json reads no boot and rootfs partitions from
+       $_sdboot; make the disk again with --reset-sysdisk"
+fi
+
 # Persistent per-tree disk: a writable virtio-blk image on SSD, kept between runs
 # (and reboots) so the guest's /persist survives. Opt-in (--persist, or PERSIST=1
 # in tree.conf); its path/size are stated by the tree, never hardcoded here. The
 # guest's S45persist init script finds it by the serial set below and mounts it.
-# Every failure here is non-fatal -- the guest just boots without /persist.
+# Every failure here is non-fatal -- the guest just boots without /persist --
+# except a size an SD card (STORAGE=emmc) cannot have.
 persist_ok=0; persist_disk=""; persist_dev=""
 [[ $PERSIST_SET -eq 1 ]] || PERSIST="$(kbl_tree_get "$tree" PERSIST)"
 if [[ "$PERSIST" == 1 ]]; then
@@ -398,6 +548,20 @@ if [[ "$PERSIST" == 1 ]]; then
             fi
         fi
         if [[ -f "$persist_disk" ]]; then
+            # QEMU's sd-card takes only a power-of-two size, and rounding would
+            # change the disk, so any other size is refused.
+            if [[ "$STORAGE" == emmc ]]; then
+                _pb="$(stat -c%s "$persist_disk" 2>/dev/null)" || _pb=0
+                if (( _pb == 0 || (_pb & (_pb - 1)) != 0 )); then
+                    if [[ $_pfresh -eq 1 ]]; then
+                        rm -f "$persist_disk"
+                        die "PERSIST_SIZE in $tree/tree.conf is $_psize; with STORAGE=emmc the persistent
+       disk is an SD card, whose size QEMU wants a power of two"
+                    fi
+                    die "$persist_disk is $_pb bytes; with STORAGE=emmc it is an SD card, whose size
+       QEMU wants a power of two (resize it, or remove it and state such a PERSIST_SIZE)"
+                fi
+            fi
             # Format a freshly created image now, so the guest only ever mounts it.
             # If the host has no mkfs.ext4 the guest's S45persist formats on first
             # boot instead -- both paths converge on a labelled ext4.
@@ -405,9 +569,8 @@ if [[ "$PERSIST" == 1 ]]; then
                 mkfs.ext4 -q -L kblpersist -F "$persist_disk" >/dev/null 2>&1 \
                     || say "persist      host mkfs failed; the guest will format $persist_disk"
             fi
-            # virtio transport per arch, matching the NIC convention: PCIe where it
-            # is reliably probed (x86 pc, arm64 virt), MMIO on riscv virt.
-            case "$arch" in riscv64) persist_dev="virtio-blk-device" ;; *) persist_dev="virtio-blk-pci" ;; esac
+            # virtio over PCIe, as everywhere: every machine here has a PCIe host.
+            persist_dev="virtio-blk-pci"
             persist_ok=1
         fi
     fi
@@ -415,6 +578,7 @@ fi
 
 append="console=$console"
 [[ $KASLR -eq 1 ]] || append="$append nokaslr"
+[[ "$ROOT" == disk ]] && append="$append root=PARTUUID=$_puuid rootwait rw"
 # Extra command-line words.  Stated per tree with CMDLINE_EXTRA= in tree.conf and
 # added to with --append; never hardcoded here, because what a guest needs on its
 # command line is a property of that guest, not of the launcher.
@@ -474,8 +638,10 @@ done
 # `ping` there instead of killing qemu), Ctrl-A X quits qemu, Ctrl-A C reaches
 # the monitor.  Stated rather than left to -nographic, whose own default is a
 # console WITH signals, and no monitor at all once QMP below takes the monitor
-# slot -- which is how Ctrl-C came to end the whole guest.
-declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic
+# slot -- which is how Ctrl-C came to end the whole guest.  -nodefaults, because
+# every device the guest has is stated here: it drops QEMU's default CD-ROM,
+# floppy, parallel port and VGA.
+declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic -nodefaults
                 -chardev stdio,id=kblcon,mux=on,signal=off -serial chardev:kblcon
                 -mon chardev=kblcon,mode=readline)
 
@@ -512,27 +678,37 @@ _shm_room_for() {
     (( avail > need + (need / 4) )) || die "$_statedir has $((avail / 1048576)) MiB free; this run needs \
 $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_DIR elsewhere."
 }
+_bdisk=""; _bvirt=""   # the disk the boot reads first, and its virtio device
 case "$BOOT" in
     direct)
         CMD+=(-kernel "$image" -append "$append")
         [[ -n "$INITRD" ]] && CMD+=(-initrd "$INITRD")
+        if [[ "$ROOT" == disk ]]; then
+            _bdisk="$_sdboot"
+            _bvirt="virtio-blk-pci"
+        fi
         ;;
     uboot)
         ub="${BIOS:-$(kbl_tree_get "$tree" UBOOT)}"
         [[ -n "$ub" ]] || die "boot uboot: state UBOOT= in $tree/tree.conf or pass --bios"
         ub="$(kbl_tree_path "$tree" "$ub")"
         [[ -f "$ub" ]] || die "u-boot not found: $ub"
-        bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/uboot.img}")"
-        [[ -f "$bd" ]] || die "no boot disk: $bd -- build it first with your workspace's firmware/build-bootdisk.sh (not shipped with kbuildlab; see README)"
-        # Where boot.scr loads the image and the initramfs.  On QEMU's virt
+        if [[ "$ROOT" != disk ]]; then
+            bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/uboot.img}")"
+            [[ -f "$bd" ]] || die "no boot disk: $bd -- build it first with your workspace's firmware/build-bootdisk.sh (not shipped with kbuildlab; see README)"
+        fi
+        # Where boot.scr loads the image and the initramfs, which is also where
+        # the kernel is entered (attach's hardware breakpoint).  On QEMU's virt
         # machine the defaults are its own: RAM at 1 GiB on arm64, at 2 GiB on
-        # riscv64, where u-boot itself runs at 0x80200000 -- so the image goes
-        # above it.  Any other machine states both, and states RAM_BASE for the
-        # check that they lie in the guest's RAM; virt's RAM base is its own.
+        # riscv64.  riscv64 enters at RAM base + text_offset whatever the load
+        # address, because u-boot's booti moves every image in RAM there; u-boot
+        # itself was loaded there too, but has relocated by the time boot.scr
+        # runs.  Any other machine states both, and states RAM_BASE for the check
+        # that they lie in the guest's RAM; virt's RAM base is its own.
         _ramb=""; _dla=""; _dra=""
         case "$arch:${machine%%,*}" in
             arm64:virt|arm64:virt-*)     _ramb=0x40000000; _dla=0x40200000; _dra=0x48000000 ;;
-            riscv64:virt|riscv64:virt-*) _ramb=0x80000000; _dla=0x84000000; _dra=0x88300000 ;;
+            riscv64:virt|riscv64:virt-*) _ramb=0x80000000; _dla=0x80200000; _dra=0x88000000 ;;
         esac
         _rb="$(kbl_tree_get "$tree" RAM_BASE)"
         if [[ -n "$_rb" ]]; then
@@ -552,17 +728,29 @@ case "$BOOT" in
         command -v mkimage >/dev/null 2>&1 || die "mkimage (uboot-tools) required for boot uboot"
         command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
         _loadaddr="$la"                                 # attach's HW-bp goes here
-        _shm_room_for "$bd"
-        shmdisk="$_statedir/kbl-boot-${PORT}.img"
-        cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
+        if [[ "$ROOT" == disk ]]; then
+            _bdisk="$_sdboot"; _fat="${_sdboot}@@${_p1off}"
+            _bfull="larger than partition 1? raise BOOTPART_SIZE and pass --reset-sysdisk"
+        else
+            _shm_room_for "$bd"
+            shmdisk="$_statedir/kbl-boot-${PORT}.img"
+            cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
+            _bdisk="$shmdisk"; _fat="${shmdisk}@@1M"
+            _bfull="larger than the free space in $bd? rebuild it: firmware/build-bootdisk.sh"
+        fi
         # u-boot ignores QEMU -append, so this run's bootargs ride in boot.scr.
         # The initrd is loaded, and named to booti, only when there is one: `-`
         # in its place is how booti is told there is none.  Loading it anyway
         # under --no-initrd would boot a root filesystem the caller asked not to
         # have, and the flag would look like it did nothing.
+        # U-Boot's script boot method exports where it found boot.scr; only the
+        # virtio boot disk keeps the fixed address it has always had.
+        # shellcheck disable=SC2016
+        _ldev='${devtype} ${devnum}:${distro_bootpart}'
+        [[ "$ROOT" != disk && "$STORAGE" == virtio ]] && _ldev="virtio 0:1"
         _bc="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"; _bs="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"
-        { printf 'load virtio 0:1 %s /Image\n' "$la"
-          [[ -n "$INITRD" ]] && printf 'load virtio 0:1 %s /rootfs.cpio.gz\n' "$ra"
+        { printf 'load %s %s /Image\n' "$_ldev" "$la"
+          [[ -n "$INITRD" ]] && printf 'load %s %s /rootfs.cpio.gz\n' "$_ldev" "$ra"
           printf "setenv bootargs '%s'\n" "$append"
           if [[ -n "$INITRD" ]]; then
               printf 'booti %s %s:${filesize} ${fdtcontroladdr}\n' "$la" "$ra"
@@ -574,8 +762,8 @@ case "$BOOT" in
         _mka="$arch"; [[ "$arch" == riscv64 ]] && _mka="riscv"
         mkimage -A "$_mka" -O linux -T script -C none -d "$_bc" "$_bs" >/dev/null 2>&1 \
             || die "mkimage failed to build boot.scr"
-        mcopy -o -i "${shmdisk}@@1M" "$_bs" ::/boot.scr \
-            || die "could not write boot.scr into the boot-disk copy $shmdisk"
+        mcopy -o -i "$_fat" "$_bs" ::/boot.scr \
+            || die "could not write boot.scr into $_bdisk"
         rm -f "$_bc" "$_bs"; _bc=""; _bs=""
         # The boot disk carries the kernel and the initramfs as files, put there
         # by firmware/build-bootdisk.sh on the day it ran.  Copy today's in over
@@ -583,15 +771,15 @@ case "$BOOT" in
         # on-disk image is untouched -- and a kernel rebuilt since then cannot
         # be shadowed by the one baked in.  That failure has no symptom: the
         # guest boots either way, and only the version string says which.
-        mcopy -o -i "${shmdisk}@@1M" "$image" ::/Image \
-            || die "could not write $image into the boot-disk copy -- larger than the free space in $bd? rebuild it: firmware/build-bootdisk.sh"
+        mcopy -o -i "$_fat" "$image" ::/Image \
+            || die "could not write $image into $_bdisk -- $_bfull"
         if [[ -n "$INITRD" ]]; then
-            mcopy -o -i "${shmdisk}@@1M" "$INITRD" ::/rootfs.cpio.gz \
+            mcopy -o -i "$_fat" "$INITRD" ::/rootfs.cpio.gz \
                 || die "could not write $INITRD into the boot-disk copy (see above)"
         else
-            mdel -i "${shmdisk}@@1M" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
+            mdel -i "$_fat" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
         fi
-        case "$arch" in x86_64) _blk="virtio-blk-pci" ;; *) _blk="virtio-blk-device" ;; esac
+        _bvirt="virtio-blk-pci"
         # Firmware placement differs: on arm64 u-boot IS the -bios firmware; on
         # riscv the M-mode firmware is OpenSBI (QEMU's default -bios) and u-boot
         # is its S-mode payload, loaded via -kernel.
@@ -599,8 +787,6 @@ case "$BOOT" in
             riscv64) CMD+=(-kernel "$ub") ;;
             *)       CMD+=(-bios "$ub") ;;
         esac
-        CMD+=(-drive "if=none,file=${shmdisk},format=raw,id=hd0"
-              -device "${_blk},drive=hd0")
         ;;
     uefi)
         # UEFI: OVMF firmware (pflash CODE read-only + a per-run writable VARS
@@ -609,8 +795,10 @@ case "$BOOT" in
         [[ -n "$code" && -n "$vars" ]] || die "boot uefi: state OVMF_CODE= and OVMF_VARS= in $tree/tree.conf"
         code="$(kbl_tree_path "$tree" "$code")"; vars="$(kbl_tree_path "$tree" "$vars")"
         [[ -f "$code" && -f "$vars" ]] || die "OVMF firmware not found: $code / $vars"
-        bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/esp.img}")"
-        [[ -f "$bd" ]] || die "no ESP disk: $bd -- build it first with your workspace's firmware/build-esp.sh (not shipped with kbuildlab; see README)"
+        if [[ "$ROOT" != disk ]]; then
+            bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/esp.img}")"
+            [[ -f "$bd" ]] || die "no ESP disk: $bd -- build it first with your workspace's firmware/build-esp.sh (not shipped with kbuildlab; see README)"
+        fi
         # Where the EFI stub puts the kernel's image base.  It is not the boot
         # protocol's 0x1000000: the stub allocates, and the trees here measured
         # 0x1800000.  Stated per tree, because a wrong one is a debugger
@@ -621,9 +809,16 @@ case "$BOOT" in
        and read _text's physical address from \`kearly status\`."
         _loadaddr="$la"
         command -v mcopy >/dev/null 2>&1 || die "mtools (mcopy) required for boot uefi"
-        _shm_room_for "$bd"
-        shmdisk="$_statedir/kbl-boot-${PORT}.img"
-        cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
+        if [[ "$ROOT" == disk ]]; then
+            _bdisk="$_sdboot"; _fat="${_sdboot}@@${_p1off}"
+            _bfull="larger than partition 1? raise BOOTPART_SIZE and pass --reset-sysdisk"
+        else
+            _shm_room_for "$bd"
+            shmdisk="$_statedir/kbl-boot-${PORT}.img"
+            cp -f "$bd" "$shmdisk" || die "could not copy $bd to $shmdisk"
+            _bdisk="$shmdisk"; _fat="${shmdisk}@@1M"
+            _bfull="larger than the free space in $bd? rebuild it: firmware/build-esp.sh"
+        fi
         shmvars="$_statedir/kbl-vars-${PORT}.fd"
         cp -f "$vars" "$shmvars" || die "could not copy $vars to $shmvars"
         # Rewrite grub.cfg with this run's bootargs (kaslr/console).  The initrd
@@ -641,8 +836,8 @@ case "$BOOT" in
           printf 'linux /vmlinuz %s\n' "$append"
           [[ -n "$INITRD" ]] && printf 'initrd /rootfs.cpio.gz\n'
           printf 'boot\n'; } > "$_gc"
-        mcopy -o -i "${shmdisk}@@1M" "$_gc" ::/grub.cfg \
-            || die "could not write grub.cfg into the ESP copy $shmdisk"
+        mcopy -o -i "$_fat" "$_gc" ::/grub.cfg \
+            || die "could not write grub.cfg into $_bdisk"
         rm -f "$_gc"; _gc=""
         # The ESP carries the kernel and the initramfs as files, and
         # firmware/build-esp.sh put whatever was current the day it ran into
@@ -651,35 +846,56 @@ case "$BOOT" in
         # since then cannot be shadowed by the one baked in -- a failure with no
         # symptom, because the guest boots either way and only the version
         # string says which.
-        mcopy -o -i "${shmdisk}@@1M" "$image" ::/vmlinuz \
-            || die "could not write $image into the ESP copy -- larger than the free space in $bd? rebuild it: firmware/build-esp.sh"
+        mcopy -o -i "$_fat" "$image" ::/vmlinuz \
+            || die "could not write $image into $_bdisk -- $_bfull"
         if [[ -n "$INITRD" ]]; then
-            mcopy -o -i "${shmdisk}@@1M" "$INITRD" ::/rootfs.cpio.gz \
+            mcopy -o -i "$_fat" "$INITRD" ::/rootfs.cpio.gz \
                 || die "could not write $INITRD into the ESP copy (see above)"
         else
             # Nothing names it now, but an unreferenced file is still a file a
             # future grub.cfg could pick up.  Best effort; absence is fine.
-            mdel -i "${shmdisk}@@1M" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
+            mdel -i "$_fat" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
+        fi
+        # The system disk's partition 1 is its ESP, so the loader goes there too.
+        # -D s skips a directory that is there; without it mtools asks on a terminal.
+        if [[ "$ROOT" == disk ]]; then
+            mmd -D s -i "$_fat" ::/EFI >/dev/null 2>&1; mmd -D s -i "$_fat" ::/EFI/BOOT >/dev/null 2>&1
+            mcopy -o -i "$_fat" "$_efil" ::/EFI/BOOT/BOOTX64.EFI \
+                || die "could not write $_efil into $_bdisk"
         fi
         CMD+=(-drive "if=pflash,format=raw,readonly=on,file=${code}"
-              -drive "if=pflash,format=raw,file=${shmvars}"
-              -drive "if=none,file=${shmdisk},format=raw,id=hd0"
-              -device "virtio-blk-pci,drive=hd0")
+              -drive "if=pflash,format=raw,file=${shmvars}")
+        _bvirt="virtio-blk-pci"
         ;;
     *) die "unknown boot mode '$BOOT' (known: direct, uboot, uefi)" ;;
 esac
+# The disk the boot reads first: a firmware chain's boot disk, or the system disk.
+[[ -n "$_bdisk" ]] && _disk sys hd0 "$_bdisk" "$_bvirt"
 # Attach the persistent disk (after any boot disk, so it never displaces hd0). The
 # serial is how the guest tells it apart from the boot disk regardless of which
-# /dev/vdX each lands on. Not in the cleanup trap: this image is meant to persist.
+# /dev/vdX each lands on; nvme and emmc carry none, and there the guest finds it by
+# its ext4 label kblpersist. Not in the cleanup trap: this image is meant to persist.
 if [[ $persist_ok -eq 1 ]]; then
-    CMD+=(-drive "if=none,file=${persist_disk},format=raw,id=kblpersist"
-          -device "${persist_dev},drive=kblpersist,serial=kblpersist")
+    _disk persist kblpersist "$persist_disk" "$persist_dev" serial=kblpersist
+fi
+# ROOT=disk: today's modules archive goes on the boot partition as
+# /modules.cpio.gz; without a current one, an old archive there is removed so the
+# guest cannot install modules of another build.
+if [[ "$ROOT" == disk ]]; then
+    if [[ -n "$_mfw" ]]; then
+        mcopy -o -i "${_sdboot}@@${_p1off}" "$_mfw" ::/modules.cpio.gz \
+            || die "could not write $_mfw into the boot partition of $_sdboot -- larger than
+       partition 1? raise BOOTPART_SIZE and pass --reset-sysdisk"
+    else
+        mdel -i "${_sdboot}@@${_p1off}" ::/modules.cpio.gz >/dev/null 2>&1 || true
+    fi
 fi
 # User-mode (SLIRP) networking on a virtio NIC: no host setup, gives the guest
 # DHCP + DNS + outbound (ping/tcpdump/apt), 10.0.2.15 behind gateway 10.0.2.2.
 # virtio-net-pci works on every machine here (pc, arm64 virt, riscv virt all PCIe).
 # A host->guest:22 forward lets neovim edit files in the guest over SSH
 # (nvim scp://root@localhost:<sshport>//path, password "root").
+_lan=()
 if [[ $NET -eq 1 ]]; then
     [[ -n "$SSHPORT" ]] || SSHPORT="$(kbl_tree_get "$tree" SSH_PORT)"; SSHPORT="${SSHPORT:-2222}"
     if [[ $SSHPORT_SET -eq 1 ]]; then
@@ -694,14 +910,21 @@ if [[ $NET -eq 1 ]]; then
         done
         [[ -n "$SSHPORT" ]] || die "no free ssh-forward port near $_so"
     fi
-    # virtio NIC transport: PCIe on x86 (pc) and arm64 (virt); MMIO on riscv,
-    # whose virt PCIe host is not reliably probed but whose virtio-mmio always is.
-    case "$arch" in
-        riscv64) _nicdev="virtio-net-device" ;;
-        *)       _nicdev="virtio-net-pci" ;;
-    esac
+    # The primary NIC is virtio over PCIe unless NIC_DEVICE in tree.conf names
+    # another device type.
+    _nicdev="$(kbl_tree_get "$tree" NIC_DEVICE)"; _nicsay="${_nicdev:-virtio}"
+    _nicdev="${_nicdev:-virtio-net-pci}"
     CMD+=(-netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSHPORT}-:22"
           -device "${_nicdev},netdev=net0")
+    # LAN_NICS: more ports of the guest's own on one private segment (hub 1; the
+    # legacy -net options use hub 0), so XDP and RDMA can run between them; qemu
+    # warns that this hub reaches no host network, which is the point.
+    read -r -a _lan <<<"$(kbl_tree_get "$tree" LAN_NICS)"
+    _n=0
+    for _t in ${_lan[@]+"${_lan[@]}"}; do
+        CMD+=(-netdev "hubport,id=kbllan${_n},hubid=1" -device "${_t},netdev=kbllan${_n}")
+        _n=$((_n + 1))
+    done
 else
     # Omitting our NIC is not the same as having none: qemu creates its DEFAULT
     # user-mode NIC on any machine that has one, so --no-net used to print
@@ -776,7 +999,11 @@ fi
 # one bus and hear each other.  All PCI, which every machine here has.
 [[ $EMULATE_SET -eq 1 ]] || EMULATE="$(kbl_tree_get "$tree" EMULATE)"
 if [[ "$EMULATE" == 1 ]]; then
-    CMD+=(-blockdev node-name=kblnvme,driver=null-co -device nvme,serial=kblnvme,drive=kblnvme
+    # Beside STORAGE=nvme's controller this one needs a serial of its own: QEMU
+    # derives the subsystem NQN from it, and Linux rejects a second controller
+    # of one subsystem.
+    _ens=kblnvme; [[ "$STORAGE" == nvme ]] && _ens=kblnvme-null
+    CMD+=(-blockdev node-name=kblnvme,driver=null-co -device "nvme,serial=${_ens},drive=kblnvme"
           -device ich9-ahci,id=kblahci -blockdev node-name=kblsata,driver=null-co
           -device ide-hd,bus=kblahci.0,drive=kblsata
           -device virtio-scsi-pci,id=kblscsi -blockdev node-name=kblscsid,driver=null-co
@@ -801,12 +1028,15 @@ wsock=""
 if [[ -t 0 ]]; then
     wsock="$_statedir/kbl-wsz-${PORT}.sock"
     rm -f "$wsock"
-    case "$arch" in riscv64) _wsdev="virtio-serial-device" ;; *) _wsdev="virtio-serial-pci" ;; esac
+    _wsdev="virtio-serial-pci"
     CMD+=(-chardev "socket,id=kblwsz,path=${wsock},server=on,wait=off"
           -device "${_wsdev},id=kblwszbus"
           -device "virtserialport,bus=kblwszbus.0,chardev=kblwsz,name=org.kbuildlab.winsize")
 fi
 [[ $RUN -eq 1 ]] || CMD+=(-S)
+# QEMU_ARGS: the tree's extra qemu arguments, split on blanks, before -- ARGS.
+read -r -a _qargs <<<"$(kbl_tree_get "$tree" QEMU_ARGS)"
+CMD+=(${_qargs[@]+"${_qargs[@]}"})
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
 # Record this run so `attach` (and through it an editor's adapter) can match
@@ -844,6 +1074,8 @@ _write_state() {   # _write_state [QEMU_PID]
     [[ $NET -eq 1 ]] && rec+=("KBL_SSH_PORT=$SSHPORT")
     [[ $QMP -eq 1 ]] && rec+=("KBL_QMP_PORT=$QMPPORT" "KBL_QMP_SOCK=$qmpsock")
     [[ $persist_ok -eq 1 ]] && rec+=("KBL_PERSIST=$persist_disk")
+    rec+=("KBL_ROOT=$ROOT")
+    [[ -n "$_sdboot" ]] && rec+=("KBL_SYSDISK=$_sdboot")
     if [[ -n "$qpid" ]]; then
         # pid alone is not an identity: pids are reused.  The process start time
         # from /proc pins it, so a state file that outlives its guest can be told
@@ -864,14 +1096,22 @@ _write_state
 say "guest        $(kbl_tree_label "$tree") ($arch) on :$PORT"
 if [[ "$BOOT" == direct ]]; then
     say "boot         direct (-kernel; head.S _text immediately)"
-    [[ -n "$INITRD" ]] && say "initrd       $rootfs" \
-                       || say "initrd       none -- kernel panics at mount-root if continued (early-boot only)"
+    if [[ "$ROOT" == initramfs ]]; then
+        [[ -n "$INITRD" ]] && say "initrd       $rootfs" \
+                           || say "initrd       none -- kernel panics at mount-root if continued (early-boot only)"
+    fi
+elif [[ "$ROOT" == disk ]]; then
+    say "boot         $BOOT firmware chain; kernel on the system disk's partition 1"
 else
     say "boot         $BOOT firmware chain; rootfs on boot disk"
 fi
-[[ -n "$mods" ]] && say "modules      $mods appended; loaded at boot for the devices present"
-[[ $NET -eq 1 ]] && say "net          user/virtio (guest 10.0.2.15); ssh -p $SSHPORT root@localhost (pw: root)" \
+[[ "$ROOT" == disk ]] && say "root         disk $_sdboot (PARTUUID $_puuid)"
+[[ "$STORAGE" != virtio ]] && say "storage      $STORAGE (every disk this run attaches)"
+[[ -n "$mods" && -z "$_mfw" ]] && say "modules      $mods appended; loaded at boot for the devices present"
+[[ -n "$_mfw" ]] && say "modules      $mods on the boot partition (/modules.cpio.gz); the rootfs installs it"
+[[ $NET -eq 1 ]] && say "net          user/$_nicsay (guest 10.0.2.15); ssh -p $SSHPORT root@localhost (pw: root)" \
                  || say "net          none (--no-net)"
+[[ ${#_lan[@]} -gt 0 ]] && say "lan          ${_lan[*]} on one private segment inside the guest"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
 [[ "$EMULATE" == 1 ]] && say "emulate      nvme, ahci, virtio-scsi, usb, virtio input/gpu/sound/crypto/balloon/console, hda, pci uart, i6300esb, can x3$([[ $NET -eq 1 ]] && echo ', e1000e')"
 [[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock (drgn reads the guest here; it does not pause it)" \
