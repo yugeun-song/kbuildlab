@@ -234,6 +234,17 @@ if [[ -r "$_st" ]]; then
             _ub="$(kbl_tree_get "$tree" UBOOT)"
             _ub="$(kbl_tree_path "$tree" "$_ub")"
             [[ -n "$_ub" && -f "${_ub%.bin}" ]] && FWSYM="${_ub%.bin}"
+            # u-boot linked over the kernel's own entry (riscv64: RAM base +
+            # text_offset, where booti moves the kernel) leaves its symbols bound to
+            # the kernel-stage breakpoints the run-to-_text sets, and gdb 18.1 aborts
+            # in breakpoint_free_objfile when that file is dropped.  On that run they
+            # would only ever describe kernel memory, so they are not loaded at all.
+            if [[ -n "$FWSYM" && $BOOTBREAK -eq 1 ]] && command -v readelf >/dev/null 2>&1; then
+                while read -r _t _off _va _pa _fsz _msz _rest; do
+                    [[ "$_t" == LOAD ]] || continue
+                    (( _bla >= _va && _bla < _va + _msz )) && { FWSYM=""; break; }
+                done < <(readelf -lW "$FWSYM" 2>/dev/null)
+            fi
         fi
     fi
 fi
@@ -361,15 +372,16 @@ ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
 # returns). x86 lands at the decompressor entry; add `kearly kaslr auto` there.
 _bootbreak=0
 [[ $BOOTBREAK -eq 1 && -n "$tool" ]] && { ARGS+=(-ex "kearly bootbreak"); _bootbreak=1; }
-# The firmware symbols above are loaded at 0 because that is where u-boot is LINKED;
-# it relocates itself to the top of DRAM, so they never describe the running firmware
+# The firmware symbols above sit where u-boot is LINKED: 0 on arm64, RAM base +
+# text_offset on riscv64, the very address its booti later moves the kernel to.  It
+# relocates itself to the top of DRAM, so they never describe the running firmware
 # anyway.  What they do describe, once the run-to-_text has landed inside the kernel,
-# is every small integer the kernel happens to hold: a register reading 0 renders as
-# `_start`, 0x711 as `efi_var_collect_mem+5`, and a context panel of kernel registers
-# comes back labelled with bootloader names.  So they are dropped for a KERNEL stop
-# and kept for a FIRMWARE one (--stop firmware clears BOOTBREAK above, which is the
-# only mode where the pre-kernel stages are what is being debugged).
-[[ $_bootbreak -eq 1 && -n "$FWSYM" ]] && ARGS+=(-ex "remove-symbol-file -a 0")
+# is kernel memory: a register reading 0 renders as `_start`, the riscv entry resolves
+# to two `_start`s, and a context panel of kernel registers comes back labelled with
+# bootloader names.  So they are dropped for a KERNEL stop, by file name since the
+# link address differs per arch, and kept for a FIRMWARE one (--stop firmware clears
+# BOOTBREAK above, the only mode where the pre-kernel stages are being debugged).
+[[ $_bootbreak -eq 1 && -n "$FWSYM" ]] && ARGS+=(-ex "remove-symbol-file $FWSYM")
 # --stop start_kernel: from _text, run on to start_kernel (gdbtools applies the
 # KASLR slide as the high-VA symbol is reached).
 [[ -n "$STOP_AT" ]] && ARGS+=(-ex "break $STOP_AT" -ex "continue")
