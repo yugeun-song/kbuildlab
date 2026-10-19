@@ -470,6 +470,7 @@ shared/per-arch split fails on a specific class of option.
 | `common.config` | what all three architectures can set identically |
 | `arch/<arch>.config` | what looks shared but is not, plus each architecture's own |
 | `soft/*.config`, `arch/<arch>.soft.config` | simulated devices, emulated controllers' drivers, and what traces them -- applied softly |
+| `storage/<bus>.config` | the drivers a root file system on the tree's `STORAGE` bus needs built in -- hard |
 | `verify.sh` | reads the built `.config` back and fails on anything that did not survive |
 
 When a tree tracks `UPSTREAM=mainline`, `arch/<arch>-mainline.config` stands in
@@ -520,6 +521,9 @@ fails loudly instead.
   wireless/Bluetooth/NFC, V4L2/CEC/DVB test devices, virtual KMS, dummy sound and
   USB, uinput/uhid, a virtual TPM, ...); `soft/emulated.config` builds the drivers
   for what `run --emulate` emulates, so real drivers probe real controller models.
+- **The root disk.** `kbuildlab config --preset` merges `storage/<bus>.config` for
+  the tree's `STORAGE` (`virtio`, `nvme`, `emmc`) as a hard fragment, because the
+  driver of the disk holding the root file system cannot be a module.
 - **Seeing them work.** `soft/observability.config` adds `DYNAMIC_DEBUG`,
   `GENERIC_IRQ_DEBUGFS`, `SCHEDSTATS` (for `perf sched`), usbmon, the drop monitor,
   pktgen, mac80211 trace events, and the debugfs views of block, NVMe, SCSI, V4L2

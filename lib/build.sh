@@ -273,13 +273,22 @@ cmd_config() {
         soft=("${KBL_REPO}"/presets/soft/*.config)
         [[ -f "${KBL_REPO}/presets/arch/${arch}.soft.config" ]] \
             && soft+=("${KBL_REPO}/presets/arch/${arch}.soft.config")
+        # The bus the tree's system disk sits on (tree.conf STORAGE) decides which
+        # drivers must be built in to mount the root file system.
+        local storage; storage="$(kbl_tree_get "$tree" STORAGE)"
+        local -a stfrag=()
+        if [[ -n "$storage" ]]; then
+            [[ -f "${KBL_REPO}/presets/storage/${storage}.config" ]] \
+                || die "STORAGE=$storage in $tree/tree.conf names no presets/storage/${storage}.config"
+            stfrag=("${KBL_REPO}/presets/storage/${storage}.config")
+        fi
         if _older_than_preset "$src"; then
             # The hard preset names symbols a kernel older than the one it was
             # verified on lacks or restricts; there it is taken as wishes.
-            soft=("${KBL_REPO}/presets/common.config" "$archpreset" "${soft[@]}")
+            soft=("${KBL_REPO}/presets/common.config" "$archpreset" "${stfrag[@]+"${stfrag[@]}"}" "${soft[@]}")
             say "preset       $(kbl_tree_label "$tree") predates the preset's reference kernel; taken softly"
         else
-            frags=("${KBL_REPO}/presets/common.config" "$archpreset" "${frags[@]+"${frags[@]}"}")
+            frags=("${KBL_REPO}/presets/common.config" "$archpreset" "${stfrag[@]+"${stfrag[@]}"}" "${frags[@]+"${frags[@]}"}")
         fi
     fi
 
