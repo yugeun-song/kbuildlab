@@ -1,7 +1,10 @@
 QEMU_BIN=qemu-system-aarch64
-MACHINE=virt
-CPU=cortex-a72
+MACHINE=virt,gic-version=4,virtualization=on
+CPU=cortex-a710
 CONSOLE=ttyAMA0
 KERNEL_IMAGE_REL=arch/arm64/boot/Image
 GDB_PORT=1235
 QMP_PORT=11235
+STORAGE=emmc
+LAN_NICS=virtio-net-pci virtio-net-pci
+QEMU_ARGS=-device qemu-xhci

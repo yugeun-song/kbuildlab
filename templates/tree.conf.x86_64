@@ -1,7 +1,10 @@
 QEMU_BIN=qemu-system-x86_64
-MACHINE=pc
+MACHINE=q35,sata=off,i8042=off,vmport=off
 CPU=host
 CONSOLE=ttyS0
 KERNEL_IMAGE_REL=arch/x86/boot/bzImage
 GDB_PORT=1234
 QMP_PORT=11234
+STORAGE=nvme
+LAN_NICS=virtio-net-pci virtio-net-pci
+QEMU_ARGS=-device qemu-xhci
