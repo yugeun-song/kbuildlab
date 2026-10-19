@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Build a buildroot cpio initramfs (observability rootfs) for one arch, in the
+# Build the buildroot root file system (observability rootfs) for one arch, in the
 # Ubuntu container (avoids Arch/buildroot conflicts, per project note). No kernel
 # is built here -- the 7 trees supply their own; this is userspace only.
 # Output: rootfs/<arch>/images/rootfs.cpio.gz, usable as:
 #   kbuildlab run <tree> --run -- -initrd rootfs/<arch>/images/rootfs.cpio.gz
+# and rootfs/<arch>/images/rootfs.ext4 (sparse; a symlink to rootfs.ext2), the root
+# partition of the disk boots.
 # Uses the same container runtime kbuildlab picks (podman first, then docker), so a
 # host that keeps dockerd off needs no group and no daemon. Foreground by design.
 set -uo pipefail
@@ -67,3 +69,6 @@ if [ "$rc" -ne 0 ]; then
   echo "build-rootfs: the container build failed (exit $rc); anything under $out/images is from an EARLIER run" >&2
   exit "$rc"
 fi
+for img in rootfs.cpio.gz rootfs.ext4; do
+  [ -e "$out/images/$img" ] || { echo "build-rootfs: the build succeeded but left no $out/images/$img" >&2; exit 1; }
+done

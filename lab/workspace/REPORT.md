@@ -255,3 +255,56 @@ rootfs는 arch별로 공유(같은 arch의 v6.18/mainline/v4.6 트리가 같은 
 
 - 테스트 하네스 쪽 수정 한 건: `commands_arm64.kpt`의 기대 문구. gdbtools의 `kpt`는 이제 MMU가 꺼진 상태에서 페이지 테이블을 덤프하지 않고 그 이유를 설명하므로, 그 설명도 정상 응답으로 받는다.
 
+
+## 14. 2026-10-19~20 개정: 장치형 플랫폼
+
+각 아키텍처의 게스트를 그 아키텍처가 실제로 도는 장치에 가깝게 바꿨습니다. x86_64는 데스크톱·서버, arm64와 riscv64는 임베디드 보드를 기준으로 삼았습니다. 커널 소스와 U-Boot 소스는 고치지 않았습니다. 변경은 `.config`(kbuildlab 프리셋), tree.conf, buildroot, 펌웨어 빌드 스크립트에만 있습니다. 결정 기록과 체크리스트는 `PLATFORM-PLAN.md`에, 시험 로그는 `logs/platform-2026-10-19/`에 있습니다.
+
+**아키텍처별 구성**
+
+| 항목 | x86_64 (0c5b, afce) | arm64 (2349, 3bef, 2fc5=v4.6) | riscv64 (805a, 3367) |
+|---|---|---|---|
+| 머신 | `q35,sata=off,i8042=off,vmport=off` (이전 `pc`) | `virt,gic-version=4,virtualization=on` | `virt` (PLIC) |
+| CPU | max, KVM이면 host | cortex-a710 (이전 a72), EL2/VHE | sifive-u54 (이전 rv64), Sv39 |
+| 펌웨어 | OVMF → GRUB2 | U-Boot v2026.07 | OpenSBI → U-Boot v2026.07 (이전 direct) |
+| 시스템 디스크 | NVMe ns1, GPT: ESP(FAT32) + ext4 | eMMC (sdhci-pci), GPT: boot(FAT) + ext4 | arm64와 같음 |
+| /persist | NVMe ns2 | SD 카드 (두 번째 sdhci-pci) | arm64와 같음 |
+| NIC | virtio-net-pci + LAN용 virtio-net-pci 2개 | 같음 | 같음 (이전 virtio-mmio) |
+| 기타 | `-nodefaults`, qemu-xhci | 같음 | 같음 |
+
+**바뀐 것**
+- **커널 config.** 기존 답은 그대로 두고 필요한 줄만 더했습니다. `presets/storage/{nvme,emmc,virtio}.config`는 root 디스크 드라이버와 ext4, FAT·NLS를 내장으로 강제합니다(hard). `presets/soft/network.config`(AF_XDP, cls/act bpf, clsact, veth, RDMA core, rxe, siw)와 `presets/soft/embedded.config`(i2c-dev, spidev, GPIO cdev, CAN, I2C·SPI 주변장치 드라이버)는 soft로 들어갑니다. 움직인 기존 답은 `SCSI_DEBUG` y→m(내장이면 부팅 때 가짜 디스크를 붙입니다)과 그에 딸린 `CRC_T10DIF`, 805a의 `NLS_ISO8859_1` m→y뿐입니다.
+- **kbuildlab run.** `ROOT=disk`이면 트리마다 GPT 시스템 디스크를 만들어 부팅합니다. 파티션 1에는 커널, boot.scr 또는 grub.cfg, 모듈 아카이브를 실행마다 씁니다. 파티션 2는 buildroot의 rootfs.ext4 사본입니다. root는 `PARTUUID`로 찾습니다. 같은 트리를 동시에 띄우면 두 번째 게스트는 시스템 디스크의 일회용 사본으로 부팅하고 /persist 없이 뜹니다. 그 밖에 `STORAGE`, `NIC_DEVICE`, `LAN_NICS`, `QEMU_ARGS`, `--root`, `--reset-sysdisk`가 생겼습니다.
+- **실보드 옵션.** `run --board imx8mp-evk`(arm64)와 `run --board sifive_u`(riscv64)는 실제 SoC 모델에서 트리의 initramfs로 직접 부팅합니다. I2C, SPI, GPIO, UART를 실제 컨트롤러 모델에서 다룰 수 있습니다. 기본 경로는 virt/virtio이고, 보드는 선택 사항입니다.
+- **rootfs.** ext4 이미지(2560M), eudev, kmod를 넣었습니다. XDP·RDMA(rdma-core, perftest), iperf3, 버스 도구(i2c-tools, libgpiod2, spi-tools, can-utils, mmc-utils, mtd-utils, lm-sensors, libiio), nvme-cli, pciutils, usbutils도 들어 있습니다. S09 스크립트가 부트 파티션의 모듈 아카이브를 바뀌었을 때만 설치합니다. getty는 커널의 `console=`을 따릅니다.
+- **펌웨어.** `firmware/build-uboot.sh`가 U-Boot를 트리 밖에서 빌드합니다. QEMU defconfig에 `firmware/u-boot-*.config` fragment(MMC over PCI, 부팅 순서)를 합칩니다. `firmware/build-grub-efi.sh`는 standalone GRUB EFI를 만듭니다.
+- **포기한 것.** UFS 4.0은 U-Boot ufs-pci가 QEMU의 UFSHCI 4.1 모델과 통신하지 못해 eMMC로 돌아왔습니다. InfiniBand 링크 계층과 EtherCAT은 QEMU 모델이 없습니다. igb 같은 구형 NIC은 virtio로 바꿨습니다. fw_cfg로 모듈을 넘기는 방식은 v6.18의 fw_cfg sysfs 읽기가 바이트 단위·이차 시간이라 부트 파티션 방식으로 바꿨습니다. v4.6에는 XDP, rxe, siw가 없습니다.
+
+**발견하고 고친 결함**
+- kbuildlab: 터미널에서 x86 `ROOT=disk` 게스트를 띄우면 아무 출력 없이 멈췄습니다. ESP에 이미 있는 `EFI` 디렉터리에 `mmd`를 실행하면 mtools가 터미널에서 질문하고 기다리기 때문입니다. 이제 `mmd -D s`를 씁니다.
+- kbuildlab: 셸 보완(completion)이 트리 값을 찾지 못했습니다. 레지스트리는 ID를 키로 쓰는데, 코드가 이름 목록(`treeinfo.names()`, 존재하지 않음)을 찾았기 때문입니다.
+- kbuildlab: riscv의 U-Boot는 커널이 옮겨질 주소(0x80200000)에 링크됩니다. 이 심볼이 커널 단계 브레이크포인트에 묶이면 gdb 18.1이 abort합니다. 이제 커널 엔트리를 덮는 U-Boot 심볼은 싣지 않고, 내릴 때도 파일 이름으로 내립니다.
+- kbuildlab: sifive_u는 E51과 U54 클러스터를 gdb에 서로 다른 inferior로 보여 줍니다. 커널은 inferior 2에서 돌기 때문에 기존 attach는 엔트리에 도달하지 못했습니다. 보드 키 `GDB_INFERIOR`를 두고 extended-remote로 그 inferior에 attach합니다. 이 세션에서만 init 파일(pwndbg)을 건너뜁니다. pwndbg가 실린 gdb 18.1은 스레드 없는 inferior로 전환하는 순간 internal-error를 내기 때문입니다.
+- gdbtools: riscv에서는 U-Boot가 커널 엔트리 PA에서 먼저 실행됩니다. 이제 그 위치에 Image 매직이 없으면 펌웨어로 보고 커널까지 계속 진행합니다.
+- gdbtools: shadow 심볼 파일의 위치를 물리 PC에서 다시 조회하면 shadow 자신이 답해 주소가 틀어졌습니다. 그 결과 shadow가 중복으로 쌓였습니다. 이제 엔트리 심볼의 링크 주소를 한 번 읽어 고정합니다. shadow를 내릴 때도 주소 대신 파일 이름을 씁니다. 주소로 내리면 같은 주소를 덮는 U-Boot 파일이 대신 내려가 gdb가 abort했습니다.
+- gdbtools: riscv의 patchable ftrace entry 때문에 DWARF 함수 시작이 ELF 심볼보다 뒤에 있습니다. 그래서 `b fn`이 위치를 두 개 만들고 한 호출에서 두 번 멈췄습니다. 이제 함수 인스턴스와 regime마다 가장 안쪽 위치 하나만 남깁니다. 심볼 파일을 다시 읽은 뒤에도 같은 규칙을 다시 적용합니다. ADOPT도 같은 함수에 이미 위치가 있는 regime에는 sibling을 만들지 않습니다.
+
+**검증 (2026-10-19~20)**
+
+| 검사 | 범위 | 결과 |
+|---|---|---|
+| `logs/e2e-verify.sh`: head.S 엔트리 → si → `start_kernel` 브레이크(한 번만) → bt → jiffies 워치포인트 → 디스크 root 부팅 → ssh 로그인 → `sync` syscall 정지(`comm == sync`) → 워치포인트 → detach → root 장치·fs·모듈·eth0 확인 | 7종 | 7×12 PASS |
+| `logs/full-verify.sh` | 7종 | 56/56 PASS |
+| `logs/run-tests.sh` | v6.18·mainline·v4.6 | 37/37 PASS |
+| 회귀: scsi_debug 모듈 적재, perf, bpftool, gdb/gdbserver, strace, tcpdump, rxe·siw `PORT_ACTIVE`, XDP generic attach, 재시작 후 /persist 유지, drgn | 7종 | PASS (아래 한계 제외) |
+| 콘솔 크기: 로그인 시 50×200, 창 변경 후 40×150 | 0c5b, 2349, 805a | PASS |
+| `attach --stop firmware`: 리셋 → U-Boot `board_init_f` → 커널 엔트리 → `start_kernel` | 2349, 805a | PASS |
+| `run --board imx8mp-evk`: ttymxc1, FEC DHCP, ssh, `gpiodetect`의 pca6416, tmp105 바인딩, attach | 2349 | PASS |
+| `run --board sifive_u`: ttySIF0, GEM DHCP, SPI NOR(`spi0.0`), attach에서 엔트리·`start_kernel`·워치포인트 | 805a | PASS |
+
+**알려진 한계**
+- drgn 0.3.0은 riscv64 커널 VA를 변환하지 못합니다. kbuildlab도 실행 시 이 사실을 알립니다. v4.6은 vmcoreinfo를 내놓지 않아 drgn이 붙지 않습니다.
+- NVMe 네임스페이스와 MMC 장치 번호는 부팅마다 바뀔 수 있습니다. root는 `PARTUUID`로, /persist는 ext4 라벨로 찾으므로 동작에는 영향이 없습니다.
+- sifive_u attach 세션에는 pwndbg가 없습니다. gdbtools만 동작합니다.
+- riscv firmware 모드에서는 0x80200000에 U-Boot의 `_start`와 커널의 `_start`가 함께 걸립니다. 커널 쪽 이름은 두 번째 줄에 나옵니다.
+- 게스트 busybox에는 `timeout`이 없습니다.

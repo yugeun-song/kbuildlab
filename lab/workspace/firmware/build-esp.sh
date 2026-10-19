@@ -5,6 +5,7 @@
 # usage: build-esp.sh TREE (a kbuildlab tree name)
 # output: <the tree's data directory>/boot/esp.img
 set -uo pipefail
+here="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 tree="${1:?usage: build-esp.sh TREE}"
 # Everything about the tree comes from kbuildlab, which keeps its registry.
 kbl="${KBUILDLAB:-kbuildlab}"
@@ -39,21 +40,14 @@ fi
 # The embedded config just chainloads /grub.cfg from the ESP, which run-qemu
 # rewrites per run with that run's bootargs (kaslr/console) -- the grub.cfg
 # counterpart of u-boot's boot.scr. search keeps it robust to disk enumeration.
-cfg="$(mktemp)"; efi="$(mktemp)"; realcfg="$(mktemp)"
-cat > "$cfg" <<'EOF'
-insmod part_gpt
-insmod fat
-search --no-floppy --set=root --file /grub.cfg
-configfile /grub.cfg
-EOF
+efi="$(mktemp)"; realcfg="$(mktemp)"
 cat > "$realcfg" <<'EOF'
 search --no-floppy --set=root --file /vmlinuz
 linux /vmlinuz console=ttyS0 nokaslr
 initrd /rootfs.cpio.gz
 boot
 EOF
-grub-mkstandalone -O x86_64-efi -o "$efi" "boot/grub/grub.cfg=$cfg" >/dev/null 2>&1 \
-    || { echo "grub-mkstandalone failed"; rm -f "$cfg" "$efi" "$realcfg"; exit 1; }
+bash "$here/build-grub-efi.sh" "$efi" || { rm -f "$efi" "$realcfg"; exit 1; }
 
 sz=$(( ( $(stat -c%s "$image") + $(stat -c%s "$initrd") + $(stat -c%s "$efi") ) / 1048576 + 40 ))
 echo "building $disk (${sz}MiB)"
@@ -65,5 +59,5 @@ mcopy -i "$disk@@1M" "$efi"     ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$disk@@1M" "$realcfg" ::/grub.cfg
 mcopy -i "$disk@@1M" "$image"   ::/vmlinuz
 mcopy -i "$disk@@1M" "$initrd"  ::/rootfs.cpio.gz
-rm -f "$cfg" "$efi" "$realcfg"
+rm -f "$efi" "$realcfg"
 echo "done: $disk"

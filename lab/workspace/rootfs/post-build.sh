@@ -297,3 +297,112 @@ if [ -f "$FSTAB" ]; then
     grep -q '[[:space:]]/sys/kernel/tracing[[:space:]]' "$FSTAB" \
         || printf 'tracefs\t\t/sys/kernel/tracing\ttracefs\tdefaults\t0\t0\n' >> "$FSTAB"
 fi
+
+# Disk boots carry the kernel's modules archive on the boot partition (partition 1
+# of the disk holding the root file system) as /modules.cpio.gz, written there by
+# kbuildlab with the kernel; the initramfs path appends it to the cpio instead.
+# S09 installs it onto the root disk, ahead of the archive's S10kbuildlab-coldplug.
+MODULES="$TARGET/etc/init.d/S09kbl-modules"
+cat > "$MODULES" <<'MEOF'
+#!/bin/sh
+# Install the boot partition's modules archive, once per distinct archive. Silent
+# without one (initramfs boots, a boot partition that has none).
+SUM=/lib/modules/.kbl-boot.sha256
+HOOK=etc/init.d/S10kbuildlab-coldplug
+MNT=/run/kbl-boot
+
+root_in_ram() {
+    t=
+    while read -r _ mp fs _; do [ "$mp" = / ] && t=$fs; done < /proc/mounts
+    case "$t" in rootfs|ramfs|tmpfs) return 0 ;; esac
+    return 1
+}
+
+# Partition 1 of the disk the root file system is on, found from its device number.
+bootpart() {
+    mm=$(mountpoint -d / 2>/dev/null) || return 1
+    part=$(readlink -f "/sys/dev/block/$mm") || return 1
+    for p in "${part%/*}"/*/partition; do
+        [ -r "$p" ] && [ "$(cat "$p")" = 1 ] || continue
+        d=${p%/partition}; echo "/dev/${d##*/}"; return 0
+    done
+    return 1
+}
+
+start() {
+    root_in_ram && return 0
+    dev=$(bootpart) || return 0
+    mkdir -p "$MNT"
+    mount -t vfat -o ro "$dev" "$MNT" 2>/dev/null || return 0
+    arc="$MNT/modules.cpio.gz"
+    [ -f "$arc" ] || { umount "$MNT"; return 0; }
+    sum=$(sha256sum < "$arc"); sum=${sum%% *}
+    [ "$(cat "$SUM" 2>/dev/null)" = "$sum" ] && { umount "$MNT"; return 0; }
+    # rcS took its S??* list before this ran, so it runs the hook only if it was there.
+    rcs_hook=no
+    [ -f "/$HOOK" ] && [ "$(cat "/proc/$PPID/comm" 2>/dev/null)" = rcS ] && rcs_hook=yes
+    echo "kbl-modules: installing $(wc -c < "$arc") bytes from $dev"
+    list=$(zcat "$arc" | busybox cpio -t 2>/dev/null | sed 's|^\./||; s|^/||')
+    if ! err=$(cd / && zcat "$arc" | busybox cpio -idmu -R 0:0 2>&1); then
+        echo "kbl-modules: could not extract the archive: $err"; umount "$MNT"; return 1
+    fi
+    umount "$MNT"
+    kvers=$(printf '%s\n' "$list" | sed -n 's|^lib/modules/\([^/]*\)/.*|\1|p' | sort -u)
+    # kmod's modprobe reads only modules.dep.bin, so that must have come along too.
+    for kver in $kvers; do
+        if printf '%s\n' "$list" | grep -qxF "lib/modules/$kver/modules.dep" &&
+           printf '%s\n' "$list" | grep -qxF "lib/modules/$kver/modules.dep.bin"; then
+            continue
+        fi
+        depmod "$kver" || echo "kbl-modules: depmod $kver failed"
+    done
+    echo "$sum" > "$SUM"
+    echo "kbl-modules: installed modules for" $kvers
+    if [ "$rcs_hook" = no ] && printf '%s\n' "$list" | grep -qxF "$HOOK"; then
+        sh "/$HOOK" start
+    fi
+}
+
+case "$1" in
+    start|"") start ;;
+    stop)     : ;;
+    restart)  start ;;
+    *)        echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
+MEOF
+chmod 0755 "$MODULES"
+
+# The login getty follows the kernel console (ttyS0, ttyAMA0, hvc0, ttymxc1,
+# ttySIF0, ...) instead of BR2_TARGET_GENERIC_GETTY_PORT. Its inittab entry names
+# no tty, so busybox init never respawns on a missing one; getty opens the real tty
+# and takes it as controlling terminal, which job control and Ctrl-C need.
+GETTY="$TARGET/sbin/kbl-getty"
+cat > "$GETTY" <<'GEOF'
+#!/bin/sh
+# The last console= wins, as for /dev/console; else the kernel's pick. Idle if none.
+usable() { [ -n "$1" ] && [ -e "/sys/class/tty/$1" ] && [ -c "/dev/$1" ]; }
+tty=
+for w in $(cat /proc/cmdline); do
+    case "$w" in console=*) tty=${w#console=}; tty=${tty%%,*} ;; esac
+done
+if ! usable "$tty"; then
+    for t in $(cat /sys/class/tty/console/active 2>/dev/null); do tty=$t; done
+fi
+[ "$tty" = tty0 ] && tty=tty1
+usable "$tty" || exec sleep 2147483647
+exec /sbin/getty -L "$tty" 0 xterm-256color
+GEOF
+chmod 0755 "$GETTY"
+INITTAB="$TARGET/etc/inittab"
+if [ -f "$INITTAB" ]; then
+    sed -i 's~^.*# GENERIC_SERIAL$~::respawn:/sbin/kbl-getty # GENERIC_SERIAL~' "$INITTAB"
+fi
+
+# eudev's 80-net-name-slot.rules would rename eth0 (enp0s1 and the like) during its
+# coldplug, before S40network brings up BR2_SYSTEM_DHCP's eth0. Keep kernel names.
+if [ -d "$TARGET/lib/udev/rules.d" ]; then
+    mkdir -p "$TARGET/etc/udev/rules.d"
+    for r in "$TARGET"/lib/udev/rules.d/*net-name*.rules; do
+        if [ -e "$r" ]; then ln -sf /dev/null "$TARGET/etc/udev/rules.d/${r##*/}"; fi
+    done
+fi
