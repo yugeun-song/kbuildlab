@@ -73,7 +73,9 @@ Build:
                                             half adds simulated and emulated devices
                                             and their tracing without moving an
                                             existing answer
-  kbuildlab build  [TREE] [-- MAKE ARGS]    build in the container
+  kbuildlab build  [TREE] [--ext-only] [-- MAKE ARGS]
+                                            build in the container, then the tree's
+                                            EXT_MODULES; --ext-only builds just those
   kbuildlab tags   [TREE] [--no-clangd]     refresh ctags, cscope, gtags and the
                           [--clangd-only]     clangd index (KBL_CLANGD=0,
                           [--no-warm]         KBL_CLANGD_WARM=0 turn clangd off;

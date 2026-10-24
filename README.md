@@ -497,6 +497,16 @@ no SMMUv3 driver). The RISC-V IOMMU signals only through MSIs, so a PLIC machine
 such as the SiFive U54 trees' is refused too; QEMU's platform IOMMU there names a
 CPU as its MSI parent, and Linux never probes it.
 
+`EXT_MODULES` lists directories of out-of-tree modules. `kbuildlab build` builds
+each against the tree after the kernel, `build --ext-only` builds only them
+against the last build, and both stage them with the tree's modules, so the
+guest's `modprobe` finds them after the next boot.
+
+```sh
+kbuildlab set afce PCIE_DEVICES=edu IOMMU=1 EXT_MODULES=~/drivers/edu
+kbuildlab build afce --ext-only && kbuildlab run afce --run
+```
+
 ## The tree.conf
 
 `init` and `add` write it from `templates/`. It states what the tree is (`ARCH`,
@@ -534,8 +544,9 @@ throwaway copy; `run --reset-sysdisk` makes it again. A desktop or server x86_64
 `BOOT=uefi STORAGE=nvme ROOT=disk`, an embedded arm64 or riscv64 board
 `BOOT=uboot STORAGE=emmc ROOT=disk` (U-Boot built for MMC over PCI). `NIC_DEVICE`
 replaces the primary NIC's device type, `LAN_NICS` adds NICs on one private segment
-inside the guest (XDP and RDMA between its own ports), and `QEMU_ARGS` goes to qemu
-after kbuildlab's own arguments and before `-- ARGS`.
+inside the guest (XDP and RDMA between its own ports), `PCIE_DEVICES`, `IOMMU` and
+`EXT_MODULES` are the driver lab above, and `QEMU_ARGS` goes to qemu after
+kbuildlab's own arguments and before `-- ARGS`.
 
 **Grammar.** `KEY`, optional blanks, `=`, optional blanks, the value; the first
 line for a key wins; a value that opens with `"` runs to the next `"`, any other

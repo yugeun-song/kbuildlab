@@ -346,11 +346,12 @@ _older_than_preset() {   # _older_than_preset SRC
 
 # ---------------------------------------------------------------- build
 cmd_build() {
-    local tree
+    local tree extonly=0
     local -a mkargs=()
     local -a rest=()
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == "--" ]]; then shift; mkargs=("$@"); break; fi
+        if [[ "$1" == --ext-only ]]; then extonly=1; shift; continue; fi
         rest+=("$1"); shift
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
@@ -359,11 +360,42 @@ cmd_build() {
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(kbl_tree_label "$tree") --preset"
     jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
     _kmake_args "$tree"
-    say "building     $(kbl_tree_label "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
-    _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
-    [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
-    say "vmlinux      $src/vmlinux"
+    if [[ $extonly -eq 0 ]]; then
+        say "building     $(kbl_tree_label "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
+        _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
+        [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
+        say "vmlinux      $src/vmlinux"
+    else
+        [[ -f "$src/Module.symvers" ]] \
+            || die "$(kbl_tree_label "$tree") has no build to build modules against: kbuildlab build $(kbl_tree_label "$tree")"
+    fi
+    local d
+    _ext_dirs "$tree"
+    for d in ${_KBL_EXT[@]+"${_KBL_EXT[@]}"}; do
+        say "building     $d (out of tree)"
+        _ext_make "$tree" "$d" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" modules || die "building $d failed"
+    done
     _stage_modules "$tree"
+}
+
+_ext_dirs() {
+    local d
+    local -a dirs=(); read -r -a dirs <<<"$(kbl_tree_get "$1" EXT_MODULES)"
+    _KBL_EXT=()
+    for d in ${dirs[@]+"${dirs[@]}"}; do
+        d="$(kbl_tree_path "$1" "$d")"
+        [[ -f "$d/Kbuild" || -f "$d/Makefile" ]] \
+            || die "EXT_MODULES in $1/tree.conf names $d, which holds no Kbuild or Makefile"
+        _KBL_EXT+=("$d")
+    done
+}
+
+_ext_make() {
+    local tree="$1" dir="$2" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE; shift 2
+    src="$(kbl_tree_src "$tree")" || exit 1
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"; _KBL_ACTIVE_TREE="$tree"
+    _kmake_args "$tree"
+    _in_container "$dir" "${_KBL_MAKE[@]}" -C "$src" M="$dir" "$@"
 }
 
 # The guests boot a rootfs that carries none of this build's modules, so the
@@ -376,12 +408,16 @@ cmd_build() {
 # has: the kernel replaces a path whose type differs, so a rootfs whose /lib
 # is a symlink would lose it.
 _stage_modules() {   # _stage_modules TREE
-    local tree="$1" src out stage hook=etc/init.d/S10kbuildlab-coldplug
+    local tree="$1" src out rec stage hook=etc/init.d/S10kbuildlab-coldplug
     src="$(kbl_tree_src "$tree")" || exit 1; out="$(kbl_tree_data "$tree")/modules.cpio.gz"
+    rec="$(kbl_tree_data "$tree")/modules.ext"
     mkdir -p "$(dirname "$out")" || { warn "modules: cannot write $(dirname "$out")"; return 1; }
-    if [[ ! -s "$src/modules.order" ]]; then rm -f "$out"; return 0; fi
-    [[ -f "$out" && ! "$src/modules.order" -nt "$out" \
-       && -z "$(find "$src" -name '*.ko' -newer "$out" -print -quit)" ]] && return 0
+    _ext_dirs "$tree"
+    local exts; exts="$(printf '%s\n' ${_KBL_EXT[@]+"${_KBL_EXT[@]}"})"
+    if [[ ! -s "$src/modules.order" && -z "$exts" ]]; then rm -f "$out" "$rec"; return 0; fi
+    [[ -f "$out" && ! "$src/modules.order" -nt "$out" && "$(cat "$rec" 2>/dev/null)" == "$exts" \
+       && -z "$(find "$src" ${_KBL_EXT[@]+"${_KBL_EXT[@]}"} -name '*.ko' -newer "$out" -print -quit)" ]] \
+        && return 0
     stage="$(kbl_tree_data "$tree")/.modules-stage"
     local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     rm -rf "$stage" && mkdir -p "$stage/$(dirname "$hook")" \
@@ -395,16 +431,22 @@ find /sys/devices -name modalias | while read -r f; do cat "$f"; done 2>/dev/nul
 echo OK
 EOF
     chmod 755 "$stage/$hook"
-    local rc=0
-    if ! _kmake "$tree" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null; then
-        warn "modules: modules_install failed (above); the guest gets none of this build's modules"; rc=1
+    local rc=0 d
+    _kmake "$tree" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null || rc=1
+    for d in ${_KBL_EXT[@]+"${_KBL_EXT[@]}"}; do
+        [[ $rc -eq 0 ]] || break
+        _ext_make "$tree" "$d" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null || rc=1
+    done
+    if [[ $rc -ne 0 ]]; then
+        warn "modules: modules_install failed (above); the guest gets none of this build's modules"
     elif [[ -z "$(find "$stage/lib/modules" -name '*.ko*' -print -quit 2>/dev/null)" ]]; then
         warn "modules: modules_install wrote no module into $stage, though $src/modules.order
        lists $(grep -c . "$src/modules.order"); the guest gets none of this build's modules"; rc=1
     elif _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | gzip -9" \
            > "$out.tmp"; then
         mv -f "$out.tmp" "$out"
-        say "modules      $out ($(grep -c . "$src/modules.order") for the guest, $(du -h "$out" | cut -f1))"
+        if [[ -n "$exts" ]]; then printf '%s\n' "$exts" > "$rec"; else rm -f "$rec"; fi
+        say "modules      $out ($(find "$stage/lib/modules" -name '*.ko*' | wc -l) for the guest, $(du -h "$out" | cut -f1))"
     else
         warn "modules: the archive could not be written (above); the guest gets none of this build's modules"; rc=1
     fi
