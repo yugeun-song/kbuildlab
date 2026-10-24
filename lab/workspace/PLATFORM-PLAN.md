@@ -248,7 +248,8 @@ One-time migration of the existing .configs, nothing else moved:
       - [x] winsize (pty, 3 arches), ssh forward, several guests of one tree
       - [x] guest tools: perf, bpftool, gdb/gdbserver, strace, tcpdump
 - [x] REPORT.md section 14 (Korean); memory update
-- [ ] commit + push. Commits made 00:55-01:05 (not pushed yet):
+- [x] commit + push (01:10): kbuildlab 5d38c12..4912dd0 (8 commits), gdbtools
+      3cc49ee..9b9de1c (4 commits), both on main, no trailers. Units:
       kbuildlab: cli completion by ID; config storage presets; soft presets; run GPT system
       disk/STORAGE/-nodefaults/LAN NICs; templates; attach u-boot symbols; run --board +
       GDB_INFERIOR; then `lab:` record (pending). gdbtools: loader at the entry PA; shadow
