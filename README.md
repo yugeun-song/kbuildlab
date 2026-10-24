@@ -237,7 +237,8 @@ Every command takes `-h`/`--help`.
 kbuildlab run [tree] [options] [-- QEMU ARGS]
   --run                      boot now instead of freezing at the reset vector
   --boot direct|uboot|uefi   boot path (default: the tree's BOOT, else direct)
-  --kaslr | --no-kaslr       randomized vs deterministic base (default: the tree's KASLR, else off)
+  --kaslr | --no-kaslr       randomized vs deterministic base (default: the tree's KASLR, else off);
+                             --nokaslr is --no-kaslr
   --kvm | --no-kvm           x86 only; TCG by default, for deterministic early-boot HW breakpoints
   --initrd PATH | --no-initrd
   --root initramfs|disk      root fs (default: the tree's ROOT, else initramfs); disk is

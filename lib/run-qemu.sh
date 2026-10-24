@@ -32,7 +32,7 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
   --run              boot now instead of freezing at reset
   --boot MODE        direct | uboot | uefi (default: the tree's BOOT)
   --kaslr|--no-kaslr randomized vs deterministic base (default: the tree's
-                     KASLR, else off)
+                     KASLR, else off); --nokaslr is --no-kaslr
   --kvm|--no-kvm     x86 only; default TCG for deterministic early-boot HW bp
   --initrd PATH | --no-initrd    root fs image, or none (early-boot only)
   --root KIND        initramfs | disk (default: the tree's ROOT, else initramfs);
@@ -90,7 +90,7 @@ while [[ $# -gt 0 ]]; do
         --kvm)       KVM=1; shift ;;        # opt in to KVM (x86 only, faster, less deterministic)
         --no-kvm)    KVM=0; shift ;;        # default: TCG, deterministic early-boot HW breakpoints
         --kaslr)     KASLR=1; shift ;;      # boot with KASLR active
-        --no-kaslr)  KASLR=0; shift ;;      # default: nokaslr, deterministic
+        --no-kaslr|--nokaslr) KASLR=0; shift ;;  # default: nokaslr, deterministic
         --initrd)    INITRD="${2:?--initrd needs a path}"; INITRD="$(realpath -m -s -- "$INITRD")"
                      INITRD_SET=1; shift 2 ;;
         --no-initrd) NO_INITRD=1; shift ;;  # boot without a root fs (early-boot debug)

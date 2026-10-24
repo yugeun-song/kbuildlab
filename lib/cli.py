@@ -152,7 +152,7 @@ COMMANDS = [
                            "machine; alone, list the boards for the tree's arch", "NAME", "board",
                 optional=True),
             Opt("--kaslr", "boot with KASLR active"),
-            Opt("--no-kaslr", "deterministic base (the default unless the tree's KASLR says otherwise)"),
+            Opt("--no-kaslr|--nokaslr", "deterministic base (the default unless the tree's KASLR says otherwise)"),
             Opt("--kvm", "x86 only: KVM, faster and less deterministic"),
             Opt("--no-kvm", "TCG, deterministic early-boot hardware breakpoints (the default)"),
             Opt("--initrd", "root fs image", "PATH", "file"),
