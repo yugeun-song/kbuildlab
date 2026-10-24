@@ -1,6 +1,6 @@
 QEMU_BIN=qemu-system-riscv64
-MACHINE=virt
-CPU=sifive-u54
+MACHINE=virt,aia=aplic-imsic
+CPU=rva23s64
 CONSOLE=ttyS0
 KERNEL_IMAGE_REL=arch/riscv/boot/Image
 GDB_PORT=1236
@@ -8,3 +8,4 @@ QMP_PORT=11236
 STORAGE=emmc
 LAN_NICS=virtio-net-pci virtio-net-pci
 QEMU_ARGS=-device qemu-xhci
+IOMMU=1

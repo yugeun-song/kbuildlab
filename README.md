@@ -494,9 +494,10 @@ DMA engine between guest RAM and a 4 KiB buffer that honours the device's
 With `IOMMU=1` (`run --iommu`) device DMA goes through intel-iommu on q35, SMMUv3
 on arm64 virt, or riscv-iommu-pci on a riscv64 virt with `aia=aplic-imsic`; a
 tree whose `.config` lacks the driver is refused with the symbol named (v4.6 has
-no SMMUv3 driver). The RISC-V IOMMU signals only through MSIs, so a PLIC machine
-such as the SiFive U54 trees' is refused too; QEMU's platform IOMMU there names a
-CPU as its MSI parent, and Linux never probes it.
+no SMMUv3 driver). The RISC-V IOMMU signals only through MSIs, so a machine
+without AIA's IMSIC is refused too; QEMU's platform IOMMU on a PLIC machine names
+a CPU as its MSI parent, and Linux never probes it. The riscv64 template is
+`virt,aia=aplic-imsic` on an RVA23 CPU (`rva23s64`) with `IOMMU=1`.
 
 `EXT_MODULES` lists directories of out-of-tree modules. `kbuildlab build` builds
 each against the tree after the kernel, `build --ext-only` builds only them
