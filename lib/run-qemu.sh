@@ -20,6 +20,8 @@ PERSIST=""; PERSIST_SET=0   # per-tree persistent writable disk (survives reboot
 EMULATE=""; EMULATE_SET=0   # emulated controllers for the preset's drivers to bind
 MODULES=1                   # append the modules kbuildlab build staged to the initramfs
 BOARD=""; BOARD_SET=0       # --board: a real SoC's machine model (boards/NAME.conf)
+IOMMU=""; IOMMU_SET=0
+declare -a PCIE_EXTRA=()
 declare -a EXTRA=()
 declare -a REST=()
 _usage() {
@@ -49,6 +51,11 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      virtio input, virtio-gpu, virtio sound, virtio
                      crypto/balloon/console, and a CTU CAN FD whose two
                      channels share one bus (default: the tree's EMULATE)
+  --pcie-device SPEC a qemu -device SPEC behind a PCIe root port of its own,
+                     repeatable; added after the tree's PCIE_DEVICES
+  --iommu|--no-iommu DMA through the machine's IOMMU: intel-iommu on q35,
+                     SMMUv3 on arm64 virt, riscv-iommu-pci on a riscv64 virt
+                     with aia=aplic-imsic (default: the tree's IOMMU)
   --modules|--no-modules   append the modules `kbuildlab build` staged to the
                      initramfs (with ROOT=disk, put them on the boot partition),
                      those the devices present ask for loaded at boot
@@ -99,6 +106,9 @@ while [[ $# -gt 0 ]]; do
         --no-persist) PERSIST=0; PERSIST_SET=1; shift ;;  # boot without it (volatile rootfs)
         --emulate)    EMULATE=1; EMULATE_SET=1; shift ;;
         --no-emulate) EMULATE=0; EMULATE_SET=1; shift ;;
+        --pcie-device) PCIE_EXTRA+=("${2:?--pcie-device needs a device}"); shift 2 ;;
+        --iommu)      IOMMU=1; IOMMU_SET=1; shift ;;
+        --no-iommu)   IOMMU=0; IOMMU_SET=1; shift ;;
         --modules)    MODULES=1; shift ;;
         --no-modules) MODULES=0; shift ;;
         --board)      BOARD_SET=1; if [[ $# -gt 1 && "$2" != -* ]]; then BOARD="$2"; shift; fi; shift ;;
@@ -480,6 +490,11 @@ fi
 STORAGE="$(kbl_tree_get "$tree" STORAGE)"; STORAGE="${STORAGE:-virtio}"
 [[ "$STORAGE" == virtio || "$STORAGE" == nvme || "$STORAGE" == emmc ]] \
     || die "STORAGE in $tree/tree.conf is '$STORAGE'; it is virtio, nvme or emmc"
+_chassis=100
+_root_port() {
+    _chassis=$((_chassis + 1))
+    CMD+=(-device "pcie-root-port,id=$1,chassis=$_chassis")
+}
 _nvmens=0
 _disk() {   # _disk sys|persist DRIVE-ID FILE VIRTIO-DEVICE [VIRTIO-PROPERTIES]
     local n=0 dev=emmc
@@ -492,8 +507,8 @@ _disk() {   # _disk sys|persist DRIVE-ID FILE VIRTIO-DEVICE [VIRTIO-PROPERTIES]
             CMD+=(-device "nvme-ns,drive=$2,bus=kblnvme,nsid=$_nvmens") ;;
         emmc)
             [[ "$1" == sys ]] || { n=1; dev=sd-card; }
-            CMD+=(-device "pcie-root-port,id=kblrp$n,chassis=$((101 + n))"
-                  -device "sdhci-pci,id=kblmmc$n,bus=kblrp$n"
+            _root_port "kblrp$n"
+            CMD+=(-device "sdhci-pci,id=kblmmc$n,bus=kblrp$n"
                   -device "$dev,drive=$2,bus=kblrp$n/kblmmc$n/sd-bus") ;;
     esac
 }
@@ -651,8 +666,30 @@ if [[ "$PERSIST" == 1 ]]; then
     fi
 fi
 
+[[ $IOMMU_SET -eq 1 ]] || IOMMU="$(kbl_tree_get "$tree" IOMMU)"; IOMMU="${IOMMU:-0}"
+[[ "$IOMMU" == 0 || "$IOMMU" == 1 ]] || die "IOMMU in $tree/tree.conf is '$IOMMU'; it is 0 or 1"
+_iommu=""
+if [[ "$IOMMU" == 1 && -n "$board" ]]; then
+    IOMMU=0; _bdrop+=("iommu        none: kbuildlab knows no IOMMU of $board")
+elif [[ "$IOMMU" == 1 ]]; then
+    case "$arch:${machine%%,*}" in
+        x86_64:q35|x86_64:pc-q35-*)  _iommu=intel-iommu;     _isym=CONFIG_INTEL_IOMMU ;;
+        arm64:virt|arm64:virt-*)     _iommu=smmuv3;          _isym=CONFIG_ARM_SMMU_V3 ;;
+        riscv64:virt|riscv64:virt-*)
+            [[ ",$machine," == *,aia=aplic-imsic,* ]] \
+                || die "IOMMU: riscv-iommu-pci signals only through MSIs, and $machine has no IMSIC
+       to take them (MACHINE=virt,aia=aplic-imsic with a CPU that has Ssaia adds one)"
+            _iommu=riscv-iommu-pci; _isym=CONFIG_RISCV_IOMMU_PCI ;;
+        *) die "IOMMU: kbuildlab knows no IOMMU of the $arch machine $machine" ;;
+    esac
+    [[ -f "$src/.config" ]] && grep -Eqx "${_isym}=y" "$src/.config" \
+        || die "$(kbl_tree_label "$tree") cannot use $_iommu: its .config lacks ${_isym}=y"
+    [[ "$_iommu" == smmuv3 ]] && machine="$machine,iommu=smmuv3"
+fi
+
 append="console=$console"
 [[ $KASLR -eq 1 ]] || append="$append nokaslr"
+[[ "$_iommu" == intel-iommu ]] && append="$append intel_iommu=on"
 [[ "$ROOT" == disk ]] && append="$append root=PARTUUID=$_puuid rootwait rw"
 # Extra command-line words.  Stated per tree with CMDLINE_EXTRA= in tree.conf and
 # added to with --append; never hardcoded here, because what a guest needs on its
@@ -721,6 +758,10 @@ declare -a CMD=("$qemu" -machine "$machine" -m "$MEM" -smp "$SMP" -nographic -no
 # On a board the console is one of its UARTs; the UARTs before it get a null backend.
 for ((_u = 0; _u < _buart; _u++)); do CMD+=(-serial null); done
 CMD+=(-serial chardev:kblcon -mon chardev=kblcon,mode=readline)
+case "$_iommu" in
+    intel-iommu)     CMD+=(-device intel-iommu) ;;
+    riscv-iommu-pci) CMD+=(-device riscv-iommu-pci,off=off) ;;
+esac
 
 # An entropy source.  A headless guest has no keyboard, no disk seek noise and no
 # hardware RNG, so its CRNG is seeded by whatever the kernel can manufacture on
@@ -1109,6 +1150,17 @@ if [[ "$EMULATE" == 1 ]]; then
           -chardev null,id=kblvcon -device virtio-serial-pci -device virtconsole,chardev=kblvcon
           -object can-bus,id=kblcan -device ctucan_pci,canbus0=kblcan,canbus1=kblcan)
 fi
+read -r -a _pcie <<<"$(kbl_tree_get "$tree" PCIE_DEVICES)"
+_pcie+=(${PCIE_EXTRA[@]+"${PCIE_EXTRA[@]}"})
+if [[ $_nopci -eq 1 && ${#_pcie[@]} -gt 0 ]]; then
+    _bdrop+=("pcie         none: $board has no PCI bus for ${_pcie[*]}"); _pcie=()
+fi
+_n=0
+for _d in ${_pcie[@]+"${_pcie[@]}"}; do
+    _root_port "kblpcie$_n"
+    CMD+=(-device "$_d,bus=kblpcie$_n")
+    _n=$((_n + 1))
+done
 wsock=""
 if [[ -t 0 && $_nopci -eq 1 ]]; then
     _bdrop+=("winsize      none: $board has no PCI bus for the virtio-serial port")
@@ -1211,6 +1263,8 @@ fi
 [[ ${#_lan[@]} -gt 0 ]] && say "lan          ${_lan[*]} on one private segment inside the guest"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
 [[ "$EMULATE" == 1 ]] && say "emulate      nvme, virtio-scsi, usb, virtio input/gpu/sound/crypto/balloon/console, can x2"
+[[ ${#_pcie[@]} -gt 0 ]] && say "pcie         ${_pcie[*]}, each behind a root port of its own"
+[[ -n "$_iommu" ]] && say "iommu        $_iommu: device DMA goes through IOVA mappings"
 [[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock$([[ $_nofwcfg -eq 0 ]] && echo ' (drgn reads the guest here; it does not pause it)')" \
                  || say "qmp          none (--no-qmp) -- drgn has no way in"
 [[ $KASLR -eq 1 ]] && say "kaslr        on (randomized; 'kearly kaslr auto' calibrates the slide)" \

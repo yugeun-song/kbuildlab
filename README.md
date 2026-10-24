@@ -249,6 +249,9 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
   --emulate | --no-emulate   attach emulated controllers for the soft presets' drivers
                              (NVMe, virtio-scsi, USB, input, GPU, sound, CAN, ...;
                              default: the tree's EMULATE)
+  --pcie-device SPEC         a qemu -device SPEC behind a PCIe root port of its own,
+                             repeatable (after the tree's PCIE_DEVICES)
+  --iommu | --no-iommu       DMA through the machine's IOMMU (default: the tree's IOMMU)
   --modules | --no-modules   append the modules `kbuildlab build` staged to the initramfs
                              (the boot partition under ROOT=disk; default on whenever the build
                              has modules)
@@ -479,6 +482,20 @@ echo tmp105 0x48 > /sys/bus/i2c/devices/i2c-2/new_device   # temperature sensor
 echo 24c02 0x50 > /sys/bus/i2c/devices/i2c-2/new_device    # 256-byte EEPROM
 echo ds1338 0x68 > /sys/bus/i2c/devices/i2c-2/new_device   # RTC
 ```
+
+### A device to write a driver for
+
+`PCIE_DEVICES` in `tree.conf` (or `run --pcie-device SPEC`) puts each qemu
+`-device` spec behind a PCIe root port of its own. QEMU's `edu`, which Linux has
+no driver for, is the device to start with: a 1 MiB MMIO BAR, INTx or MSI, and a
+DMA engine between guest RAM and a 4 KiB buffer that honours the device's
+`dma_mask` (28 bits unless the spec sets one, e.g. `edu,dma_mask=0xffffffff`).
+With `IOMMU=1` (`run --iommu`) device DMA goes through intel-iommu on q35, SMMUv3
+on arm64 virt, or riscv-iommu-pci on a riscv64 virt with `aia=aplic-imsic`; a
+tree whose `.config` lacks the driver is refused with the symbol named (v4.6 has
+no SMMUv3 driver). The RISC-V IOMMU signals only through MSIs, so a PLIC machine
+such as the SiFive U54 trees' is refused too; QEMU's platform IOMMU there names a
+CPU as its MSI parent, and Linux never probes it.
 
 ## The tree.conf
 

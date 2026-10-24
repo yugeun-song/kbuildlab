@@ -128,7 +128,14 @@ SRC=@SRC@
 # arguments and before `run -- ARGS`.
 # NIC_DEVICE=virtio-net-pci-non-transitional
 # LAN_NICS=virtio-net-pci virtio-net-pci
-# QEMU_ARGS=-device virtio-iommu-pci
+# QEMU_ARGS=-device qemu-xhci
+
+# --- a device to write a driver for ------------------------------------------
+# PCIE_DEVICES puts each qemu -device spec, split on blanks, behind a PCIe root
+# port of its own; QEMU's edu has no Linux driver and is there to write one.
+# IOMMU=1 routes device DMA through the machine's IOMMU.
+# PCIE_DEVICES=edu
+# IOMMU=1
 
 # --- a u-boot boot -------------------------------------------------------------
 # Where boot.scr loads the kernel image and the initramfs.  QEMU's virt machine
