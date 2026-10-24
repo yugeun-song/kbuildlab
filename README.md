@@ -247,8 +247,8 @@ kbuildlab run [tree] [options] [-- QEMU ARGS]
                              (default: the tree's SSH_PORT, else 2222)
   --persist | --no-persist   attach the tree's writable /persist disk
   --emulate | --no-emulate   attach emulated controllers for the soft presets' drivers
-                             (NVMe, AHCI, virtio-scsi, USB, input, GPU, sound, CAN,
-                             e1000e, ...; default: the tree's EMULATE)
+                             (NVMe, virtio-scsi, USB, input, GPU, sound, CAN, ...;
+                             default: the tree's EMULATE)
   --modules | --no-modules   append the modules `kbuildlab build` staged to the initramfs
                              (the boot partition under ROOT=disk; default on whenever the build
                              has modules)

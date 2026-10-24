@@ -95,10 +95,10 @@ SRC=@SRC@
 
 # --- emulated controllers ------------------------------------------------------
 # EMULATE=1 makes `kbuildlab run` attach, unless told otherwise, the controllers
-# QEMU emulates that presets/soft builds drivers for: NVMe, AHCI, virtio-scsi and
-# USB disks backed by nothing on the host, USB and virtio input, virtio-gpu, HDA
-# and virtio sound, virtio crypto/balloon/console, a PCI UART, a watchdog that
-# does nothing when it fires, three CAN controllers on one bus, and an e1000e.
+# QEMU emulates that presets/soft builds drivers for: NVMe, virtio-scsi and USB
+# disks backed by nothing on the host, USB and virtio input, virtio-gpu, virtio
+# sound, virtio crypto/balloon/console, and a CTU CAN FD whose two channels share
+# one bus.
 # --emulate and --no-emulate decide for one run.
 # EMULATE=1
 
@@ -126,7 +126,7 @@ SRC=@SRC@
 # private segment inside the guest, so XDP and RDMA can run between its own
 # ports.  QEMU_ARGS goes to qemu, split on blanks, after kbuildlab's own
 # arguments and before `run -- ARGS`.
-# NIC_DEVICE=e1000e
+# NIC_DEVICE=virtio-net-pci-non-transitional
 # LAN_NICS=virtio-net-pci virtio-net-pci
 # QEMU_ARGS=-device virtio-iommu-pci
 

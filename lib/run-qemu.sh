@@ -45,11 +45,10 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      SSH_PORT, else 2222; a busy default moves on)
   --persist|--no-persist   attach the tree's writable disk (default: tree PERSIST)
   --emulate|--no-emulate   attach the emulated controllers the soft presets build
-                     drivers for: NVMe, AHCI, virtio-scsi and USB disks, USB and
-                     virtio input, virtio-gpu, HDA and virtio sound, virtio
-                     crypto/balloon/console, a PCI UART, an i6300esb watchdog
-                     that does nothing when it fires, Kvaser and CTU CAN on one
-                     bus, and an e1000e (default: the tree's EMULATE)
+                     drivers for: NVMe, virtio-scsi and USB disks, USB and
+                     virtio input, virtio-gpu, virtio sound, virtio
+                     crypto/balloon/console, and a CTU CAN FD whose two
+                     channels share one bus (default: the tree's EMULATE)
   --modules|--no-modules   append the modules `kbuildlab build` staged to the
                      initramfs (with ROOT=disk, put them on the boot partition),
                      those the devices present ask for loaded at boot
@@ -1087,8 +1086,8 @@ fi
 # each driven by its real driver (presets/soft/emulated.config builds them), so
 # probe, DMA and interrupt paths are all there to trace.  Disks are null-co --
 # reads return zeros, writes vanish -- so nothing is created on the host; the
-# watchdog is told to do nothing when it fires; the three CAN controllers share
-# one bus and hear each other.  All PCI, so a board without a PCI bus has none.
+# CTU CAN FD's two channels share one bus and hear each other.  All PCI, so a
+# board without a PCI bus has none.
 [[ $EMULATE_SET -eq 1 ]] || EMULATE="$(kbl_tree_get "$tree" EMULATE)"
 if [[ "$EMULATE" == 1 && $_nopci -eq 1 ]]; then
     EMULATE=0; _bdrop+=("emulate      none: $board has no PCI bus for the emulated controllers")
@@ -1099,25 +1098,16 @@ if [[ "$EMULATE" == 1 ]]; then
     # of one subsystem.
     _ens=kblnvme; [[ "$STORAGE" == nvme ]] && _ens=kblnvme-null
     CMD+=(-blockdev node-name=kblnvme,driver=null-co -device "nvme,serial=${_ens},drive=kblnvme"
-          -device ich9-ahci,id=kblahci -blockdev node-name=kblsata,driver=null-co
-          -device ide-hd,bus=kblahci.0,drive=kblsata
           -device virtio-scsi-pci,id=kblscsi -blockdev node-name=kblscsid,driver=null-co
           -device scsi-hd,bus=kblscsi.0,drive=kblscsid
           -device qemu-xhci,id=kblxhci -device usb-kbd,bus=kblxhci.0 -device usb-tablet,bus=kblxhci.0
           -blockdev node-name=kblusb,driver=null-co -device usb-storage,bus=kblxhci.0,drive=kblusb
           -device virtio-keyboard-pci -device virtio-tablet-pci -device virtio-gpu-pci
-          -audiodev none,id=kblhda -audiodev none,id=kblvsnd
-          -device intel-hda -device hda-duplex,audiodev=kblhda
-          -device virtio-sound-pci,audiodev=kblvsnd
+          -audiodev none,id=kblvsnd -device virtio-sound-pci,audiodev=kblvsnd
           -object cryptodev-backend-builtin,id=kblcrypto -device virtio-crypto-pci,cryptodev=kblcrypto
           -device virtio-balloon-pci
           -chardev null,id=kblvcon -device virtio-serial-pci -device virtconsole,chardev=kblvcon
-          -chardev null,id=kbluart -device pci-serial,chardev=kbluart
-          -device i6300esb -action watchdog=none
-          -object can-bus,id=kblcan -device kvaser_pci,canbus=kblcan
-          -device ctucan_pci,canbus0=kblcan,canbus1=kblcan)
-    # A second NIC only where the first is wanted: --no-net means no NIC at all.
-    [[ $NET -eq 1 ]] && CMD+=(-netdev user,id=kblnet1 -device e1000e,netdev=kblnet1)
+          -object can-bus,id=kblcan -device ctucan_pci,canbus0=kblcan,canbus1=kblcan)
 fi
 wsock=""
 if [[ -t 0 && $_nopci -eq 1 ]]; then
@@ -1220,7 +1210,7 @@ fi
                  || say "net          none (--no-net)"
 [[ ${#_lan[@]} -gt 0 ]] && say "lan          ${_lan[*]} on one private segment inside the guest"
 [[ $persist_ok -eq 1 ]] && say "persist      $persist_disk -> guest /persist (survives reboot)"
-[[ "$EMULATE" == 1 ]] && say "emulate      nvme, ahci, virtio-scsi, usb, virtio input/gpu/sound/crypto/balloon/console, hda, pci uart, i6300esb, can x3$([[ $NET -eq 1 ]] && echo ', e1000e')"
+[[ "$EMULATE" == 1 ]] && say "emulate      nvme, virtio-scsi, usb, virtio input/gpu/sound/crypto/balloon/console, can x2"
 [[ $QMP -eq 1 ]] && say "qmp          :$QMPPORT and $qmpsock$([[ $_nofwcfg -eq 0 ]] && echo ' (drgn reads the guest here; it does not pause it)')" \
                  || say "qmp          none (--no-qmp) -- drgn has no way in"
 [[ $KASLR -eq 1 ]] && say "kaslr        on (randomized; 'kearly kaslr auto' calibrates the slide)" \
