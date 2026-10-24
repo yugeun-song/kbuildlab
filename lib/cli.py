@@ -116,12 +116,13 @@ COMMANDS = [
     Cmd("prune", "drop trees whose source is gone and data no tree owns", "[--yes]", opts=[
         Opt("--yes|-y", "do not ask")]),
     Cmd("update", "one pass: check, sync, keep .config, incremental build, modules, indexes, "
-                  "then a summary", "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm]",
+                  "then a summary", "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm] [--fresh]",
         args=["tree*"], notes=[TREE_NOTE], opts=[
             Opt("--all", "every registered tree"),
             Opt("--no-tags", "skip ctags, cscope, gtags and clangd"),
             Opt("--no-clangd", "skip the clangd database and index"),
-            Opt("--no-warm", "write the clangd database and config, leave the index cold")]),
+            Opt("--no-warm", "write the clangd database and config, leave the index cold"),
+            Opt("--fresh", "rebuild every index from scratch, reusing no cached state")]),
     Cmd("sync", "fetch, and fast-forward to the newest patch level of the tracked version",
         "[TREE]", args=["tree"], notes=[TREE_NOTE]),
     Cmd("config", "make or keep .config (the recorded one, the existing one, or defconfig) "
@@ -132,10 +133,12 @@ COMMANDS = [
     Cmd("build", "build in the container", "[TREE] [-- MAKE ARGS]", args=["tree"],
         notes=[TREE_NOTE], rest="MAKE ARGS"),
     Cmd("tags", "refresh ctags, cscope, gtags and the clangd index",
-        "[TREE] [--no-clangd|--clangd-only] [--no-warm]", args=["tree"], notes=[TREE_NOTE], opts=[
+        "[TREE] [--no-clangd|--clangd-only] [--no-warm] [--fresh]", args=["tree"], notes=[TREE_NOTE],
+        opts=[
             Opt("--no-clangd", "only ctags, cscope and gtags"),
             Opt("--clangd-only", "only the clangd database, config and index"),
-            Opt("--no-warm", "leave the clangd index cold")]),
+            Opt("--no-warm", "leave the clangd index cold"),
+            Opt("--fresh", "rebuild every index from scratch, reusing no cached state")]),
     Cmd("image", "build the container image", "[legacy]",
         args=["choice:legacy"], notes=["legacy: Ubuntu 24.04 with gcc-9 through gcc-13 (aarch64 cross "
                                        "only), for a tree that names it with IMAGE= in its tree.conf."]),

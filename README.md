@@ -52,7 +52,7 @@ it checks what the tree needs, syncs (fast-forwarding a tracked branch, never a
 pinned tag), keeps **the .config you already had** (`olddefconfig`, then a report
 of what changed and of any preset line the newer source dropped, repairing
 neither), rebuilds incrementally with the modules, and refreshes ctags, cscope,
-gtags and clangd (`--no-tags`, `--no-clangd`, `--no-warm`). Each tree runs on its
+gtags and clangd (`--no-tags`, `--no-clangd`, `--no-warm`, `--fresh`). Each tree runs on its
 own, and a table at the end says which stages passed.
 
 `kbuildlab help COMMAND`, or `COMMAND --help`, prints one command's options. Tab
@@ -140,6 +140,14 @@ tree) or by another ctags. Other runtimes
 have no overlay volumes and index the tree as it is on disk, as `KBL_TAGS_VIEW=0`
 does.
 
+The view is kept from run to run, and every run first drops the copies of files
+the tree no longer has, so a sync that deletes or moves a file leaves no path in
+the view that the tree lacks. An incremental run that fails all the same is
+retried once from nothing: the view, its readings and the three indexes are
+rebuilt with no state carried over, and the tree keeps its previous indexes
+until new ones are published. `tags --fresh` (`KBL_TAGS_FRESH=1`) starts there
+and also discards the tree's clangd cache.
+
 ### The clangd index
 
 `kbuildlab tags` builds a fourth index, for clangd, so an editor is not left
@@ -178,7 +186,8 @@ don't hover.
 
 The index is built here rather than left to the editor, so it is finished before
 the editor opens; clangd keys its shards on file contents, so a rebuild re-indexes
-only the files that changed.
+only the files that changed. A database generation that fails is run once more
+with the tree's clangd cache discarded.
 
 #### Editors
 
@@ -199,7 +208,9 @@ cpptools' parser off (its debugger is untouched).
 kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
                       [--clangd-only]   just the clangd parts
                       [--no-warm]       database and config, leave the index cold
-KBL_CLANGD=0 / KBL_CLANGD_WARM=0        the same two, from the environment
+                      [--fresh]         every index from scratch, no cached state
+KBL_CLANGD=0 / KBL_CLANGD_WARM=0        --no-clangd and --no-warm, from the environment
+KBL_TAGS_FRESH=1                        --fresh, from the environment
 KBL_CLANGD_JOBS=N                       cap the parallel work of both steps
 
 python3 lib/index/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
@@ -741,7 +752,7 @@ lib/cli.py             every command's options, for --help and Tab completion
 lib/index/             the indexers: clangd.py, the tag view, the build readers
 boards/                the real SoC machine models run --board boots, one file each
 completions/           the bash and zsh completions install.sh puts in place
-tests/                 tree.conf grammar and cli.py against the parsers
+tests/                 tree.conf grammar, cli.py against the parsers, the tag view
 ```
 
 ## Dependencies

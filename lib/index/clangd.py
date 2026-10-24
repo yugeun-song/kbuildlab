@@ -2151,6 +2151,9 @@ def cmd_gen(args) -> int:
     jobs = args.jobs or auto_jobs(job_mb=PREPROCESS_MB)
     for tree in args.trees:
         print(f"[{tree}]")
+        if args.fresh and os.path.isdir(cache_dir(tree)):
+            shutil.rmtree(cache_dir(tree))
+            print(f"    discarded {cache_dir(tree)}")
         kept, dropped = gen_cdb(tree, args.force)
         print(f"    compile_commands.json: {kept} entries"
               + (f" ({dropped} assembly or repeated entries dropped)" if dropped else "")
@@ -2761,6 +2764,9 @@ def main() -> int:
     g = sub.add_parser("gen", help="build the database and write the clangd config")
     g.add_argument("-f", "--force", action="store_true",
                    help="rebuild compile_commands.json even if one is cached")
+    g.add_argument("--fresh", action="store_true",
+                   help="discard everything cached for the tree first: the database, the "
+                        "readings and memos, and clangd's own index")
     g.add_argument("-j", "--jobs", type=int, default=0,
                    help="preprocessors run at once; 0 (default) picks a number from "
                         "free memory and cores")

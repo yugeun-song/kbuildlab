@@ -160,7 +160,7 @@ cmd_update() {
         case "$1" in
             --all) all=1; shift ;;
             --no-tags) notags=1; shift ;;
-            --no-clangd|--no-warm) tagsopt+=("$1"); shift ;;
+            --no-clangd|--no-warm|--fresh) tagsopt+=("$1"); shift ;;
             -*) die "update: unknown option '$1'" ;;
             *) names+=("$1"); shift ;;
         esac

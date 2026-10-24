@@ -2,7 +2,7 @@
 """The tree as its build compiled it, for ctags, cscope and GNU global: lines no
 unit compiled are blanked and files no unit read are emptied, line numbers kept.
 
-    tagview.py --tree DIR --view DIR build --build-shell CMD [-j N]
+    tagview.py --tree DIR --view DIR build --build-shell CMD [-j N] [--fresh]
     tagview.py --tree DIR --view DIR stage
     tagview.py --tree DIR --view DIR harvest (--keep | --drop)
     tagview.py --tree DIR --view DIR forget
@@ -49,7 +49,7 @@ class Memo(ir.Memo):
 
     def get_packed(self, key: str):
         got = super().get_packed(key)
-        if got is not None:
+        if got is not None or self.fallback is None:
             return got
         src, dst = os.path.join(self.fallback, key), os.path.join(self.dir, key)
         try:
@@ -276,7 +276,8 @@ def cmd_build(args) -> int:
         return 2
     jobs = args.jobs or clangd.auto_jobs(job_mb=clangd.PREPROCESS_MB)
     memo = Memo(os.path.join(args.view, "readings"),
-                os.path.join(clangd.cache_dir(tree), "readings"), ir.collector_code())
+                None if args.fresh else os.path.join(clangd.cache_dir(tree), "readings"),
+                ir.collector_code())
     got = ir.Readings(units)
 
     def reads(u):
@@ -316,7 +317,9 @@ def cmd_build(args) -> int:
     n_mask = n_blank = n_lines = 0
     for rel in names:
         path = os.path.join(ksrc, rel)
-        if rel in unsure or not os.path.isfile(path):
+        if not os.path.isfile(path):
+            continue
+        if rel in unsure:
             want[rel] = None
         elif rel not in compiled:
             want[rel] = b""
@@ -411,14 +414,16 @@ def cmd_harvest(args) -> int:
         except OSError:
             raise SystemExit(f"tagview.py: {args.view}/state/started is missing, so nothing "
                              f"tells this run's indexes from older files; none was kept")
-    published, stray = [], []
+    published, stray, gone = [], [], []
     for d, dirs, files in os.walk(up, topdown=False):
         for name in files + [x for x in dirs if os.path.islink(os.path.join(d, x))]:
             path = os.path.join(d, name)
             rel = os.path.relpath(path, up)
             if not is_whiteout(path) and rel in view:
-                continue
-            if (args.keep and d == up and rel in OUTPUTS and not is_whiteout(path)
+                if os.path.isfile(os.path.join(ksrc, rel)):
+                    continue
+                gone.append(rel)
+            elif (args.keep and d == up and rel in OUTPUTS and not is_whiteout(path)
                     and not os.path.islink(path) and os.path.isfile(path)
                     and os.stat(path).st_mtime_ns >= started):
                 publish(path, os.path.join(ksrc, rel))
@@ -426,6 +431,10 @@ def cmd_harvest(args) -> int:
             elif not is_whiteout(path) and (d != up or rel not in OUTPUTS):
                 stray.append(rel)
             os.unlink(path)
+        if d != up and not os.listdir(d) and not os.path.isdir(os.path.join(ksrc, os.path.relpath(d, up))):
+            os.rmdir(d)
+    if gone:
+        save_json(os.path.join(args.view, STATE), sorted(view.difference(gone)))
     if args.keep:
         os.unlink(os.path.join(args.view, "state", "started"))
         record = load(os.path.join(args.view, PUBLISHED), {})
@@ -433,6 +442,9 @@ def cmd_harvest(args) -> int:
         save_json(os.path.join(args.view, PUBLISHED), {k: v for k, v in record.items() if v is not None})
     if published:
         print(f"    into the tree: {' '.join(sorted(published))}")
+    if gone:
+        print(f"    dropped the copies of {len(gone)} file(s) the tree no longer has: "
+              f"{' '.join(sorted(gone)[:5])}")
     if stray:
         print(f"    dropped {len(stray)} file(s) the run left that are no index: "
               f"{' '.join(sorted(stray)[:5])}")
@@ -478,6 +490,8 @@ def main() -> int:
                    help="the command prefix that runs a program in the tree's build image, "
                         "with the kernel source as its working directory and stdin attached")
     b.add_argument("-j", "--jobs", type=int, default=0)
+    b.add_argument("--fresh", action="store_true",
+                   help="read every unit again, borrowing no reading from the clangd index")
     b.set_defaults(func=cmd_build)
     sg = sub.add_parser("stage", help="put the tree's indexes in the layer, so a run "
                                        "updates them there rather than copying them up")

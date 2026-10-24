@@ -46,10 +46,16 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     local -a jobs=()
     [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
     if [[ "$phase" != warm ]]; then
+        local -a gencmd=(python3 "${KBL_REPO}/lib/index/clangd.py" --tree "$tree" "${wsopt[@]+"${wsopt[@]}"}"
+                      "${peers[@]}" --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force
+                      "${jobs[@]+"${jobs[@]}"}")
         say "indexing     clangd (compile_commands.json, out of tree)"
-        python3 "${KBL_REPO}/lib/index/clangd.py" --tree "$tree" "${wsopt[@]+"${wsopt[@]}"}" "${peers[@]}" \
-            --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" gen --force "${jobs[@]+"${jobs[@]}"}" \
-            || { warn "clangd index failed"; return 1; }
+        if [[ "${KBL_TAGS_FRESH:-0}" == 1 ]]; then
+            "${gencmd[@]}" --fresh || { warn "clangd index failed"; return 1; }
+        elif ! "${gencmd[@]}"; then
+            warn "clangd index failed (above); generating it again from scratch"
+            "${gencmd[@]}" --fresh || { warn "clangd index failed from scratch too"; return 1; }
+        fi
     fi
     [[ "$phase" == gen ]] && return 0
 
@@ -78,6 +84,7 @@ cmd_tags() {
             --no-clangd) clangd=0; shift ;;
             --clangd-only) clangd=2; shift ;;
             --no-warm) export KBL_CLANGD_WARM=0; shift ;;
+            --fresh) export KBL_TAGS_FRESH=1; shift ;;
             *) rest+=("$1"); shift ;;
         esac
     done
@@ -107,6 +114,10 @@ _index_plain() {   # _index_plain TREE
     if command -v python3 >/dev/null 2>&1; then
         python3 "${KBL_REPO}/lib/index/tagview.py" --tree "$tree" --view "$(_view_dir "$tree")" forget \
             || die "cannot remove the view's indexes"
+        if [[ "${KBL_TAGS_FRESH:-0}" == 1 ]]; then
+            local -a outs=(); mapfile -t outs < <(python3 "${KBL_REPO}/lib/index/tagview.py" outputs)
+            ( cd "$src" && rm -f -- "${outs[@]}" ) || die "cannot remove the indexes of $src"
+        fi
     fi
     local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
@@ -125,25 +136,41 @@ _index_plain() {   # _index_plain TREE
 }
 
 _index_tree() {   # _index_tree TREE
-    local tree="$1" name arch karch src view st up wk mode=full rc
+    local tree="$1" name
     name="$(kbl_tree_label "$tree")"
-    arch="$(kbl_tree_arch "$tree")" || exit 1; karch="$(_karch "$arch")"
-    src="$(kbl_tree_src "$tree")" || exit 1
     if [[ "${KBL_TAGS_VIEW:-1}" == "0" ]]; then _index_plain "$tree"; return; fi
     if [[ "$(basename "$(kbl_container)")" != podman ]] || ! command -v python3 >/dev/null 2>&1; then
         warn "the config view needs podman's overlay mounts and python3 on the host; indexing $name as it is on disk"
         _index_plain "$tree"; return
     fi
+    if [[ "${KBL_TAGS_FRESH:-0}" != 1 ]]; then
+        ( _index_view "$tree" ) && return 0
+        warn "indexing $name failed (above); discarding its view and indexing it again from scratch"
+    fi
+    ( _index_view "$tree" fresh ) \
+        || die "indexing $name from scratch failed (above); the tree keeps its previous indexes"
+}
+
+_index_view() {
+    local tree="$1" fresh="${2:-}" name arch karch src view st up wk mode=full rc
+    name="$(kbl_tree_label "$tree")"
+    arch="$(kbl_tree_arch "$tree")" || exit 1; karch="$(_karch "$arch")"
+    src="$(kbl_tree_src "$tree")" || exit 1
     local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     view="$(_view_dir "$tree")"
     st="$view/state"; up="$view/upper"; wk="$view/work"
+    if [[ -n "$fresh" ]]; then
+        rm -rf -- "${view:?}/upper" "$view/state" "$view/readings" "$view/view.json" "$view/published.json" \
+            || die "cannot discard the view in $view"
+    fi
     mkdir -p "$st" "$up" "$wk" || die "cannot write $view"
     rm -f "$st"/keys "$st"/opts.* "$st"/files.* "$st"/now.* "$st"/replay.* "$st"/tags.new "$st"/tags.prev \
           "$st"/emitted
-    if [[ -s "$src/tags" ]] \
+    if [[ -z "$fresh" && -s "$src/tags" ]] \
        && { ln -f "$src/tags" "$st/tags.prev" 2>/dev/null || cp --reflink=auto "$src/tags" "$st/tags.prev"; }; then
         mode=merge
     fi
+    [[ -n "$fresh" ]] && mode=fresh
     local -a py=(python3 "${KBL_REPO}/lib/index/tagview.py" --tree "$tree" --view "$view")
     "${py[@]}" harvest --drop || die "cannot clear $up"
     _container_run "$src" -v "$src:$src:O,upperdir=$up,workdir=$wk" -v "$st:$st" -e "KBL_TAGS_STATE=$st" || exit 1
@@ -157,7 +184,7 @@ _index_tree() {   # _index_tree TREE
     local -a jobs=()
     [[ -n "${KBL_CLANGD_JOBS:-}" ]] && jobs=(-j "$KBL_CLANGD_JOBS")
     say "indexing     $name as its build compiled it (out of tree, $up)"
-    "${py[@]}" build --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" "${jobs[@]+"${jobs[@]}"}"
+    "${py[@]}" build --build-shell "$(printf '%q ' "${_KBL_RUN[@]}")" "${jobs[@]+"${jobs[@]}"}" ${fresh:+--fresh}
     rc=$?
     if [[ $rc -eq 2 ]]; then
         rm -f "$st/tags.prev"; warn "$name records no compile; indexing it as it is on disk"
@@ -165,7 +192,7 @@ _index_tree() {   # _index_tree TREE
     fi
     [[ $rc -eq 0 ]] || die "the view of $name could not be built"
     say "indexing     ctags ($mode), cscope and gtags over that view"
-    "${py[@]}" stage || die "cannot stage the indexes of $name in $up"
+    [[ -n "$fresh" ]] || "${py[@]}" stage || die "cannot stage the indexes of $name in $up"
     "${over[@]}" bash "${KBL_REPO}/lib/index/tags-index.sh" "$karch" "$mode"; rc=$?
     # 1 means an indexer failed and tags-index.sh withdrew what it wrote; any other
     # failure is the script's own, and nothing it left is trusted.

@@ -62,7 +62,7 @@ Trees (any directory, any time):
                                             no tree owns
 
 Build:
-  kbuildlab update [TREE...|--all] [--no-tags] [--no-clangd] [--no-warm]
+  kbuildlab update [TREE...|--all] [--no-tags] [--no-clangd] [--no-warm] [--fresh]
                                             one pass: check, sync, keep .config
                                             (olddefconfig + report), incremental
                                             build, modules, ctags/cscope/gtags,
@@ -76,7 +76,8 @@ Build:
   kbuildlab build  [TREE] [-- MAKE ARGS]    build in the container
   kbuildlab tags   [TREE] [--no-clangd]     refresh ctags, cscope, gtags and the
                           [--clangd-only]     clangd index (KBL_CLANGD=0,
-                          [--no-warm]         KBL_CLANGD_WARM=0 turn clangd off)
+                          [--no-warm]         KBL_CLANGD_WARM=0 turn clangd off;
+                          [--fresh]           --fresh rebuilds every index from scratch)
   kbuildlab image  [legacy]                 build the container image
 
 Run and debug:
