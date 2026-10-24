@@ -398,6 +398,16 @@ if [ -f "$INITTAB" ]; then
     sed -i 's~^.*# GENERIC_SERIAL$~::respawn:/sbin/kbl-getty # GENERIC_SERIAL~' "$INITTAB"
 fi
 
+cat > "$TARGET/etc/motd" <<'MOTDEOF'
+ _  ___           _ _     _ _       _
+| |/ / |__  _   _(_) | __| | | __ _| |__
+| ' /| '_ \| | | | | |/ _` | |/ _` | '_ \
+| . \| |_) | |_| | | | (_| | | (_| | |_) |
+|_|\_\_.__/ \__,_|_|_|\__,_|_|\__,_|_.__/
+
+MOTDEOF
+chmod 0644 "$TARGET/etc/motd"
+
 # eudev's 80-net-name-slot.rules would rename eth0 (enp0s1 and the like) during its
 # coldplug, before S40network brings up BR2_SYSTEM_DHCP's eth0. Keep kernel names.
 if [ -d "$TARGET/lib/udev/rules.d" ]; then
