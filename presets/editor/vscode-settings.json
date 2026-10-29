@@ -22,5 +22,7 @@
         "--background-index-priority=background",
         "--limit-results=200",
         "--limit-references=2000"
-    ]
+    ],
+    "clangd.path": "${userHome}/.config/Code/User/kbl/clangd-tmpdir",
+    "clangd.useScriptAsExecutable": true
 }

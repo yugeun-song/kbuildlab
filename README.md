@@ -202,7 +202,10 @@ VS Code's default C/C++ extension (`ms-vscode.cpptools`) runs its own parser,
 ignores this file, and reports hundreds of phantom errors on a GCC-built kernel.
 Install `llvm-vs-code-extensions.vscode-clangd` and merge
 `presets/editor/vscode-settings.json` into your user settings; that switches
-cpptools' parser off (its debugger is untouched).
+cpptools' parser off (its debugger is untouched). Copy
+`presets/editor/clangd-tmpdir` to `~/.config/Code/User/kbl/`: it runs clangd
+with `TMPDIR=/var/tmp`, because `--pch-storage=disk` writes preambles to
+`$TMPDIR`, and where `/tmp` is a tmpfs they would stay in RAM.
 
 ```
 kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
