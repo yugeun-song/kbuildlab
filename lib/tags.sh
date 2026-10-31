@@ -81,21 +81,34 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
         || { warn "clangd index warming did not finish (the editor will resume it)"; return 1; }
 }
 
-_index_inputs() {   # _index_inputs TREE
+_part_inputs() {   # _part_inputs TREE tags|clangd|kmx
     local k
     _build_inputs "$1" || return 1
-    printf 'clangd %s\n' "$(clangd --version 2>/dev/null | head -1)"
-    k="$(command -v kmx 2>/dev/null)"
-    printf 'kmx %s\n' "${k:+$(stat -L -c '%s %Y' "$k" 2>/dev/null)}"
+    case "$2" in
+        tags) printf 'tags %s\n' "${KBL_TAGS_VIEW:-1}" ;;
+        clangd) printf 'clangd %s %s warm %s\n' "${KBL_CLANGD:-1}" "$(clangd --version 2>/dev/null | head -1)" "${KBL_CLANGD_WARM:-1}" ;;
+        kmx)
+            k="$(command -v kmx 2>/dev/null)"
+            printf 'kmx %s %s\n' "${KBL_KMX:-1}" "${k:+$(stat -L -c '%s %Y' "$k" 2>/dev/null)}" ;;
+    esac
 }
 
-_index_current() {   # _index_current TREE
-    local tree="$1" src rec
-    rec="$(_stamp "$tree" index)"; [[ -s "$rec" ]] || return 1
+_part_current() {   # _part_current TREE tags|clangd|kmx
+    local tree="$1" rec src
+    rec="$(_stamp "$tree" "$2")"; [[ -s "$rec" ]] || return 1
     src="$(kbl_tree_src "$tree")" || return 1
-    [[ -s "$src/tags" && -s "$src/cscope.out" ]] || return 1
-    [[ -f "${XDG_CACHE_HOME:-$HOME/.cache}/kbuildlab/clangd/$(basename "$tree")/compile_commands.json" ]] || return 1
-    [[ "$(_index_inputs "$tree")" == "$(cat "$rec")" ]]
+    case "$2" in
+        tags) [[ -s "$src/tags" && -s "$src/cscope.out" ]] || return 1 ;;
+        clangd) [[ "${KBL_CLANGD:-1}" == 0 || -f "${XDG_CACHE_HOME:-$HOME/.cache}/kbuildlab/clangd/$(basename "$tree")/compile_commands.json" ]] || return 1 ;;
+    esac
+    [[ "$(_part_inputs "$tree" "$2")" == "$(cat "$rec")" ]]
+}
+
+_stamp_part() {   # _stamp_part TREE PART INPUTS [pending]
+    local to
+    to="$(_stamp "$1" "$2")${4:+.pending}"
+    [[ -n "$3" && "$(_part_inputs "$1" "$2")" == "$3" ]] || return 0
+    mkdir -p "$(kbl_tree_data "$1")" && printf '%s\n' "$3" > "$to"
 }
 
 _kmx_index() {   # _kmx_index TREE
@@ -115,38 +128,38 @@ _kmx_index() {   # _kmx_index TREE
 }
 
 cmd_tags() {
-    local clangd=1
+    local clangd=1 tags=1 kmx=1 alone=0
     local -a rest=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --no-clangd) clangd=0; shift ;;
-            --clangd-only) clangd=2; shift ;;
+            --clangd-only) tags=0; kmx=0; alone=1; shift ;;
             --no-warm) export KBL_CLANGD_WARM=0; shift ;;
             --fresh) export KBL_TAGS_FRESH=1; shift ;;
             *) rest+=("$1"); shift ;;
         esac
     done
+    if [[ -n "${_KBL_TAGS_PARTS:-}" ]]; then
+        [[ " $_KBL_TAGS_PARTS " == *" tags "* ]] || tags=0
+        [[ " $_KBL_TAGS_PARTS " == *" clangd "* ]] || clangd=0
+        [[ " $_KBL_TAGS_PARTS " == *" kmx "* ]] || kmx=0
+    fi
     local tree; tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local src; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source in $tree"
+    local gen=0 tin="" cin="" kin="" cs
+    cs="$(_stamp "$tree" clangd)"
+    if [[ $tags -eq 1 ]]; then rm -f "$(_stamp "$tree" tags)"; tin="$(_part_inputs "$tree" tags)"; fi
+    if [[ $clangd -eq 1 ]]; then rm -f "$cs" "$cs.pending"; cin="$(_part_inputs "$tree" clangd)"; fi
+    if [[ $kmx -eq 1 ]]; then rm -f "$(_stamp "$tree" kmx)"; kin="$(_part_inputs "$tree" kmx)"; fi
     # Asked for clangd alone, its failure is the command's.
-    local gen=0 whole=0 complete=1 inputs="" to
-    to="$(_stamp "$tree" index)"
-    rm -f "$to" "$to.pending"
-    if [[ $clangd -eq 1 && "${KBL_CLANGD:-1}" != 0 && "${KBL_CLANGD_WARM:-1}" != 0 && "${KBL_TAGS_VIEW:-1}" != 0 ]]; then
-        whole=1; inputs="$(_index_inputs "$tree")"
+    if [[ $clangd -eq 1 ]]; then
+        _clangd_index "$tree" gen || { gen=1; [[ $alone -eq 0 ]] || exit 1; }
     fi
-    if [[ $clangd -ne 0 ]]; then
-        _clangd_index "$tree" gen || { gen=1; [[ $clangd -ne 2 ]] || exit 1; }
-    fi
-    [[ $clangd -ne 2 ]] && _index_tree "$tree"
-    if [[ $clangd -ne 2 ]]; then _kmx_index "$tree" || complete=0; fi
-    if [[ $clangd -ne 0 && $gen -eq 0 ]]; then
-        _clangd_index "$tree" warm || complete=0
-    fi
-    if [[ $whole -eq 1 && $gen -eq 0 && $complete -eq 1 && "$(_index_inputs "$tree")" == "$inputs" ]]; then
-        [[ -n "${_KBL_WARM_QUEUE:-}" ]] && to="$to.pending"
-        mkdir -p "$(kbl_tree_data "$tree")" && printf '%s\n' "$inputs" > "$to"
+    if [[ $tags -eq 1 ]]; then _index_tree "$tree" && _stamp_part "$tree" tags "$tin"; fi
+    if [[ $kmx -eq 1 ]]; then _kmx_index "$tree" && _stamp_part "$tree" kmx "$kin"; fi
+    if [[ $clangd -eq 1 && $gen -eq 0 ]] && _clangd_index "$tree" warm; then
+        _stamp_part "$tree" clangd "$cin" "${_KBL_WARM_QUEUE:+pending}"
     fi
     return 0
 }

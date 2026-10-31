@@ -136,17 +136,25 @@ _update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
     fi
     src="$(kbl_tree_src "$tree")" || return 1
     if [[ $synced -eq 1 ]] && _build_current "$tree"; then
+        local at p
+        local -a stale=()
+        at="$(_src_head "$src" | cut -c1-12)"
         printf '%s\t%s\t%s\t%s\n' "$name" config same 0 "$name" build same 0 >> "$rec"
         if [[ "$notags" == 1 ]]; then
             printf '%s\t%s\t%s\t%s\n' "$name" tags skip 0 >> "$rec"
-        elif [[ $# -eq 0 ]] && _index_current "$tree"; then
-            printf '%s\t%s\t%s\t%s\n' "$name" tags same 0 >> "$rec"
-            say "current      built and indexed at $(_src_head "$src" | cut -c1-12), the newest commit; skipped"
+            say "current      built at $at, the newest commit; config and build skipped"
             return 0
         fi
-        say "current      built at $(_src_head "$src" | cut -c1-12), the newest commit; config and build skipped"
-        [[ "$notags" == 1 ]] && return 0
-        _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
+        for p in tags clangd kmx; do
+            if [[ $# -gt 0 ]] || ! _part_current "$tree" "$p"; then stale+=("$p"); fi
+        done
+        if [[ ${#stale[@]} -eq 0 ]]; then
+            printf '%s\t%s\t%s\t%s\n' "$name" tags same 0 >> "$rec"
+            say "current      built and indexed at $at, the newest commit; skipped"
+            return 0
+        fi
+        say "current      built at $at, the newest commit; config and build skipped, redoing ${stale[*]}"
+        _KBL_TAGS_PARTS="${stale[*]}" _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
         return 0
     fi
     # Taken before cmd_config, which merges a tree's own fragment.
@@ -178,7 +186,7 @@ _update_warm() {   # _update_warm RECORD QUEUE
         || warn "clangd index warming did not finish everywhere (the editor will resume it)"
     while IFS=$'\t' read -r id res_ok secs; do
         printf '%s\t%s\t%s\t%s\n' "$(kbl_tree_label "$KBL_TREES/$id")" warm "$res_ok" "$secs" >> "$rec"
-        t="$(_stamp "$KBL_TREES/$id" index)"
+        t="$(_stamp "$KBL_TREES/$id" clangd)"
         if [[ "$res_ok" == ok && -f "$t.pending" ]]; then mv -f "$t.pending" "$t"; else rm -f "$t.pending"; fi
     done < "$res"
 }
