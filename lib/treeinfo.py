@@ -287,7 +287,7 @@ def cmd_list(args):
     if "--narrow" in args:
         _list_blocks(infos)
         return 0
-    head = ["ID", "ARCH", "KERNEL", "REF", "COMMIT HASH", "BUILT", "GUESTS", "SOURCE"]
+    head = ["ID", "ARCH", "KERNEL", "REF", "COMMIT", "BUILT", "GUESTS", "SOURCE"]
     table = []
     for d in infos:
         bad = bool(d["problems"])
@@ -337,7 +337,7 @@ def _list_blocks(infos):
             built += "  " + c("33", "guests %d" % len(d["guests"]))
         head = ([c("36", d["commit"][:12])] if d["commit"] else []) + ([d["ref"]] if d["ref"] else [])
         rows = [
-            ("commit hash", "  ".join(head) or "-"),
+            ("commit", "  ".join(head) or "-"),
             ("built", built),
             ("source", _home(d["src"]) or "-"),
         ]
@@ -386,7 +386,7 @@ def cmd_inspect(args):
         ("kernel", "%s%s" % (d["version"] or "-", ("  release " + d["release"]) if d["release"] else "")),
         ("arch", d["arch"] or "-"),
         ("source", d["src"] or "-"),
-        ("commit hash", "%s  %s" % (d["commit"] or "-", git)),
+        ("commit", "%s  %s" % (d["commit"] or "-", git)),
         ("tracks", "%s (%s)%s" % (d["ref"] or "-", d["upstream"],
                                   ("  origin " + d["origin"]) if d.get("origin") else "")),
         ("built", "%s%s" % (d["built"] or "no vmlinux", ("  " + d["compiler"]) if d["compiler"] else "")),

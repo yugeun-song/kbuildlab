@@ -86,7 +86,7 @@ cloned into, and the directory name is only a path: two trees may use the same
 one in different places.
 
 ```
-kbuildlab trees [-q|--json|--narrow]        ID ARCH KERNEL REF COMMIT HASH BUILT GUESTS SOURCE
+kbuildlab trees [-q|--json|--narrow]        ID ARCH KERNEL REF COMMIT BUILT GUESTS SOURCE
 kbuildlab inspect TREE [--json|--format KEY]
 kbuildlab add DIR [--arch A]                register a source you have (arch from .config)
 kbuildlab get|set|unset TREE KEY...         read or write tree.conf keys; edit opens it
