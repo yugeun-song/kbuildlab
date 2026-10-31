@@ -13,7 +13,7 @@ if [[ $mode == fresh ]]; then
     rm -f -- "${out[@]}"
     mode=full
 fi
-ctags_full() { make ARCH="$arch" tags && python3 "$here/tagview.py" address; }
+ctags_full() { KBL_TAGS_PASS=1 PATH="$here/ctags-shim:$PATH" make ARCH="$arch" tags && python3 "$here/tagview.py" address; }
 ctags_merge() {
     bash "$here/tags-merge.sh" && rm -f "$st/emitted" \
         && KBL_TAGS_EMIT=1 PATH="$here/ctags-shim:$PATH" make ARCH="$arch" tags \

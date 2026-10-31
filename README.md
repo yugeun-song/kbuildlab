@@ -140,6 +140,10 @@ tree) or by another ctags. Other runtimes
 have no overlay volumes and index the tree as it is on disk, as `KBL_TAGS_VIEW=0`
 does.
 
+ctags takes its options through `lib/index/ctags-shim`, which rewrites an old
+`tags.sh` the way later kernels do: `--extra` becomes `--extras`, and a tree's own
+`kconfig` language yields to ctags' built-in Kconfig parser.
+
 The view is kept from run to run, and every run first drops the copies of files
 the tree no longer has, so a sync that deletes or moves a file leaves no path in
 the view that the tree lacks. An incremental run that fails all the same is

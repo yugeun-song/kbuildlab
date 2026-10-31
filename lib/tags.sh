@@ -140,7 +140,7 @@ _index_plain() {   # _index_plain TREE
     # Kernel's own targets: index only the built arch. gtags (GNU GLOBAL) is
     # optional -- not every image ships `global`, so absent is a warn, not fatal.
     say "indexing     ctags + cscope for $karch"
-    _in_container "$src" make ARCH="$karch" tags cscope \
+    _in_container "$src" bash -c "PATH=${KBL_REPO}/lib/index/ctags-shim:\$PATH KBL_TAGS_PASS=1 exec make ARCH=$karch tags cscope" \
         || die "tags/cscope failed"
     if _in_container "$src" sh -c 'command -v gtags >/dev/null 2>&1'; then
         say "indexing     gtags (GNU GLOBAL) for $karch"

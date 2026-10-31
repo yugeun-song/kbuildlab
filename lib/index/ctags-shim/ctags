@@ -9,18 +9,31 @@ done
 
 case "${1-}" in --version|--list-*|--help*) exec "$real" "$@" ;; esac
 
+universal=0
+"$real" --version 2>/dev/null | grep -qi universal && universal=1
+kconfig=0
+"$real" --list-languages 2>/dev/null | grep -qiE '^kconfig([[:space:]]|$)' && kconfig=1
+args=()
+for a in "$@"; do
+    case "$a" in
+        --extra=*) (( universal )) && a="--extras=${a#--extra=}" ;;
+        --langdef=kconfig|--language-force=kconfig|--regex-kconfig=*) (( kconfig )) && continue ;;
+    esac
+    args+=("$a")
+done
+[[ -n ${KBL_TAGS_PASS-} ]] && exec "$real" "${args[@]}"
+
 d=${KBL_TAGS_STATE:?ctags shim: KBL_TAGS_STATE is not set}
 if [[ -n ${KBL_TAGS_EMIT-} ]]; then
     [[ -e $d/emitted ]] || { cat "$d/tags.new" > tags && : > "$d/emitted"; }
     exit
 fi
-args=("$@")
-i=$#
+i=${#args[@]}
 while (( i > 0 )) && [[ ${args[i-1]} != -* && -f ${args[i-1]} ]]; do (( i-- )); done
 key=$(printf '%s\0' "${args[@]:0:i}" | md5sum | cut -c1-16)
 if [[ ! -e $d/opts.$key ]]; then
     printf '%s\0' "${args[@]:0:i}" > "$d/opts.$key"
     printf '%s\n' "$key" >> "$d/keys"
 fi
-(( i < $# )) && printf '%s\n' "${args[@]:i}" >> "$d/files.$key"
+(( i < ${#args[@]} )) && printf '%s\n' "${args[@]:i}" >> "$d/files.$key"
 : >> tags
