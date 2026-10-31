@@ -348,6 +348,12 @@ _older_than_preset() {   # _older_than_preset SRC
 }
 
 # ---------------------------------------------------------------- build
+_kbl_jobs() {
+    local j="${KBL_JOBS:-$(nproc)}"
+    [[ "$j" =~ ^[1-9][0-9]*$ ]] || die "KBL_JOBS=$j is not a positive whole number"
+    printf '%s\n' "$j"
+}
+
 cmd_build() {
     local tree extonly=0
     local -a mkargs=()
@@ -361,7 +367,7 @@ cmd_build() {
     local arch src jobs
     arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(kbl_tree_label "$tree") --preset"
-    jobs="${KBL_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}"
+    jobs="$(_kbl_jobs)" || exit 1
     _kmake_args "$tree"
     if [[ $extonly -eq 0 ]]; then
         say "building     $(kbl_tree_label "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
@@ -434,18 +440,19 @@ find /sys/devices -name modalias | while read -r f; do cat "$f"; done 2>/dev/nul
 echo OK
 EOF
     chmod 755 "$stage/$hook"
-    local rc=0 d
-    _kmake "$tree" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null || rc=1
+    local rc=0 d jobs
+    jobs="$(_kbl_jobs)" || return 1
+    _kmake "$tree" -j"$jobs" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null || rc=1
     for d in ${_KBL_EXT[@]+"${_KBL_EXT[@]}"}; do
         [[ $rc -eq 0 ]] || break
-        _ext_make "$tree" "$d" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null || rc=1
+        _ext_make "$tree" "$d" -j"$jobs" INSTALL_MOD_PATH="$stage" INSTALL_MOD_STRIP=1 modules_install >/dev/null || rc=1
     done
     if [[ $rc -ne 0 ]]; then
         warn "modules: modules_install failed (above); the guest gets none of this build's modules"
     elif [[ -z "$(find "$stage/lib/modules" -name '*.ko*' -print -quit 2>/dev/null)" ]]; then
         warn "modules: modules_install wrote no module into $stage, though $src/modules.order
        lists $(grep -c . "$src/modules.order"); the guest gets none of this build's modules"; rc=1
-    elif _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | gzip -9" \
+    elif _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | \$(command -v pigz || echo gzip) -9" \
            > "$out.tmp"; then
         mv -f "$out.tmp" "$out"
         if [[ -n "$exts" ]]; then printf '%s\n' "$exts" > "$rec"; else rm -f "$rec"; fi

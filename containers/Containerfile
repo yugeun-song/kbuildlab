@@ -17,7 +17,7 @@ ENV FORCE_UNSAFE_CONFIGURE=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates build-essential \
         git make binutils bc rsync patch wget curl cpio unzip file \
-        tar gzip bzip2 xz-utils \
+        tar gzip pigz bzip2 xz-utils \
         libncurses-dev libssl-dev libelf-dev libcap-dev \
         flex bison kmod gawk texinfo pkg-config cmake \
         autoconf automake libtool gettext \

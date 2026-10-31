@@ -1683,7 +1683,7 @@ PREPROCESS_MB = 160        # measured: clang -E on kernel/sched/core.c plus its 
 def auto_jobs(cap: int | None = None, reserve_mb: int = RESERVE_MB,
               job_mb: int = SESSION_MB) -> int:
     cpus = os.cpu_count() or 2
-    ceiling = cap or max(1, cpus - 1)
+    ceiling = cap or cpus
     av = available_mb()
     if av is None:
         return min(2, ceiling)
