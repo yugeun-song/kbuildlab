@@ -76,6 +76,22 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
         || warn "clangd index warming did not finish (the editor will resume it)"
 }
 
+_kmx_index() {   # _kmx_index TREE
+    local tree="$1" src line
+    [[ "${KBL_KMX:-1}" == "0" ]] && { say "kmx          skipped (KBL_KMX=0)"; return 0; }
+    command -v kmx >/dev/null 2>&1 || { warn "kmx skipped: no kmx on the host"; return 0; }
+    src="$(kbl_tree_src "$tree")" || return 0
+    local -a threads=()
+    [[ -n "${KBL_KMX_JOBS:-}" ]] && threads=(--threads "$KBL_KMX_JOBS")
+    say "indexing     kmx (macros, and the C types in the build's DWARF)"
+    if ! line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" index | sed -n 's/^  types *//p')"; then
+        warn "kmx index failed (above)"
+        return 0
+    fi
+    [[ -n "$line" ]] && say "kmx          $line"
+    return 0
+}
+
 cmd_tags() {
     local clangd=1
     local -a rest=()
@@ -97,6 +113,7 @@ cmd_tags() {
         _clangd_index "$tree" gen || { gen=1; [[ $clangd -ne 2 ]] || exit 1; }
     fi
     [[ $clangd -ne 2 ]] && _index_tree "$tree"
+    [[ $clangd -ne 2 ]] && _kmx_index "$tree"
     if [[ $clangd -ne 0 && $gen -eq 0 ]]; then
         _clangd_index "$tree" warm
     fi

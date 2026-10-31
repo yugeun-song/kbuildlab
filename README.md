@@ -215,6 +215,7 @@ kbuildlab tags [tree] [--no-clangd]     ctags, cscope, gtags, clangd + index
 KBL_CLANGD=0 / KBL_CLANGD_WARM=0        --no-clangd and --no-warm, from the environment
 KBL_TAGS_FRESH=1                        --fresh, from the environment
 KBL_CLANGD_JOBS=N                       cap the parallel work of both steps
+KBL_KMX=0 / KBL_KMX_JOBS=N              skip the kmx index, or cap its threads
 
 python3 lib/index/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
 ```
@@ -231,6 +232,13 @@ python3 lib/index/clangd.py --tree ~/.config/kbuildlab/trees/2349b212ea4a9896 re
 Both steps are incremental, keyed on the command, the code, clangd, the config and
 every file kbuild recorded as read, so a rebuild repeats only what the change
 touches; `regions --fresh` asks clangd again regardless.
+
+### The kmx index
+
+With [kmx](https://github.com/yugeun-song/linux-kernel-macro-extractor) on the
+PATH, `tags` also runs `kmx <src> index`: its macro index and the C types from the
+DWARF of `vmlinux` and the modules, kept in kmx's data directory. `KBL_KMX=0`
+skips it; `KBL_KMX_JOBS=N` caps its threads.
 
 ## run and attach
 
