@@ -137,7 +137,7 @@ _update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
     src="$(kbl_tree_src "$tree")" || return 1
     # Taken before cmd_config, which merges a tree's own fragment.
     before="$(dirname "$rec")/config.before"; rm -f "$before"
-    [[ -f "$src/.config" ]] && cp "$src/.config" "$before"
+    [[ -f "$src/.config" ]] && cp -p "$src/.config" "$before"
     _update_stage "$rec" "$name" config _update_config "$tree" "$before" || { rm -f "$before"; return 1; }
     rm -f "$before"
     _update_stage "$rec" "$name" build cmd_build "$tree" || return 1
@@ -168,8 +168,11 @@ _update_warm() {   # _update_warm RECORD QUEUE
 }
 
 _update_config() {   # _update_config TREE BEFORE
+    local src
     cmd_config "$1"
     _kmake "$1" olddefconfig || die "olddefconfig failed"
+    src="$(kbl_tree_src "$1")" || exit 1
+    [[ -s "$2" ]] && cmp -s "$2" "$src/.config" && touch -r "$2" "$src/.config"
     _update_report "$1" "$2"
 }
 
