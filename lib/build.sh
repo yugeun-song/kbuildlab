@@ -215,6 +215,10 @@ cmd_sync() {
         return 0
     fi
 
+    if git -C "$src" rev-parse --verify --quiet "refs/tags/$ver" >/dev/null; then
+        say "pinned       $ver is a tag this clone already has; nothing to fetch"
+        return 0
+    fi
     say "fetching     $ver"
     # depth-1 onto a full clone would shallow-truncate its history; keep depth-1
     # only when the repo is already shallow.

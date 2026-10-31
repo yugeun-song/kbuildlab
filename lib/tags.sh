@@ -71,6 +71,11 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     # not mention would be a process the operator has to discover; `tags` is
     # already the slow command, and the wait is visible and interruptible.
     [[ "${KBL_CLANGD_WARM:-1}" == "0" ]] && { say "clangd       index left cold (KBL_CLANGD_WARM=0)"; return 0; }
+    if [[ -n "${_KBL_WARM_QUEUE:-}" ]]; then
+        printf '%s\n' "$tree" >> "$_KBL_WARM_QUEUE"
+        say "clangd       background index warmed once every tree is built"
+        return 0
+    fi
     say "indexing     clangd background index"
     python3 "${KBL_REPO}/lib/index/clangd.py" --tree "$tree" warm "${jobs[@]+"${jobs[@]}"}" \
         || warn "clangd index warming did not finish (the editor will resume it)"

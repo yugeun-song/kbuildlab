@@ -117,7 +117,11 @@ COMMANDS = [
         Opt("--yes|-y", "do not ask")]),
     Cmd("update", "one pass: check, sync, keep .config, incremental build, modules, indexes, "
                   "then a summary", "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm] [--fresh]",
-        args=["tree*"], notes=[TREE_NOTE], opts=[
+        args=["tree*"], notes=[
+            TREE_NOTE,
+            "Trees are fetched in the background at the start; a failed fetch is retried after "
+            "the others, then the tree is built as checked out. clangd indexes are warmed last, "
+            "several at once."], opts=[
             Opt("--all", "every registered tree"),
             Opt("--no-tags", "skip ctags, cscope, gtags and clangd"),
             Opt("--no-clangd", "skip the clangd database and index"),

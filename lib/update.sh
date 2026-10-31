@@ -99,12 +99,41 @@ _update_check() {   # _update_check TREE
     ok "$(kbl_tree_label "$tree"): $(kbl_tree_arch "$tree"), tracks $v, source $src"
 }
 
-_update_one() {   # _update_one TREE RECORD NOTAGS [TAGS-OPTION...]
-    local tree="$1" rec="$2" notags="$3" name src before; shift 3
+_update_fetch() {   # _update_fetch TREE DIR
+    local tree="$1" d="$2" t0 rc
+    t0=$SECONDS
+    ( _update_check "$tree" ) > "$d/check.log" 2>&1; rc=$?
+    printf '%s %s\n' "$rc" "$((SECONDS - t0))" > "$d/check.rc"
+    [[ $rc -eq 0 ]] || return 0
+    t0=$SECONDS
+    ( export GIT_TERMINAL_PROMPT=0; cmd_sync "$tree" ) > "$d/sync.log" 2>&1; rc=$?
+    printf '%s %s\n' "$rc" "$((SECONDS - t0))" > "$d/sync.rc"
+}
+
+_update_replay() {   # _update_replay RECORD NAME STAGE DIR
+    local rc secs
+    cat "$4/$3.log" 2>/dev/null
+    if [[ -r "$4/$3.rc" ]]; then read -r rc secs < "$4/$3.rc"
+    else bad "$3 did not finish"; rc=1 secs=0; fi
+    printf '%s\t%s\t%s\t%s\n' "$2" "$3" "$([[ $rc -eq 0 ]] && echo ok || echo fail)" "$secs" >> "$1"
+    return "$rc"
+}
+
+_update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
+    local tree="$1" rec="$2" notags="$3" d="$4" pid="$5" name src before synced=1; shift 5
     name="$(kbl_tree_label "$tree")"
     head1 "== $name"
-    _update_stage "$rec" "$name" check _update_check "$tree" || return 1
-    _update_stage "$rec" "$name" sync cmd_sync "$tree" || return 1
+    if [[ -n "$pid" ]]; then
+        wait "$pid"
+        _update_replay "$rec" "$name" check "$d" || return 1
+        if ! _update_replay "$rec" "$name" sync "$d"; then
+            warn "fetching $name failed (above); it is fetched again after the other trees"
+            return 2
+        fi
+    elif ! _update_stage "$rec" "$name" sync cmd_sync "$tree"; then
+        warn "fetching $name failed again (above); building it as it is checked out"
+        synced=0
+    fi
     src="$(kbl_tree_src "$tree")" || return 1
     # Taken before cmd_config, which merges a tree's own fragment.
     before="$(dirname "$rec")/config.before"; rm -f "$before"
@@ -117,6 +146,25 @@ _update_one() {   # _update_one TREE RECORD NOTAGS [TAGS-OPTION...]
     else
         _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
     fi
+    [[ $synced -eq 1 ]]
+}
+
+_update_warm() {   # _update_warm RECORD QUEUE
+    local rec="$1" res id res_ok secs t
+    local -a trees=() args=()
+    mapfile -t trees < <(awk '!seen[$0]++' "$2")
+    [[ ${#trees[@]} -gt 0 ]] || return 0
+    res="$(dirname "$rec")/warm"; : > "$res"
+    for t in "${trees[@]}"; do args+=(--tree "$t"); done
+    args+=(warm --results "$res")
+    [[ -n "${KBL_CLANGD_JOBS:-}" ]] && args+=(-j "$KBL_CLANGD_JOBS")
+    head1 "== clangd"
+    say "indexing     clangd background index of $(_kbl_labels "${trees[@]##*/}")"
+    python3 "${KBL_REPO}/lib/index/clangd.py" "${args[@]}" \
+        || warn "clangd index warming did not finish everywhere (the editor will resume it)"
+    while IFS=$'\t' read -r id res_ok secs; do
+        printf '%s\t%s\t%s\t%s\n' "$(kbl_tree_label "$KBL_TREES/$id")" warm "$res_ok" "$secs" >> "$rec"
+    done < "$res"
 }
 
 _update_config() {   # _update_config TREE BEFORE
@@ -153,9 +201,23 @@ _update_summary() {   # _update_summary RECORD
     done
 }
 
+_update_cleanup() {
+    local p
+    for p in $(jobs -p); do _kbl_kill_tree "$p"; done
+    rm -rf -- "$_KBL_UPDATE_TMP"
+}
+
+_kbl_kill_tree() {   # _kbl_kill_tree PID
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null); do _kbl_kill_tree "$c"; done
+    kill "$1" 2>/dev/null
+    return 0
+}
+
 cmd_update() {
     local all=0 notags=0 t rc=0
-    local -a names=() trees=() tagsopt=()
+    local -a names=() trees=() tagsopt=() later=()
+    local -A pid=() seen=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --all) all=1; shift ;;
@@ -172,14 +234,28 @@ cmd_update() {
     if [[ ${#names[@]} -eq 0 ]]; then
         t="$(kbl_tree "")" || exit 1; trees=("$t")
     else
-        for t in "${names[@]}"; do t="$(kbl_tree "$t")" || exit 1; trees+=("$t"); done
+        for t in "${names[@]}"; do
+            t="$(kbl_tree "$t")" || exit 1
+            [[ -n "${seen[$t]+x}" ]] || { seen[$t]=1; trees+=("$t"); }
+        done
     fi
     local tmp rec; tmp="$(mktemp -d)" || die "cannot create a temporary directory"
     _KBL_UPDATE_TMP="$tmp"; rec="$tmp/record"; : > "$rec"
-    trap 'rm -rf -- "$_KBL_UPDATE_TMP"' EXIT
+    trap _update_cleanup EXIT
+    _KBL_WARM_QUEUE="$tmp/warm.queue"; : > "$_KBL_WARM_QUEUE"
     for t in "${trees[@]}"; do
-        _update_one "$t" "$rec" "$notags" "${tagsopt[@]+"${tagsopt[@]}"}" || rc=1
+        mkdir -p "$tmp/$(kbl_tree_id "$t")" || die "cannot write $tmp"
+        _update_fetch "$t" "$tmp/$(kbl_tree_id "$t")" &
+        pid[$t]=$!
     done
+    for t in "${trees[@]}"; do
+        _update_one "$t" "$rec" "$notags" "$tmp/$(kbl_tree_id "$t")" "${pid[$t]}" "${tagsopt[@]+"${tagsopt[@]}"}"
+        case $? in 0) ;; 2) later+=("$t") ;; *) rc=1 ;; esac
+    done
+    for t in "${later[@]+"${later[@]}"}"; do
+        _update_one "$t" "$rec" "$notags" "$tmp/$(kbl_tree_id "$t")" "" "${tagsopt[@]+"${tagsopt[@]}"}" || rc=1
+    done
+    _update_warm "$rec" "$_KBL_WARM_QUEUE"
     _update_summary "$rec"
     return $rc
 }
