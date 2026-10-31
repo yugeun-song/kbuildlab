@@ -354,35 +354,113 @@ _kbl_jobs() {
     printf '%s\n' "$j"
 }
 
+_built_rec() { printf '%s\n' "$(kbl_tree_data "$1")/built-from"; }
+_keep_dir()  { printf '%s\n' "$(kbl_tree_data "$1")/.build-keep"; }
+_src_head()  { git -C "$1" rev-parse --verify --quiet HEAD 2>/dev/null; }
+
+_build_moved() {   # _build_moved TREE
+    local head
+    head="$(_src_head "$(kbl_tree_src "$1")")"
+    [[ -z "$head" || "$(cat "$(_built_rec "$1")" 2>/dev/null)" != "$head" ]]
+}
+
+_build_moved_why() {   # _build_moved_why TREE
+    local was now
+    now="$(_src_head "$(kbl_tree_src "$1")")"
+    was="$(cat "$(_built_rec "$1")" 2>/dev/null)"
+    if [[ -z "$now" ]]; then printf 'its source is no git checkout, so nothing shows it unchanged\n'
+    elif [[ -z "$was" ]]; then printf 'no good build of it is recorded\n'
+    else printf 'its source moved from %s to %s since its last good build\n' "${was:0:12}" "${now:0:12}"; fi
+}
+
+_unkeep() {   # _unkeep TREE
+    local src keep f
+    local -a back=()
+    src="$(kbl_tree_src "$1")" || exit 1; keep="$(_keep_dir "$1")"
+    [[ -d "$keep" ]] || return 0
+    while IFS= read -r -d '' f; do
+        [[ -e "$src/$f" ]] && continue
+        mv -f -- "$keep/$f" "$src/$f" || { warn "cannot put $f back into $src from $keep"; return 1; }
+        back+=("$f")
+    done < <(find "$keep" -mindepth 1 -maxdepth 1 -type f -printf '%f\0')
+    [[ ${#back[@]} -gt 0 ]] && say "restored     ${back[*]} into $src"
+    rm -rf -- "$keep"
+}
+
+_wipe_build() {   # _wipe_build TREE
+    local tree="$1" src keep f
+    src="$(kbl_tree_src "$tree")" || exit 1; keep="$(_keep_dir "$tree")"
+    local -a files=(.config)
+    command -v python3 >/dev/null 2>&1 \
+        && mapfile -t -O 1 files < <(python3 "${KBL_REPO}/lib/index/tagview.py" outputs)
+    if ! { rm -rf -- "$keep" && mkdir -p "$keep"; }; then warn "cannot write $keep"; return 1; fi
+    for f in "${files[@]}"; do
+        [[ -f "$src/$f" && ! -L "$src/$f" ]] || continue
+        cp --reflink=auto -p -- "$src/$f" "$keep/$f" || { warn "cannot keep $src/$f aside"; return 1; }
+    done
+    say "wiping       $(kbl_tree_label "$tree"): make mrproper, with .config and the indexes kept aside"
+    _kmake "$tree" mrproper || { warn "make mrproper failed (above)"; return 1; }
+    _unkeep "$tree" || return 1
+    _kmake "$tree" olddefconfig >/dev/null || { warn "olddefconfig failed after the wipe"; return 1; }
+}
+
 cmd_build() {
-    local tree extonly=0
+    local tree extonly=0 fresh=0
     local -a mkargs=()
     local -a rest=()
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == "--" ]]; then shift; mkargs=("$@"); break; fi
         if [[ "$1" == --ext-only ]]; then extonly=1; shift; continue; fi
+        if [[ "$1" == --fresh ]]; then fresh=1; shift; continue; fi
         rest+=("$1"); shift
     done
+    [[ $fresh -eq 1 && $extonly -eq 1 ]] && die "build: --ext-only builds against the last build, which --fresh wipes"
+    [[ $fresh -eq 1 && ${#mkargs[@]} -gt 0 ]] && die "build: --fresh builds the whole tree, so it takes no make arguments"
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
-    local arch src jobs
+    local arch src jobs name moved=0 wiped=0 why=""
     arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
-    [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $(kbl_tree_label "$tree") --preset"
+    name="$(kbl_tree_label "$tree")"
+    _unkeep "$tree" || exit 1
+    [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $name --preset"
     jobs="$(_kbl_jobs)" || exit 1
+    if _build_moved "$tree"; then moved=1; why="$(_build_moved_why "$tree")"; fi
     _kmake_args "$tree"
     if [[ $extonly -eq 0 ]]; then
-        say "building     $(kbl_tree_label "$tree") ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
-        _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" || die "build failed"
+        if [[ $fresh -eq 1 ]]; then
+            _wipe_build "$tree" || die "the wipe of $name failed (above)"
+            wiped=1
+        fi
+        say "building     $name ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
+        if ! _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}"; then
+            [[ ${#mkargs[@]} -eq 0 ]] || die "build failed"
+            [[ $wiped -eq 0 ]] || die "the build of $name from scratch failed (above)"
+            [[ $moved -eq 1 ]] || die "build failed (above); $name is still at the commit of its last good build,
+       so the cause is in what changed since and the build is kept (kbuildlab build $name --fresh wipes it)"
+            warn "the incremental build of $name failed (above) and $why; wiping the build and building it from scratch"
+            _wipe_build "$tree" || die "the wipe of $name failed (above)"
+            wiped=1
+            say "building     $name from scratch ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
+            _kmake "$tree" -j"$jobs" || die "the build of $name from scratch failed too (above)"
+        fi
         [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
+        if [[ ${#mkargs[@]} -eq 0 ]]; then
+            mkdir -p "$(kbl_tree_data "$tree")" && _src_head "$src" > "$(_built_rec "$tree")"
+        fi
         say "vmlinux      $src/vmlinux"
     else
         [[ -f "$src/Module.symvers" ]] \
-            || die "$(kbl_tree_label "$tree") has no build to build modules against: kbuildlab build $(kbl_tree_label "$tree")"
+            || die "$name has no build to build modules against: kbuildlab build $name"
     fi
     local d
     _ext_dirs "$tree"
     for d in ${_KBL_EXT[@]+"${_KBL_EXT[@]}"}; do
+        if [[ $wiped -eq 1 ]]; then _ext_make "$tree" "$d" clean >/dev/null || die "cleaning $d failed"; fi
         say "building     $d (out of tree)"
-        _ext_make "$tree" "$d" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" modules || die "building $d failed"
+        _ext_make "$tree" "$d" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}" modules && continue
+        [[ ${#mkargs[@]} -eq 0 && $wiped -eq 0 && $moved -eq 1 ]] || die "building $d failed"
+        warn "building $d failed (above) and $why; cleaning it and building it again"
+        { _ext_make "$tree" "$d" clean >/dev/null && _ext_make "$tree" "$d" -j"$jobs" modules; } \
+            || die "building $d failed again (above)"
     done
     _stage_modules "$tree"
 }

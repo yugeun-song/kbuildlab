@@ -56,7 +56,10 @@ gtags and clangd (`--no-tags`, `--no-clangd`, `--no-warm`, `--fresh`). Each tree
 own, and a table at the end says which stages passed.
 
 `make` uses `KBL_JOBS` jobs, all cores when unset; the indexers size themselves
-to cores and memory.
+to cores and memory. A failed incremental build is wiped (`make mrproper`,
+`.config` and indexes kept) and rebuilt once if the source moved since the last
+good build; otherwise it just fails. `build --fresh` wipes on request. A failed
+build from scratch leaves no kernel binary.
 
 `kbuildlab help COMMAND`, or `COMMAND --help`, prints one command's options. Tab
 lists what may come next: commands, options and their values, registered trees,

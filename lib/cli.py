@@ -130,9 +130,15 @@ COMMANDS = [
         "[TREE] [--preset]", args=["tree"], notes=[TREE_NOTE], opts=[
             Opt("--preset", "apply the debuggability preset; its soft half adds simulated and "
                             "emulated devices and their tracing without moving an existing answer")]),
-    Cmd("build", "build in the container, then the tree's EXT_MODULES", "[TREE] [--ext-only] [-- MAKE ARGS]",
-        args=["tree"], notes=[TREE_NOTE], rest="MAKE ARGS", opts=[
-            Opt("--ext-only", "build only the tree's EXT_MODULES, against its last build")]),
+    Cmd("build", "build in the container, then the tree's EXT_MODULES",
+        "[TREE] [--ext-only|--fresh] [-- MAKE ARGS]",
+        args=["tree"], rest="MAKE ARGS", notes=[
+            TREE_NOTE,
+            "make uses KBL_JOBS jobs, all cores by default. A failed incremental build is wiped "
+            "and rebuilt once if the source moved since the last good build."],
+        opts=[
+            Opt("--ext-only", "build only the tree's EXT_MODULES, against its last build"),
+            Opt("--fresh", "wipe the build first (make mrproper; .config and indexes kept)")]),
     Cmd("tags", "refresh ctags, cscope, gtags and the clangd index",
         "[TREE] [--no-clangd|--clangd-only] [--no-warm] [--fresh]", args=["tree"], notes=[TREE_NOTE],
         opts=[
