@@ -8,7 +8,6 @@
 set -uo pipefail
 HERE="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 export KBL_WORKSPACE="$HERE"
-export KBL_JOBS="${KBL_JOBS:-5}"
 # Which kbuildlab.  $KBL_REPO names a checkout explicitly; otherwise the one on
 # $PATH, which is the installed name and resolves through its symlink.  The
 # absolute path that used to be the default was correct on exactly one machine

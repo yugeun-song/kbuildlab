@@ -61,7 +61,7 @@ rc=0
     sed -i 's|^BR2_ROOTFS_POST_BUILD_SCRIPT=.*|BR2_ROOTFS_POST_BUILD_SCRIPT=\"$ROOT/rootfs/post-build.sh\"|' '$out/.config'
     grep -q '^BR2_ROOTFS_POST_BUILD_SCRIPT=\"$ROOT/rootfs/post-build.sh\"' '$out/.config' \
         || { echo 'build-rootfs: could not point BR2_ROOTFS_POST_BUILD_SCRIPT at this workspace' >&2; exit 1; }
-    make O='$out' -j${KBL_JOBS:-5}
+    make O='$out' -j${KBL_JOBS:-$(nproc)}
   " || rc=$?
 echo '--- images ---'
 ls -la "$out/images/" 2>/dev/null

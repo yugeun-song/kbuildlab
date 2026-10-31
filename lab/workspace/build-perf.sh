@@ -3,7 +3,7 @@ set -uo pipefail
 ROOT="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 [ -d "$ROOT/rootfs" ] || { echo "build-perf: $ROOT does not look like the research workspace (no rootfs/)" >&2; exit 1; }
 tree="${1:?usage: build-perf.sh TREE [JOBS]   (a kbuildlab tree ID or path; its tools/perf is built for the guest)}"
-jobs="${2:-${KBL_JOBS:-5}}"
+jobs="${2:-${KBL_JOBS:-$(nproc)}}"
 kbl="${KBUILDLAB:-kbuildlab}"
 src="$("$kbl" inspect "$tree" --format src)" || exit 1
 arch="$("$kbl" inspect "$tree" --format arch)" || exit 1
