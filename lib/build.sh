@@ -25,6 +25,8 @@ _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     elif [[ -n "${KBL_DOCKER_USER}" ]]; then
         _idopt=(--user "${KBL_DOCKER_USER}" -e HOME=/tmp)
     fi
+    local -a _logopt=()
+    [[ "$(basename "$c")" == podman ]] && _logopt=(--log-driver=none)
     # What the container may write is what the build writes: the active tree's
     # source and data directory, and the working directory when it lies outside
     # both.  The tree's registry directory (its config-fragment) and this
@@ -72,7 +74,8 @@ _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     }
     for p in "${rw[@]}"; do _kbl_mount "$p" rw; done
     for p in "${ro[@]}"; do _kbl_mount "$p" ro; done
-    _KBL_RUN=("$c" run --rm "$@" "${_idopt[@]+"${_idopt[@]}"}" "${mounts[@]}" -w "$wd" "$img")
+    _KBL_RUN=("$c" run --rm "${_logopt[@]+"${_logopt[@]}"}" -e KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-kbuildlab}"
+              "$@" "${_idopt[@]+"${_idopt[@]}"}" "${mounts[@]}" -w "$wd" "$img")
 }
 
 _in_container() {   # _in_container WORKDIR CMD...
