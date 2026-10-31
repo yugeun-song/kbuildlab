@@ -68,7 +68,9 @@ clangd indexes are warmed last, as many trees at once as free memory allows.
 to cores and memory. A failed incremental build is wiped (`make mrproper`,
 `.config` and indexes kept) and rebuilt once if the source moved since the last
 good build; otherwise it just fails. `build --fresh` wipes on request. A failed
-build from scratch leaves no kernel binary.
+build from scratch leaves no kernel binary. Commands that write (`sync`,
+`config`, `build`, `tags`, `update`, `image`, `rm`, `mv`, `prune`) run one at a
+time; a second one waits for the first.
 
 `kbuildlab help COMMAND`, or `COMMAND --help`, prints one command's options. Tab
 lists what may come next: commands, options and their values, registered trees,

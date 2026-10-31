@@ -138,6 +138,20 @@ cmd_help() {
     esac
 }
 
+_kbl_lock() {
+    [[ -n ${_KBL_LOCKED-} ]] && return 0
+    local lock="$KBL_DATA_HOME/lock" who
+    command -v flock >/dev/null || die "flock (util-linux) not found; it keeps writing commands apart"
+    { mkdir -p "$KBL_DATA_HOME" && exec {_kbl_lock_fd}>>"$lock"; } || die "cannot open $lock"
+    if ! flock -n "$_kbl_lock_fd"; then
+        who="$(cat "$lock" 2>/dev/null)"
+        say "waiting      for ${who:-another kbuildlab command} to finish"
+        flock "$_kbl_lock_fd" || die "cannot lock $lock"
+    fi
+    printf 'kbuildlab %s (pid %s, since %s)\n' "$*" "$$" "$(date +%H:%M)" > "$lock"
+    export _KBL_LOCKED=1
+}
+
 # ---------------------------------------------------------------- dispatch
 # Braced and ended with exit, so bash has read all of it before running any:
 # editing this file during a long update cannot change what runs after it.
@@ -146,6 +160,9 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
     run|attach|drgn|resume|help|-h|--help|__complete) ;;
     *) if _kbl_wants_help "$@"; then _kbl_cli help "$cmd"; exit; fi ;;
+esac
+case "$cmd" in
+    sync|config|build|tags|update|image|rm|mv|prune) _kbl_lock "$cmd" "$@" ;;
 esac
 case "$cmd" in
     init)   cmd_init "$@" ;;
