@@ -135,6 +135,20 @@ _update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
         synced=0
     fi
     src="$(kbl_tree_src "$tree")" || return 1
+    if [[ $synced -eq 1 ]] && _build_current "$tree"; then
+        printf '%s\t%s\t%s\t%s\n' "$name" config same 0 "$name" build same 0 >> "$rec"
+        if [[ "$notags" == 1 ]]; then
+            printf '%s\t%s\t%s\t%s\n' "$name" tags skip 0 >> "$rec"
+        elif [[ $# -eq 0 ]] && _index_current "$tree"; then
+            printf '%s\t%s\t%s\t%s\n' "$name" tags same 0 >> "$rec"
+            say "current      built and indexed at $(_src_head "$src" | cut -c1-12), the newest commit; skipped"
+            return 0
+        fi
+        say "current      built at $(_src_head "$src" | cut -c1-12), the newest commit; config and build skipped"
+        [[ "$notags" == 1 ]] && return 0
+        _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
+        return 0
+    fi
     # Taken before cmd_config, which merges a tree's own fragment.
     before="$(dirname "$rec")/config.before"; rm -f "$before"
     [[ -f "$src/.config" ]] && cp -p "$src/.config" "$before"
@@ -164,6 +178,8 @@ _update_warm() {   # _update_warm RECORD QUEUE
         || warn "clangd index warming did not finish everywhere (the editor will resume it)"
     while IFS=$'\t' read -r id res_ok secs; do
         printf '%s\t%s\t%s\t%s\n' "$(kbl_tree_label "$KBL_TREES/$id")" warm "$res_ok" "$secs" >> "$rec"
+        t="$(_stamp "$KBL_TREES/$id" index)"
+        if [[ "$res_ok" == ok && -f "$t.pending" ]]; then mv -f "$t.pending" "$t"; else rm -f "$t.pending"; fi
     done < "$res"
 }
 
@@ -177,7 +193,7 @@ _update_config() {   # _update_config TREE BEFORE
 }
 
 _update_summary() {   # _update_summary RECORD
-    local rec="$1" name stage res secs t
+    local rec="$1" name stage res secs t same=0
     local -a order=() stages=(check sync config build tags)
     local -A cell=() total=()
     while IFS=$'\t' read -r name stage res secs; do
@@ -196,12 +212,15 @@ _update_summary() {   # _update_summary RECORD
             case "${cell[$name:$stage]:-}" in
                 ok)   printf ' %s%s%s     ' "$KBL_G" "$KBL_OK" "$KBL_0" ;;
                 fail) printf ' %s%s%s     ' "$KBL_R" "$KBL_NO" "$KBL_0" ;;
+                same) printf ' %s=%s     ' "$KBL_G" "$KBL_0"; same=1 ;;
                 *)    printf ' %s-%s     ' "$KBL_D" "$KBL_0" ;;
             esac
         done
         t=${total[$name]}
         printf ' %dm%02ds\n' $((t / 60)) $((t % 60))
     done
+    [[ $same -eq 1 ]] && printf '%s= already done at the newest commit, nothing changed since; skipped%s\n' "$KBL_D" "$KBL_0"
+    return 0
 }
 
 _update_cleanup() {

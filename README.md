@@ -57,8 +57,11 @@ own, and a table at the end says which stages passed.
 
 Every tree is fetched in the background as the update starts; a pinned tag the
 clone has is not fetched. A failed fetch is retried after the other trees, then
-the tree is built as checked out (SYNC ✗, exit 1). clangd indexes are warmed
-last, as many trees at once as free memory allows.
+the tree is built as checked out (SYNC ✗, exit 1). A tree already built and
+indexed at its newest commit, with nothing changed since (sources, `.config`,
+`tree.conf`, image, `EXT_MODULES`, kbuildlab, clangd, kmx; fingerprints in the
+data directory's `build.stamp` and `index.stamp`), is skipped and shown as `=`.
+clangd indexes are warmed last, as many trees at once as free memory allows.
 
 `make` uses `KBL_JOBS` jobs, all cores when unset; the indexers size themselves
 to cores and memory. A failed incremental build is wiped (`make mrproper`,

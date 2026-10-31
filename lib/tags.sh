@@ -78,7 +78,24 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
     fi
     say "indexing     clangd background index"
     python3 "${KBL_REPO}/lib/index/clangd.py" --tree "$tree" warm "${jobs[@]+"${jobs[@]}"}" \
-        || warn "clangd index warming did not finish (the editor will resume it)"
+        || { warn "clangd index warming did not finish (the editor will resume it)"; return 1; }
+}
+
+_index_inputs() {   # _index_inputs TREE
+    local k
+    _build_inputs "$1" || return 1
+    printf 'clangd %s\n' "$(clangd --version 2>/dev/null | head -1)"
+    k="$(command -v kmx 2>/dev/null)"
+    printf 'kmx %s\n' "${k:+$(stat -L -c '%s %Y' "$k" 2>/dev/null)}"
+}
+
+_index_current() {   # _index_current TREE
+    local tree="$1" src rec
+    rec="$(_stamp "$tree" index)"; [[ -s "$rec" ]] || return 1
+    src="$(kbl_tree_src "$tree")" || return 1
+    [[ -s "$src/tags" && -s "$src/cscope.out" ]] || return 1
+    [[ -f "${XDG_CACHE_HOME:-$HOME/.cache}/kbuildlab/clangd/$(basename "$tree")/compile_commands.json" ]] || return 1
+    [[ "$(_index_inputs "$tree")" == "$(cat "$rec")" ]]
 }
 
 _kmx_index() {   # _kmx_index TREE
@@ -91,7 +108,7 @@ _kmx_index() {   # _kmx_index TREE
     say "indexing     kmx (macros, and the C types in the build's DWARF)"
     if ! line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" index | sed -n 's/^  types *//p')"; then
         warn "kmx index failed (above)"
-        return 0
+        return 1
     fi
     [[ -n "$line" ]] && say "kmx          $line"
     return 0
@@ -113,14 +130,23 @@ cmd_tags() {
     local src; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source in $tree"
     # Asked for clangd alone, its failure is the command's.
-    local gen=0
+    local gen=0 whole=0 complete=1 inputs="" to
+    to="$(_stamp "$tree" index)"
+    rm -f "$to" "$to.pending"
+    if [[ $clangd -eq 1 && "${KBL_CLANGD:-1}" != 0 && "${KBL_CLANGD_WARM:-1}" != 0 && "${KBL_TAGS_VIEW:-1}" != 0 ]]; then
+        whole=1; inputs="$(_index_inputs "$tree")"
+    fi
     if [[ $clangd -ne 0 ]]; then
         _clangd_index "$tree" gen || { gen=1; [[ $clangd -ne 2 ]] || exit 1; }
     fi
     [[ $clangd -ne 2 ]] && _index_tree "$tree"
-    [[ $clangd -ne 2 ]] && _kmx_index "$tree"
+    if [[ $clangd -ne 2 ]]; then _kmx_index "$tree" || complete=0; fi
     if [[ $clangd -ne 0 && $gen -eq 0 ]]; then
-        _clangd_index "$tree" warm
+        _clangd_index "$tree" warm || complete=0
+    fi
+    if [[ $whole -eq 1 && $gen -eq 0 && $complete -eq 1 && "$(_index_inputs "$tree")" == "$inputs" ]]; then
+        [[ -n "${_KBL_WARM_QUEUE:-}" ]] && to="$to.pending"
+        mkdir -p "$(kbl_tree_data "$tree")" && printf '%s\n' "$inputs" > "$to"
     fi
     return 0
 }

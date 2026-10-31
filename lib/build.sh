@@ -361,6 +361,37 @@ _kbl_jobs() {
 _built_rec() { printf '%s\n' "$(kbl_tree_data "$1")/built-from"; }
 _keep_dir()  { printf '%s\n' "$(kbl_tree_data "$1")/.build-keep"; }
 _src_head()  { git -C "$1" rev-parse --verify --quiet HEAD 2>/dev/null; }
+_stamp()     { printf '%s\n' "$(kbl_tree_data "$1")/$2.stamp"; }
+
+_build_inputs() {   # _build_inputs TREE
+    local tree="$1" src c d e
+    src="$(kbl_tree_src "$tree")" || return 1
+    c="$(kbl_container)" || return 1
+    printf 'head %s\n' "$(_src_head "$src")"
+    printf 'edits %s\n' "$(git -C "$src" status --porcelain=v1 -z --no-renames --untracked-files=normal 2>/dev/null \
+        | while IFS= read -r -d '' e; do printf '%s %s\n' "$e" "$(stat -c '%s %Y' -- "$src/${e:3}" 2>/dev/null)"; done \
+        | sha1sum | cut -c1-40)"
+    printf 'config %s\n' "$(sha1sum < "$src/.config" 2>/dev/null | cut -c1-40)"
+    printf 'tree %s\n' "$(cat "$tree/tree.conf" "$tree/config-fragment" 2>/dev/null | sha1sum | cut -c1-40)"
+    printf 'image %s\n' "$("$c" image inspect --format '{{.Id}}' "$(_tree_image "$tree")" 2>/dev/null)"
+    _ext_dirs "$tree"
+    for d in ${_KBL_EXT[@]+"${_KBL_EXT[@]}"}; do
+        printf 'ext %s %s\n' "$d" "$(find "$d" -type f \( -name '*.[chS]' -o -name Kbuild -o -name Makefile -o -name 'Kconfig*' \) \
+            ! -name '*.mod.c' -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort | sha1sum | cut -c1-40)"
+    done
+    printf 'kbuildlab %s\n' "$(cd "$KBL_REPO" && find lib presets -type f ! -path '*/__pycache__/*' -print0 \
+        | LC_ALL=C sort -z | xargs -0 sha1sum | sha1sum | cut -c1-40)"
+}
+
+_build_current() {   # _build_current TREE
+    local tree="$1" src rel rec
+    rec="$(_stamp "$tree" build)"; [[ -s "$rec" ]] || return 1
+    src="$(kbl_tree_src "$tree")" || return 1
+    rel="$(kbl_tree_get "$tree" KERNEL_IMAGE_REL)"
+    [[ -f "$src/vmlinux" && ( -z "$rel" || -f "$src/$rel" ) ]] || return 1
+    [[ ! -s "$src/modules.order" || -f "$(kbl_tree_data "$tree")/modules.cpio.gz" ]] || return 1
+    [[ "$(_build_inputs "$tree")" == "$(cat "$rec")" ]]
+}
 
 _build_moved() {   # _build_moved TREE
     local head
@@ -428,6 +459,11 @@ cmd_build() {
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $name --preset"
     jobs="$(_kbl_jobs)" || exit 1
     if _build_moved "$tree"; then moved=1; why="$(_build_moved_why "$tree")"; fi
+    local inputs=""
+    if [[ $extonly -eq 0 && ${#mkargs[@]} -eq 0 ]]; then
+        rm -f "$(_stamp "$tree" build)"
+        inputs="$(_build_inputs "$tree")"
+    fi
     _kmake_args "$tree"
     if [[ $extonly -eq 0 ]]; then
         if [[ $fresh -eq 1 ]]; then
@@ -466,7 +502,11 @@ cmd_build() {
         { _ext_make "$tree" "$d" clean >/dev/null && _ext_make "$tree" "$d" -j"$jobs" modules; } \
             || die "building $d failed again (above)"
     done
-    _stage_modules "$tree"
+    _stage_modules "$tree" || return 1
+    if [[ -n "$inputs" && "$(_build_inputs "$tree")" == "$inputs" ]]; then
+        mkdir -p "$(kbl_tree_data "$tree")" && printf '%s\n' "$inputs" > "$(_stamp "$tree" build)"
+    fi
+    return 0
 }
 
 _ext_dirs() {

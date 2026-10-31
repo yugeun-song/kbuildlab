@@ -120,8 +120,9 @@ COMMANDS = [
         args=["tree*"], notes=[
             TREE_NOTE,
             "Trees are fetched in the background at the start; a failed fetch is retried after "
-            "the others, then the tree is built as checked out. clangd indexes are warmed last, "
-            "several at once."], opts=[
+            "the others, then the tree is built as checked out. A tree built and indexed at its "
+            "newest commit, with nothing changed since, is skipped (= in the table). clangd "
+            "indexes are warmed last, several at once."], opts=[
             Opt("--all", "every registered tree"),
             Opt("--no-tags", "skip ctags, cscope, gtags and clangd"),
             Opt("--no-clangd", "skip the clangd database and index"),
