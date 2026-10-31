@@ -227,7 +227,7 @@ KBL_TAGS_FRESH=1                        --fresh, from the environment
 KBL_CLANGD_JOBS=N                       cap the parallel work of both steps
 KBL_KMX=0 / KBL_KMX_JOBS=N              skip the kmx index, or cap its threads
 
-python3 lib/index/clangd.py --tree DIR warm [-j N] [--timeout S]   index on its own
+python3 lib/index/clangd.py --tree DIR [--tree DIR]... warm [-j N] [--timeout S]   index on its own
 ```
 
 `lib/index/clangd.py` can also report what an editor would see: `check` runs a real

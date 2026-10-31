@@ -1678,6 +1678,7 @@ def available_mb() -> int | None:
 
 
 PREPROCESS_MB = 160        # measured: clang -E on kernel/sched/core.c plus its reader
+WARM_MB = 2900
 
 
 def auto_jobs(cap: int | None = None, reserve_mb: int = RESERVE_MB,
@@ -2115,7 +2116,7 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
                 break           # clangd is gone; nothing will finish now
             if not quiet and last and time.time() - last_shown > 15:
                 last_shown = time.time()
-                print(f"      indexing {tree}: {last}", flush=True)
+                _line(f"      indexing {tree}: {last}")
             time.sleep(0.5)
     finally:
         try:
@@ -2706,27 +2707,55 @@ def cmd_regions(args) -> int:
     return 1 if differing else 0
 
 
+_LINE_LOCK = threading.Lock()
+
+
+def _line(text: str) -> None:
+    with _LINE_LOCK:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+
+
 def cmd_warm(args) -> int:
     # One indexing thread is far cheaper than a whole session, but they still
     # add up on a tree this size; scale them the same way and leave the same
     # headroom.
-    jobs = args.jobs or max(1, min(auto_jobs(cap=(os.cpu_count() or 2)) * 2,
-                                   (os.cpu_count() or 2)))
+    cpus = os.cpu_count() or 2
     rc = 0
+    ready = []
     for tree in args.trees:
         if not os.path.isfile(os.path.join(cache_dir(tree), "compile_commands.json")):
-            print(f"[{tree}] no database yet -- run gen first")
+            _line(f"[{tree}] no database yet -- run gen first")
             rc = 1
             continue
-        print(f"[{tree}] warming clangd's index ({jobs} threads), "
+        ready.append(tree)
+    if not ready:
+        return rc
+    width = auto_jobs(cap=min(len(ready), cpus), job_mb=WARM_MB)
+    total = args.jobs or max(1, min(auto_jobs(cap=cpus) * 2, cpus))
+    jobs = max(1, total // width)
+    if len(ready) > 1:
+        _line(f"warming {len(ready)} clangd indexes, {width} at a time, "
+              f"{jobs} thread(s) each")
+
+    def one(tree: str) -> bool:
+        _line(f"[{tree}] warming clangd's index ({jobs} threads), "
               f"currently {index_size(tree)}")
         started = time.time()
         ok = warm_index(tree, jobs, args.timeout)
         took = time.time() - started
-        print(f"    {'done' if ok else 'not finished'} in {took:.0f}s -- "
+        lead = "    " if len(ready) == 1 else f"[{tree}] "
+        _line(f"{lead}{'done' if ok else 'not finished'} in {took:.0f}s -- "
               f"now {index_size(tree)}")
-        if not ok:
-            rc = 1
+        if args.results:
+            with _LINE_LOCK, open(args.results, "a", encoding="utf-8") as f:
+                f.write(f"{tree}\t{'ok' if ok else 'fail'}\t{took:.0f}\n")
+        return ok
+
+    with cf.ThreadPoolExecutor(width) as ex:
+        for ok in ex.map(one, ready):
+            if not ok:
+                rc = 1
     return rc
 
 
@@ -2829,6 +2858,9 @@ def main() -> int:
                         "from free memory")
     w.add_argument("--timeout", type=float, default=7200.0,
                    help="give up after this many seconds (default 2h)")
+    w.add_argument("--results", metavar="FILE", default="",
+                   help="append TREE, ok or fail, and the seconds taken to FILE, "
+                        "one tab-separated line per tree")
     w.set_defaults(func=cmd_warm)
 
     k = sub.add_parser("clean", help="undo everything gen wrote for these trees")
