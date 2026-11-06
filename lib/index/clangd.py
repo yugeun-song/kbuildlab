@@ -20,8 +20,8 @@ or replaced does not need this file edited:
   1. No compilation database.  Without one clangd guesses the include paths and
      every <linux/...> resolves to nothing.  `gen` builds compile_commands.json
      out of the .cmd files kbuild already wrote, so no rebuild is needed.
-     Assembly entries are dropped: clangd cannot parse them, and leaving them
-     in makes every nearby header inherit -D__ASSEMBLY__.
+     Assembly entries go to a database of their own: clangd cannot parse them,
+     and leaving them in makes every nearby header inherit -D__ASSEMBLY__.
 
   2. GCC-only flags.  A kernel command line carries options clang has never had
      (-fconserve-stack, -mabi=lp64 on arm64, -mindirect-branch=...).  clang
@@ -242,7 +242,8 @@ def gen_cdb(tree: str, force: bool) -> tuple[int, int]:
     os.makedirs(out_dir, exist_ok=True)
     units_path = os.path.join(out_dir, UNITS_FILE)
     assembly = 0
-    if force or not os.path.exists(units_path):
+    if force or not os.path.exists(units_path) \
+            or not os.path.exists(os.path.join(out_dir, ASSEMBLER_UNITS_FILE)):
         gen = find_generator(tree)
         tmp = units_path + ".tmp"
         subprocess.run([sys.executable, gen, "-d", ksrc, "-o", tmp],
@@ -259,6 +260,8 @@ def gen_cdb(tree: str, force: bool) -> tuple[int, int]:
         assembly = len(entries) - len(kept)
         with open(units_path, "w") as f:
             json.dump(kept, f)
+        with open(os.path.join(out_dir, ASSEMBLER_UNITS_FILE), "w") as f:
+            json.dump([e for e in entries if e["file"].endswith(".S")], f)
     units = build_units(tree)
     # A file built twice -- the boot stub's video code, once more for the
     # realmode wakeup with -D_WAKEUP -- has two entries, and clangd reads one.
@@ -276,15 +279,16 @@ def cdb_entries(tree: str) -> list[dict]:
         return json.load(f)
 
 
-def write_cdb(tree: str, entries: list[dict]) -> None:
+def write_cdb(tree: str, entries: list[dict], where: str | None = None) -> None:
     """Replace the database in one step, since clangd may read it at any time."""
-    path = os.path.join(cache_dir(tree), "compile_commands.json")
+    path = os.path.join(where or cache_dir(tree), "compile_commands.json")
     with open(path + ".tmp", "w") as f:
         json.dump(entries, f, indent=1)
     os.replace(path + ".tmp", path)
 
 
 UNITS_FILE = "units.json"
+ASSEMBLER_UNITS_FILE = "assembler-units.json"
 SHELL_FILE = "build_shell.json"
 
 
@@ -424,7 +428,8 @@ def write_compat_shim(tree: str, entries: list[dict],
     return path, after, len(names)
 
 
-def apply_overlay(tree: str, shim: str | None = None, after: str | None = None) -> int:
+def apply_overlay(tree: str, shim: str | None = None, after: str | None = None,
+                  where: str | None = None) -> int:
     """Put the annotated headers ahead of the tree's own on the include path,
     and the compatibility shim right behind the forced include it amends.
 
@@ -435,7 +440,7 @@ def apply_overlay(tree: str, shim: str | None = None, after: str | None = None) 
     ov = overlay_dir(tree)
     if not os.path.isdir(ov):
         return 0
-    cdb = os.path.join(cache_dir(tree), "compile_commands.json")
+    cdb = os.path.join(where or cache_dir(tree), "compile_commands.json")
     with open(cdb) as f:
         entries = json.load(f)
     flag = f"-I{ov}"
@@ -461,7 +466,7 @@ def apply_overlay(tree: str, shim: str | None = None, after: str | None = None) 
             e["arguments"] = args
         touched += 1
     if touched:
-        write_cdb(tree, entries)
+        write_cdb(tree, entries, where)
     return touched
 
 
@@ -1014,14 +1019,14 @@ class Targets:
 
 def rewrite_entries(tree: str, units: list[dict], targets: Targets,
                     identities: dict[tuple, str], compiler_include: dict[str, str],
-                    quiet: set[str]) -> int:
+                    quiet: set[str], where: str | None = None) -> int:
     """Turn each build command into the command clangd should run: the unit's
     target named, the flags clang refuses there dropped, the identity include
     first, and a -isystem naming the build compiler's own headers pointed at
     clang's instead, since each compiler can only read its own."""
     resource = os.path.join(subprocess.run(["clang", "-print-resource-dir"], capture_output=True,
                                            text=True, check=True).stdout.strip(), "include")
-    cdb = os.path.join(cache_dir(tree), "compile_commands.json")
+    cdb = os.path.join(where or cache_dir(tree), "compile_commands.json")
     with open(cdb) as f:
         entries = json.load(f)
     for e in entries:
@@ -1052,8 +1057,29 @@ def rewrite_entries(tree: str, units: list[dict], targets: Targets,
             out[-1:-1] = INTRINSIC_QUIET
         e.pop("arguments", None)
         e["command"] = shlex.join(out)
-    write_cdb(tree, entries)
+    write_cdb(tree, entries, where)
     return len(entries)
+
+
+def assembler_dir(tree: str) -> str:
+    return os.path.join(cache_dir(tree), "assembler")
+
+
+def write_assembler_cdb(tree: str, base: dict[str, str | None],
+                        compiler_include: dict[str, str], jobs: int) -> int:
+    """Each .S with the command kbuild built it with, put through what C units
+    go through, in a database clangd consults for assembler sources alone."""
+    with open(os.path.join(cache_dir(tree), ASSEMBLER_UNITS_FILE)) as f:
+        units = json.load(f)
+    first: dict[str, dict] = {}
+    for u in units:
+        first.setdefault(u["file"], u)
+    os.makedirs(assembler_dir(tree), exist_ok=True)
+    write_cdb(tree, list(first.values()), assembler_dir(tree))
+    rewrite_entries(tree, units, Targets(base, units, jobs), {}, compiler_include, set(),
+                    assembler_dir(tree))
+    apply_overlay(tree, where=assembler_dir(tree))
+    return len(first)
 
 
 def include_dirs(tree: str) -> list[str]:
@@ -1581,6 +1607,23 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool, floor: str,
     if not header_diagnostics:
         hdr += ["    - '*'"]
     frags.append("\n".join(hdr) + "\n")
+
+    # clangd has no assembler language, and a .S is C preprocessor text around
+    # instructions.  Named C, with the macro the compiler defines for assembler
+    # input, its macros resolve as the build's preprocessor resolved them; what
+    # the C parser says of the instructions can only be wrong.
+    frags.append("\n".join([
+        f"# {tree}: assembler sources keep their build commands, read as C for the preprocessor",
+        "If:",
+        f"  PathMatch: {path_regex(lab, r'.*\.S')}",
+        "CompileFlags:",
+        f"  CompilationDatabase: {assembler_dir(tree)}",
+        "  Add:",
+        "    - -xc",
+        "    - -D__ASSEMBLER__=1",
+        "Diagnostics:",
+        "  Suppress: '*'",
+    ]) + "\n")
     return frags
 
 
@@ -2157,7 +2200,7 @@ def cmd_gen(args) -> int:
             print(f"    discarded {cache_dir(tree)}")
         kept, dropped = gen_cdb(tree, args.force)
         print(f"    compile_commands.json: {kept} entries"
-              + (f" ({dropped} assembly or repeated entries dropped)" if dropped else "")
+              + (f" ({dropped} assembly or repeated entries left out)" if dropped else "")
               + f"  -> {cache_dir(tree)}")
         ksrc = kernel_root(tree)
         units = build_units(tree)
@@ -2264,6 +2307,8 @@ def cmd_gen(args) -> int:
                     extra.append({"directory": ksrc, "file": copy,
                                   "command": shlex.join(argv[:-1] + [copy])})
             write_cdb(tree, src + extra)
+        print(f"    assembler database: {write_assembler_cdb(tree, base, compiler_include, jobs)} "
+              f"entries  -> {assembler_dir(tree)}")
         in_tree = [e for e in cdb_entries(tree) if e["file"].startswith(ksrc + "/")]
         common = max(tally, key=lambda f: tally[f])
         blocks = tree_fragments(tree, in_tree, True, floor, targets.argv(common), read, jobs,

@@ -196,6 +196,11 @@ closes each gap, measured against the tree rather than taken from a list:
 - Source the tree never compiles (`arch/powerpc` on an arm64 tree) keeps
   navigation and loses diagnostics; everything "unused" is off; `-ferror-limit=0`
   stops the fatal `too many errors` line surviving a silenced tree.
+- Assembler sources have a database of their own, each `.S` with its build command,
+  because beside C units they would give nearby headers `-D__ASSEMBLY__`. clangd has
+  no assembler language, so they are read as C with `__ASSEMBLER__` defined and no
+  diagnostics. That makes their macros resolve; what the C parser says about the
+  instructions is not true, and an editor should use only the preprocessor's answers.
 
 Nothing in the generator names a directory, header or macro of a particular tree:
 the include paths, the arch directory, each unit's target and the compiler's own
