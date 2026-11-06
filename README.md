@@ -70,10 +70,28 @@ Every step takes all the cores it can use. `make` and ctags run `KBL_JOBS` jobs,
 all cores when unset. The build readings, clangd and kmx take all cores as well,
 but clangd's steps run fewer jobs when free memory would otherwise run short
 (`KBL_CLANGD_JOBS` and `KBL_KMX_JOBS` cap them). cscope and gtags have no parallel
-mode, so each is one process beside ctags. A failed incremental build is wiped (`make mrproper`,
-`.config` and indexes kept) and rebuilt once if the source moved since the last
-good build; otherwise it just fails. `build --fresh` wipes on request. A failed
-build from scratch leaves no kernel binary. Commands that write (`sync`,
+mode, so each is one process beside ctags. Kernels build one after another, each
+on all cores; indexes run up to half the cores' worth of trees at once, starting
+another while memory is free, so a stretch of one tree that uses few cores leaves
+the rest to the others. Each tree's log is shown whole when it ends. A writing
+command leaves nothing running when it ends, however it ends: an interrupted one
+stops its processes and the containers it started.
+
+Everything is incremental first, and what no longer fits is thrown away, as little
+of it as works:
+
+| When | What is discarded |
+|---|---|
+| A build succeeded | Objects and modules it no longer makes (a symbol turned off, a file dropped upstream): kbuild leaves them, and their `.cmd` would read as compiled. Needs a thin `vmlinux.a`; an older tree keeps them. |
+| An incremental build failed and the source moved since the last good one | The generated files the failure names, repeatedly while that makes progress; then every recorded output in the directories that failed; only then the whole build (`make mrproper`, `.config` and indexes kept). Tracked files are never touched. At the commit of the last good build a failure just fails: the cause is your edit. |
+| The compiler or the architecture changed | The whole build, since kbuild does not track them. |
+| The build image changed | All indexes of the tree. |
+| One of cscope and gtags failed | That index, which is built once more; then the whole view. |
+| Generating the clangd database failed | The tree's clangd cache but for clangd's own shards, which are keyed on content. |
+| kmx | Its index updates itself by file, or rebuilds when the change is large or the architecture changed (`kmx refresh`). |
+
+`build --fresh` wipes on request. A failed build from scratch leaves no kernel
+binary. Commands that write (`sync`,
 `config`, `build`, `tags`, `update`, `image`, `rm`, `mv`, `prune`) run one at a
 time; a second one waits for the first.
 
@@ -829,7 +847,7 @@ lib/cli.py             every command's options, for --help and Tab completion
 lib/index/             the indexers: clangd.py, the tag view, the build readers
 boards/                the real SoC machine models run --board boots, one file each
 completions/           the bash and zsh completions install.sh puts in place
-tests/                 tree.conf grammar, cli.py against the parsers, the tag view
+tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs
 ```
 
 ## Dependencies

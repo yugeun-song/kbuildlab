@@ -120,7 +120,10 @@ COMMANDS = [
         args=["tree*"], notes=[
             TREE_NOTE,
             "With no option it does all of it: the kernel and its modules, ctags, cscope, gtags, "
-            "clangd's database and index, and kmx, each on all cores while memory lasts.",
+            "clangd's database and index, and kmx, on all cores while memory lasts, several "
+            "trees at once where one tree would leave cores idle.",
+            "Everything is incremental first. A failed incremental build discards what the failure "
+            "names and tries again; only when that does not help is the whole build wiped.",
             "Trees are fetched in the background at the start; a failed fetch is retried after "
             "the others, then the tree is built as checked out. A tree built and indexed at its "
             "newest commit, with nothing changed since, is skipped (= in the table); a new "
@@ -142,8 +145,9 @@ COMMANDS = [
         "[TREE] [--ext-only|--fresh] [-- MAKE ARGS]",
         args=["tree"], rest="MAKE ARGS", notes=[
             TREE_NOTE,
-            "make uses KBL_JOBS jobs, all cores by default. A failed incremental build is wiped "
-            "and rebuilt once if the source moved since the last good build."],
+            "make uses KBL_JOBS jobs, all cores by default. If the source moved since the last good "
+            "build, a failed incremental build discards what the failure names and tries again, and "
+            "only then is wiped and rebuilt. Outputs the build no longer makes are removed."],
         opts=[
             Opt("--ext-only", "build only the tree's EXT_MODULES, against its last build"),
             Opt("--fresh", "wipe the build first (make mrproper; .config and indexes kept)")]),
