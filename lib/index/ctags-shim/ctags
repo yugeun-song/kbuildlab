@@ -25,7 +25,8 @@ i=${#args[@]}
 while (( i > 0 )) && [[ ${args[i-1]} != -* && -f ${args[i-1]} ]]; do (( i-- )); done
 opts=("${args[@]:0:i}")
 files=("${args[@]:i}")
-macros=("${opts[@]}" --if0=yes --c-kinds=d)
+assembler='/^[ \t]*\.(macro|set|equ|equiv|eqv)[ \t]+\.?([[:alpha:]_][[:alnum:]_$.]*)/\2/A,assembler,assembler definitions/'
+macros=("${opts[@]}" --if0=yes --c-kinds=d "--regex-c=$assembler")
 if [[ -n ${KBL_TAGS_PASS-} ]]; then
     [[ -n ${KBL_TAGS_STATE-} ]] || exec "$real" "${args[@]}"
     "$real" "${args[@]}" && exec "$real" "${macros[@]}" "${files[@]}"

@@ -74,18 +74,20 @@ with tempfile.TemporaryDirectory() as tmp:
     env = dict(os.environ, KBL_TAGS_PASS="1")
     over_view = subprocess.run(args, cwd=tmp, env=dict(env, KBL_TAGS_STATE=tmp), capture_output=True, text=True)
     plain = subprocess.run(args, cwd=tmp, env=env, capture_output=True, text=True)
-    check("ctags over the view", ("ONLY_A_DEFINE" in over_view.stdout, "after_asm" in over_view.stdout), (True, True))
+    check("ctags over the view", ("ONLY_A_DEFINE" in over_view.stdout, "after_asm" in over_view.stdout,
+                                  "m\tk.h\t/^.macro m$/" in over_view.stdout), (True, True, True))
     check("ctags over the tree", ("ONLY_A_DEFINE" in plain.stdout, "after_asm" in plain.stdout), (False, True))
 
 with tempfile.TemporaryDirectory() as tmp:
-    put(tmp, "m.h", "#ifdef A\n#define TWICE(x) x\n#else\n#define TWICE(x) #x\n#endif\nint once;\nint once;\n")
+    put(tmp, "m.h", "#ifdef A\n#define TWICE(x) x\n.macro both\n#else\n#define TWICE(x) #x\n.macro both\n#endif\n"
+                    "int once;\nint once;\n")
     put(tmp, "tags", '!_TAG_X\t1\t//\nTWICE\tm.h\t/^#define TWICE(/;"\td\tsignature:(x)\n'
-                     'once\tm.h\t/^int once;$/;"\tv\n')
+                     'both\tm.h\t/^.macro both$/;"\tA\nonce\tm.h\t/^int once;$/;"\tv\n')
     r = subprocess.run([sys.executable, "-B", tagview, "address"], cwd=tmp, capture_output=True, text=True)
     with open(os.path.join(tmp, "tags")) as f:
         check("address", (r.returncode, f.read()),
-              (0, '!_TAG_X\t1\t//\nTWICE\tm.h\t2;"\td\tsignature:(x)\nTWICE\tm.h\t4;"\td\tsignature:(x)\n'
-                  'once\tm.h\t6;"\tv\n'))
+              (0, '!_TAG_X\t1\t//\nTWICE\tm.h\t2;"\td\tsignature:(x)\nTWICE\tm.h\t5;"\td\tsignature:(x)\n'
+                  'both\tm.h\t3;"\tA\nboth\tm.h\t6;"\tA\nonce\tm.h\t8;"\tv\n'))
 
 print("tagview: the view kept only copies of files the tree has; assembler-only #define lines reach the indexes"
       if not failed else f"tagview: {failed} failed")

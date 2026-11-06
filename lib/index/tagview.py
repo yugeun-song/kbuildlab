@@ -199,7 +199,7 @@ def address() -> None:
             nos = matching_lines(order, unescape(body[:-1] if whole else body), whole)
             # ctags merges a macro's definitions in several branches into one
             # pattern, and every line still in the view was compiled.
-            macro = rest[k:] == b';"\td' or rest[k:].startswith(b';"\td\t')
+            macro = rest[k:].split(b"\t", 2)[1:2] in ([b"d"], [b"A"])
             for no in nos if macro else nos[:1]:
                 lines.append(b"\t".join((tag, path, str(no).encode() + rest[k:])))
             if nos:

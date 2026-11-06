@@ -161,8 +161,9 @@ ctags takes its options through `lib/index/ctags-shim`, which rewrites an old
 `tags.sh` the way later kernels do: `--extra` becomes `--extras`, and a tree's own
 `kconfig` language yields to ctags' built-in Kconfig parser. Over the view it adds
 a macros-only pass with `--if0=yes`: Universal Ctags reads `#ifdef __ASSEMBLY__` as
-`#if 0`, and parsing that assembler as C would lose the declaration after it. New
-options make the next run full.
+`#if 0`, and parsing that assembler as C would lose the declaration after it. The
+same pass tags what a C header defines for the assembler (`.macro`, `.set`, `.equ`,
+`.equiv`, `.eqv`), which the C parser cannot see. New options make the next run full.
 
 The view is kept from run to run, and every run first drops the copies of files
 the tree no longer has, so a sync that deletes or moves a file leaves no path in
