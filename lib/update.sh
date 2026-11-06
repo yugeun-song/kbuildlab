@@ -287,13 +287,6 @@ _update_summary() {   # _update_summary RECORD
     return 0
 }
 
-_kbl_kill_tree() {   # _kbl_kill_tree PID
-    local c
-    for c in $(pgrep -P "$1" 2>/dev/null); do _kbl_kill_tree "$c"; done
-    kill "$1" 2>/dev/null
-    return 0
-}
-
 cmd_update() {
     local all=0 notags=0 t rc=0
     local -a names=() trees=() tagsopt=() later=()

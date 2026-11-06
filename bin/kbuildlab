@@ -141,13 +141,25 @@ cmd_help() {
 # A writing command leaves nothing behind, however it ends: its processes, the
 # containers it started, and its temporary directory.
 _kbl_release() {
-    local status=$? p c ids
+    local status=$? p c ids round
+    local -a env=()
     trap - EXIT
     trap '' TERM INT HUP
-    for p in $(pgrep -P $$ 2>/dev/null); do _kbl_kill_tree "$p"; done
+    for round in 1 2; do
+        for p in /proc/[0-9]*; do
+            p="${p#/proc/}"
+            [[ "$p" != "$$" && "$p" != "$BASHPID" ]] || continue
+            mapfile -d '' -t env 2>/dev/null < "/proc/$p/environ" || continue
+            [[ " ${env[*]-} " == *" KBL_RUN_ID=$KBL_RUN_ID "* ]] || continue
+            case "$(cat "/proc/$p/comm" 2>/dev/null)" in
+                conmon|catatonit|pasta*|passt*|slirp4netns) ;;
+                *) kill "$p" 2>/dev/null ;;
+            esac
+        done
+    done
     c="$(kbl_container 2>/dev/null)" \
-        && ids="$("$c" ps -q --filter "label=kbuildlab.run=$KBL_RUN_ID" 2>/dev/null)" \
-        && [[ -n "$ids" ]] && "$c" stop -t 2 $ids >/dev/null 2>&1
+        && ids="$("$c" ps -aq --filter "label=kbuildlab.run=$KBL_RUN_ID" 2>/dev/null)" \
+        && [[ -n "$ids" ]] && "$c" rm -f -t 2 $ids >/dev/null 2>&1
     rm -rf -- "$KBL_RUN_TMP"
     exit "$status"
 }
@@ -155,7 +167,6 @@ _kbl_release() {
 # The command runs as a job the shell waits for, since a trap waits for a
 # foreground command to end, and that can be a clangd reading an index for minutes.
 _kbl_hold() {
-    export KBL_RUN_ID=$$
     KBL_RUN_TMP="$(mktemp -d)" || die "cannot create a temporary directory"
     export KBL_RUN_TMP
     trap _kbl_release EXIT
@@ -172,7 +183,8 @@ _kbl_lock() {
     if ! flock -n "$_kbl_lock_fd"; then
         who="$(cat "$lock" 2>/dev/null)"
         say "waiting      for ${who:-another kbuildlab command} to finish"
-        flock "$_kbl_lock_fd" || die "cannot lock $lock"
+        flock "$_kbl_lock_fd" &
+        wait $! || die "cannot lock $lock"
     fi
     printf 'kbuildlab %s (pid %s, since %s)\n' "$*" "$$" "$(date +%H:%M)" > "$lock"
     export _KBL_LOCKED=1
@@ -189,12 +201,17 @@ case "$cmd" in
 esac
 case "$cmd" in
     sync|config|build|tags|update|image|rm|mv|prune)
-        _kbl_hold
-        _kbl_lock "$cmd" "$@"
-        { : <&0; } 2>/dev/null || exec 0</dev/null
-        "cmd_$cmd" "$@" <&0 &
-        wait $!
-        exit
+        if [[ -z ${_KBL_LOCKED-} ]]; then
+            # In the environment from the start, so that /proc shows it for every
+            # process of the run: a forked shell has only what its program began with.
+            [[ ${KBL_RUN_ID-} == "$$" ]] || KBL_RUN_ID=$$ exec bash "$0" "$cmd" "$@"
+            _kbl_hold
+            _kbl_lock "$cmd" "$@"
+            { : <&0; } 2>/dev/null || exec 0</dev/null
+            "cmd_$cmd" "$@" <&0 &
+            wait $!
+            exit
+        fi
         ;;
 esac
 case "$cmd" in
