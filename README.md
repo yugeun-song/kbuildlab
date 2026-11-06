@@ -153,7 +153,8 @@ blanked and a file no unit read is emptied (line numbers kept). The copies live 
 kernel's own `make tags cscope gtags` run unchanged, and the finished indexes move
 into the tree. cscope and gtags stay incremental; ctags is merged into the old
 `tags`, or built afresh when that file was made in another directory (a moved
-tree) or by another ctags. Other runtimes
+tree) or by another ctags, on `KBL_JOBS` workers either way, with the same bytes
+as a single ctags. Other runtimes
 have no overlay volumes and index the tree as it is on disk, as `KBL_TAGS_VIEW=0`
 does.
 

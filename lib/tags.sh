@@ -234,7 +234,8 @@ _index_view() {
     [[ -n "$fresh" ]] && mode=fresh
     local -a py=(python3 "${KBL_REPO}/lib/index/tagview.py" --tree "$tree" --view "$view")
     "${py[@]}" harvest --drop || die "cannot clear $up"
-    _container_run "$src" -v "$src:$src:O,upperdir=$up,workdir=$wk" -v "$st:$st" -e "KBL_TAGS_STATE=$st" || exit 1
+    _container_run "$src" -v "$src:$src:O,upperdir=$up,workdir=$wk" -v "$st:$st" -e "KBL_TAGS_STATE=$st" \
+        -e "KBL_JOBS=$(_kbl_jobs)" || exit 1
     local -a over=("${_KBL_RUN[@]}")
     say "indexing     the sources scripts/tags.sh lists for $karch"
     "${over[@]}" bash -c "PATH=${KBL_REPO}/lib/index/ctags-shim:\$PATH; exec make ARCH=$karch tags" >/dev/null \

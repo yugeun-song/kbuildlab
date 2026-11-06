@@ -89,6 +89,40 @@ with tempfile.TemporaryDirectory() as tmp:
               (0, '!_TAG_X\t1\t//\nTWICE\tm.h\t2;"\td\tsignature:(x)\nTWICE\tm.h\t5;"\td\tsignature:(x)\n'
                   'both\tm.h\t3;"\tA\nboth\tm.h\t6;"\tA\nonce\tm.h\t8;"\tv\n'))
 
+with tempfile.TemporaryDirectory() as tmp:
+    merge = os.path.join(os.path.dirname(tagview), "tags-merge.sh")
+    state = os.path.join(tmp, "state")
+    os.mkdir(state)
+    names = [f"f{i}.c" for i in range(9)]
+    for i, name in enumerate(names):
+        put(tmp, name, f"int one_{i};\n")
+    opts = ["-a", "--c-kinds=+p"]
+    put(state, "keys", "k\n")
+    put(state, "opts.k", "\0".join(opts) + "\0")
+    put(state, "files.k", "".join(n + "\n" for n in names))
+    env = dict(os.environ, KBL_TAGS_STATE=state, KBL_JOBS="3")
+
+    def single():
+        out = os.path.join(state, "single")
+        if os.path.exists(out):
+            os.unlink(out)
+        subprocess.run(["ctags", *opts, "-f", out, *names], cwd=tmp, check=True, capture_output=True)
+        with open(out) as f:
+            return f.read()
+
+    def workers():
+        r = subprocess.run(["bash", merge], cwd=tmp, env=env, capture_output=True, text=True)
+        with open(os.path.join(state, "tags.new")) as f:
+            return r.returncode, f.read(), [x for x in os.listdir(state) if x.startswith("part.")]
+
+    put(state, "tags.prev")
+    check("ctags workers, everything", workers(), (0, single(), []))
+    os.replace(os.path.join(state, "tags.new"), os.path.join(state, "tags.prev"))
+    put(tmp, names[4], "int two_4;\n")
+    newer = os.path.getmtime(os.path.join(state, "tags.prev")) + 60
+    os.utime(os.path.join(tmp, names[4]), (newer, newer))
+    check("ctags workers, one file changed", workers(), (0, single(), []))
+
 print("tagview: the view kept only copies of files the tree has; assembler-only #define lines reach the indexes"
       if not failed else f"tagview: {failed} failed")
 sys.exit(1 if failed else 0)
