@@ -962,7 +962,46 @@ def _split(expr: str) -> tuple[set[str], set[str]]:
             set(_IDENT.findall(_DEFINED.sub(" ", expr))))
 
 
-def questions(paths) -> tuple[set[str], dict[str, set[str]]]:
+def _file_questions(path: str):
+    checked: set[str] = set()
+    expanded: set[str] = set()
+    bodies: dict[str, tuple[set[str], set[str]]] = {}
+    asked: dict[str, set[str]] = {}
+    wrapped: set[str] = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return checked, expanded, bodies, asked, wrapped
+    for g in scan(text)[0]:
+        if g.kind in ("ifdef", "ifndef", "elifdef", "elifndef"):
+            checked.update(_IDENT.findall(g.expr)[:1])
+        else:
+            d, e = _split(g.expr)
+            checked |= d
+            expanded |= e
+        for op, arg in _FEATURE_TEST.findall(g.expr):
+            asked.setdefault(op, set()).add(arg)
+    in_block = False
+    for _, _, buf in logical_lines(text):
+        code, in_block = strip_comments(buf, in_block)
+        m = _DEFINITION.match(code)
+        if not m:
+            continue
+        params = {p.strip() for p in (m.group(2) or "").split(",")}
+        d, e = _split(m.group(3))
+        mine = bodies.setdefault(m.group(1), (set(), set()))
+        mine[0].update(d - params)
+        mine[1].update(e - params)
+        for op, arg in _FEATURE_TEST.findall(m.group(3)):
+            if arg in params:
+                wrapped.add(op)
+            else:
+                asked.setdefault(op, set()).add(arg)
+    return checked, expanded, bodies, asked, wrapped
+
+
+def questions(paths, jobs: int = 1) -> tuple[set[str], dict[str, set[str]]]:
     """Names these files' conditionals depend on, and the arguments each
     feature-test operator is asked about.  A name a condition asks whether it
     is defined depends on nothing more; one it expands depends on the names in
@@ -973,37 +1012,22 @@ def questions(paths) -> tuple[set[str], dict[str, set[str]]]:
     bodies: dict[str, tuple[set[str], set[str]]] = {}
     asked: dict[str, set[str]] = {}
     wrapped: set[str] = set()
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except OSError:
-            continue
-        for g in scan(text)[0]:
-            if g.kind in ("ifdef", "ifndef", "elifdef", "elifndef"):
-                checked.update(_IDENT.findall(g.expr)[:1])
-            else:
-                d, e = _split(g.expr)
-                checked |= d
-                expanded |= e
-            for op, arg in _FEATURE_TEST.findall(g.expr):
-                asked.setdefault(op, set()).add(arg)
-        in_block = False
-        for _, _, buf in logical_lines(text):
-            code, in_block = strip_comments(buf, in_block)
-            m = _DEFINITION.match(code)
-            if not m:
-                continue
-            params = {p.strip() for p in (m.group(2) or "").split(",")}
-            d, e = _split(m.group(3))
-            mine = bodies.setdefault(m.group(1), (set(), set()))
-            mine[0].update(d - params)
-            mine[1].update(e - params)
-            for op, arg in _FEATURE_TEST.findall(m.group(3)):
-                if arg in params:
-                    wrapped.add(op)
-                else:
-                    asked.setdefault(op, set()).add(arg)
+    paths = list(paths)
+    if jobs > 1:
+        with cf.ProcessPoolExecutor(jobs) as ex:
+            found = list(ex.map(_file_questions, paths, chunksize=64))
+    else:
+        found = [_file_questions(p) for p in paths]
+    for c, e, b, a, w in found:
+        checked |= c
+        expanded |= e
+        wrapped |= w
+        for name, (d, x) in b.items():
+            mine = bodies.setdefault(name, (set(), set()))
+            mine[0].update(d)
+            mine[1].update(x)
+        for op, args in a.items():
+            asked.setdefault(op, set()).update(args)
     closure, todo = checked | expanded, list(expanded)
     done = set(expanded)
     while todo:

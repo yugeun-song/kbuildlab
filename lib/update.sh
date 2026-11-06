@@ -119,6 +119,8 @@ _update_replay() {   # _update_replay RECORD NAME STAGE DIR
     return "$rc"
 }
 
+KBL_INDEX_ROOM_MB=3072
+
 _update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
     local tree="$1" rec="$2" notags="$3" d="$4" pid="$5" name src before synced=1; shift 5
     name="$(kbl_tree_label "$tree")"
@@ -154,7 +156,7 @@ _update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
             return 0
         fi
         say "current      built at $at, the newest commit; config and build skipped, redoing ${stale[*]}"
-        _KBL_TAGS_PARTS="${stale[*]}" _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
+        _KBL_INDEX_QUEUE+=("$tree"$'\t'"${stale[*]}")
         return 0
     fi
     # Taken before cmd_config, which merges a tree's own fragment.
@@ -166,9 +168,63 @@ _update_one() {   # _update_one TREE RECORD NOTAGS DIR PID [TAGS-OPTION...]
     if [[ "$notags" == 1 ]]; then
         printf '%s\t%s\t%s\t%s\n' "$name" tags skip 0 >> "$rec"
     else
-        _update_stage "$rec" "$name" tags cmd_tags "$tree" "$@" || return 1
+        _KBL_INDEX_QUEUE+=("$tree"$'\t')
     fi
     [[ $synced -eq 1 ]]
+}
+
+_update_index_one() {   # _update_index_one TREE DIR JOBS PARTS [TAGS-OPTION...]
+    local tree="$1" d="$2" jobs="$3" parts="$4" t0=$SECONDS rc; shift 4
+    ( [[ -n "${KBL_CLANGD_JOBS:-}" ]] || export KBL_CLANGD_JOBS="$jobs"
+      _KBL_TAGS_PARTS="$parts"
+      cmd_tags "$tree" "$@" ) > "$d/tags.log" 2>&1; rc=$?
+    printf '%s %s\n' "$rc" "$((SECONDS - t0))" > "$d/tags.rc"
+}
+
+# Up to half the cores' worth of trees index at once, on a share of the cores each
+# that still leaves none idle while another tree is in a stretch of its own that
+# uses one.  Another starts only with memory to begin on; each stage then sizes
+# itself to what is free.  Each tree's log is shown whole when it ends.
+_update_index() {   # _update_index RECORD [TAGS-OPTION...]
+    local rec="$1" tmp entry tree parts t rc=0 width cpus; shift
+    [[ ${#_KBL_INDEX_QUEUE[@]} -gt 0 ]] || return 0
+    tmp="$(dirname "$rec")"
+    cpus="$(nproc)"
+    width=$(( cpus / 2 ))
+    (( width > ${#_KBL_INDEX_QUEUE[@]} )) && width=${#_KBL_INDEX_QUEUE[@]}
+    (( width < 1 )) && width=1
+    local jobs=$(( cpus * 2 / width )); (( jobs > cpus )) && jobs=$cpus
+    head1 "== indexes"
+    say "indexing     ${#_KBL_INDEX_QUEUE[@]} tree(s), up to $width at a time, $jobs job(s) each"
+    local -a active=()
+    _update_index_collect() {
+        local -a still=(); local t
+        for t in "${active[@]+"${active[@]}"}"; do
+            if [[ -e "$tmp/$(kbl_tree_id "$t")/tags.rc" ]]; then
+                head1 "== $(kbl_tree_label "$t")"
+                _update_replay "$rec" "$(kbl_tree_label "$t")" tags "$tmp/$(kbl_tree_id "$t")" || rc=1
+            else
+                still+=("$t")
+            fi
+        done
+        active=("${still[@]+"${still[@]}"}")
+    }
+    for entry in "${_KBL_INDEX_QUEUE[@]}"; do
+        tree="${entry%%$'\t'*}"; parts="${entry#*$'\t'}"
+        while (( ${#active[@]} >= width )) || { (( ${#active[@]} > 0 )) \
+              && (( $(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo) < KBL_INDEX_ROOM_MB )); }; do
+            wait -n
+            _update_index_collect
+        done
+        rm -f "$tmp/$(kbl_tree_id "$tree")/tags.rc"
+        _update_index_one "$tree" "$tmp/$(kbl_tree_id "$tree")" "$jobs" "$parts" "$@" &
+        active+=("$tree")
+    done
+    while (( ${#active[@]} > 0 )); do
+        wait -n
+        _update_index_collect
+    done
+    return $rc
 }
 
 _update_warm() {   # _update_warm RECORD QUEUE
@@ -273,6 +329,7 @@ cmd_update() {
     _KBL_UPDATE_TMP="$tmp"; rec="$tmp/record"; : > "$rec"
     trap _update_cleanup EXIT
     _KBL_WARM_QUEUE="$tmp/warm.queue"; : > "$_KBL_WARM_QUEUE"
+    _KBL_INDEX_QUEUE=()
     for t in "${trees[@]}"; do
         mkdir -p "$tmp/$(kbl_tree_id "$t")" || die "cannot write $tmp"
         _update_fetch "$t" "$tmp/$(kbl_tree_id "$t")" &
@@ -285,6 +342,7 @@ cmd_update() {
     for t in "${later[@]+"${later[@]}"}"; do
         _update_one "$t" "$rec" "$notags" "$tmp/$(kbl_tree_id "$t")" "" "${tagsopt[@]+"${tagsopt[@]}"}" || rc=1
     done
+    _update_index "$rec" "${tagsopt[@]+"${tagsopt[@]}"}" || rc=1
     _update_warm "$rec" "$_KBL_WARM_QUEUE"
     _update_summary "$rec"
     return $rc

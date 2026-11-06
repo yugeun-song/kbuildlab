@@ -106,6 +106,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as cf
 import fcntl
+import functools
 import hashlib
 import inspect
 import json
@@ -258,10 +259,9 @@ def gen_cdb(tree: str, force: bool) -> tuple[int, int]:
         # alone turns asm/atomic_lse.h into a screen of errors.
         kept = [e for e in entries if not e["file"].endswith(".S")]
         assembly = len(entries) - len(kept)
-        with open(units_path, "w") as f:
-            json.dump(kept, f)
-        with open(os.path.join(out_dir, ASSEMBLER_UNITS_FILE), "w") as f:
-            json.dump([e for e in entries if e["file"].endswith(".S")], f)
+        write_text(units_path, json.dumps(kept))
+        write_text(os.path.join(out_dir, ASSEMBLER_UNITS_FILE),
+                   json.dumps([e for e in entries if e["file"].endswith(".S")]))
     units = build_units(tree)
     # A file built twice -- the boot stub's video code, once more for the
     # realmode wakeup with -D_WAKEUP -- has two entries, and clangd reads one.
@@ -301,7 +301,7 @@ def build_units(tree: str) -> list[dict]:
         return json.load(f)
 
 
-def unit_deps(unit: dict, symbols: bool = False) -> set[str] | None:
+def unit_deps(unit: dict, symbols: bool = False) -> frozenset[str] | None:
     """What kbuild recorded one unit as reading, tree-relative; None without a record."""
     args = entry_args(unit)
     if "-o" not in args[:-1]:
@@ -572,9 +572,15 @@ def write_identities(tree: str, targets: "Targets", flag_sets: list[tuple], answ
     return paths, {k: sorted(v) for k, v in meta.items()}
 
 
+@functools.lru_cache(maxsize=None)
+def _command_words(command: str) -> tuple[str, ...]:
+    return tuple(sys.intern(w) for w in shlex.split(command))
+
+
 def entry_args(e: dict) -> list[str]:
+    """A run asks for each entry's words many times, and shlex is slow."""
     cmd = e.get("command")
-    return shlex.split(cmd) if cmd else list(e["arguments"])
+    return list(_command_words(cmd)) if cmd else list(e["arguments"])
 
 
 _INCLUDE_RE = re.compile(r'^[ \t]*#[ \t]*include[ \t]*[<"]([^>"]+)[>"]', re.M)
@@ -590,7 +596,8 @@ def is_header(path: str) -> bool:
 CONTEXT_FILE = "header_context.json"
 
 
-def kbuild_deps(cmd_file: str, symbols: bool = False) -> set[str] | None:
+@functools.lru_cache(maxsize=None)
+def kbuild_deps(cmd_file: str, symbols: bool = False) -> frozenset[str] | None:
     """The headers fixdep recorded for one object, tree-relative; None when the
     object has no dependency list to consult.
 
@@ -619,7 +626,7 @@ def kbuild_deps(cmd_file: str, symbols: bool = False) -> set[str] | None:
             deps.add(os.path.normpath(word))
         elif symbols and word.startswith("$(wildcard ") and word.endswith(")"):
             deps.add(os.path.normpath(word[len("$(wildcard "):-1].strip()))
-    return deps or None
+    return frozenset(deps) or None
 
 
 def header_entries(tree: str, entries: list[dict], verbose: bool, floor: str,
@@ -1436,13 +1443,15 @@ def coverage(tree: str, entries: list[dict]) -> tuple[set[str], set[str]]:
     return tops, arches
 
 
+@functools.lru_cache(maxsize=None)
 def srcarch(tree: str) -> str:
     """The arch directory whose headers the build searches: kbuild's SRCARCH,
     which is not always tree.conf's ARCH -- x86_64 builds arch/x86."""
-    for d in include_dirs(tree):
-        parts = d.split("/")
-        if len(parts) == 3 and parts[0] == "arch" and parts[2] == "include":
-            return parts[1]
+    for u in build_units(tree):
+        for a in entry_args(u):
+            parts = os.path.normpath(a[2:]).split("/") if a.startswith("-I") else ()
+            if len(parts) == 3 and parts[0] == "arch" and parts[2] == "include":
+                return parts[1]
     raise SystemExit(f"{tree}: no unit searches an arch/*/include directory")
 
 
@@ -1722,6 +1731,7 @@ def available_mb() -> int | None:
 
 PREPROCESS_MB = 160        # measured: clang -E on kernel/sched/core.c plus its reader
 WARM_MB = 2900
+WARM_ROOM_MB = 1024
 
 
 def auto_jobs(cap: int | None = None, reserve_mb: int = RESERVE_MB,
@@ -2217,11 +2227,11 @@ def cmd_gen(args) -> int:
         flag_sets = sorted(tally)
         drivers = sorted({f[0] for f in flag_sets})
         read = build_read(tree, units)
-        closure, ops = inactive_regions.questions(read)
+        closure, ops = inactive_regions.questions(read, jobs)
         resource = os.path.join(subprocess.run(["clang", "-print-resource-dir"], capture_output=True,
                                                text=True, check=True).stdout.strip(), "include")
         _, theirs = inactive_regions.questions(
-            sorted(os.path.join(resource, n) for n in os.listdir(resource) if n.endswith(".h")))
+            sorted(os.path.join(resource, n) for n in os.listdir(resource) if n.endswith(".h")), jobs)
         own = {(op, a) for op, found in theirs.items() for a in found - ops.get(op, set())}
         for op, a in own:
             ops.setdefault(op, set()).add(a)
@@ -2782,18 +2792,31 @@ def cmd_warm(args) -> int:
         ready.append(tree)
     if not ready:
         return rc
-    width = auto_jobs(cap=min(len(ready), cpus), job_mb=WARM_MB)
-    total = args.jobs or max(1, min(auto_jobs(cap=cpus) * 2, cpus))
+    width = max(1, min(len(ready), cpus // 2))
+    total = args.jobs or cpus
     jobs = max(1, total // width)
     if len(ready) > 1:
-        _line(f"warming {len(ready)} clangd indexes, {width} at a time, "
+        _line(f"warming {len(ready)} clangd indexes, up to {width} at a time, "
               f"{jobs} thread(s) each")
+    room = threading.Condition()
+    running = [0]
 
     def one(tree: str) -> bool:
+        # Reading a warm index back takes one or two cores and most of its memory
+        # late, so another starts for as long as there is memory to end on.
+        with room:
+            while running[0] and (available_mb() or 0) < WARM_MB + WARM_ROOM_MB:
+                room.wait(timeout=5)
+            running[0] += 1
         _line(f"[{tree}] warming clangd's index ({jobs} threads), "
               f"currently {index_size(tree)}")
         started = time.time()
-        ok = warm_index(tree, jobs, args.timeout)
+        try:
+            ok = warm_index(tree, jobs, args.timeout)
+        finally:
+            with room:
+                running[0] -= 1
+                room.notify_all()
         took = time.time() - started
         lead = "    " if len(ready) == 1 else f"[{tree}] "
         _line(f"{lead}{'done' if ok else 'not finished'} in {took:.0f}s -- "

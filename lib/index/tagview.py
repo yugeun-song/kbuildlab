@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import concurrent.futures as cf
 import json
 import os
 import re
@@ -87,13 +88,14 @@ def recorded_units(ksrc: str) -> list[dict]:
             if not src.startswith(ksrc + os.sep) or not os.path.isfile(src):
                 continue
             command = m["prefix"].replace("\\#", "#").replace("$(pound)", "#") + m["file"]
-            if "-P" in shlex.split(command):
-                command = shlex.join(a for a in shlex.split(command) if a != "-P")
+            words = clangd.entry_args({"command": command})
+            if "-P" in words:
+                command = shlex.join(a for a in words if a != "-P")
             units.append({"directory": ksrc, "file": src, "command": command, "cmd": path,
                           "target": m["target"]})
-    compilers = {shlex.split(u["command"])[0] for u in units
+    compilers = {clangd.entry_args(u)[0] for u in units
                  if u["target"].endswith(".o") and u["file"].endswith(".c")}
-    return [u for u in units if shlex.split(u["command"])[0] in compilers]
+    return [u for u in units if clangd.entry_args(u)[0] in compilers]
 
 
 def unit_files(ksrc: str, unit: dict) -> set[str] | None:
@@ -229,16 +231,21 @@ def listed(lists: str, compiled: set[str]) -> set[str]:
     return out
 
 
-def masked(path: str, live: set[int]) -> tuple[bytes, bytes]:
+def masked(job: tuple[str, set[int]]) -> tuple[bytes | None, int]:
+    """A file with what the build did not compile blanked, and how many lines
+    that took; None when nothing was."""
+    path, live = job
     with open(path, "rb") as f:
         data = f.read()
     lay = ir.Layout(data.decode("utf-8", "replace"))
     lines = data.split(b"\n")
+    blanked = 0
     for no in range(1, len(lines) + 1):
         g = lay.owner[no]
-        if g >= 0 and g not in live:
+        if g >= 0 and g not in live and lines[no - 1]:
             lines[no - 1] = b""
-    return b"\n".join(lines), data
+            blanked += 1
+    return b"\n".join(lines) if blanked else None, blanked
 
 
 def save_json(path: str, value) -> None:
@@ -326,6 +333,7 @@ def cmd_build(args) -> int:
     up = os.path.join(args.view, "upper")
     before = set(load(os.path.join(args.view, STATE), []))
     want: dict[str, bytes | None] = {}
+    to_mask: list[str] = []
     n_mask = n_blank = n_lines = 0
     for rel in names:
         path = os.path.join(ksrc, rel)
@@ -337,16 +345,18 @@ def cmd_build(args) -> int:
             want[rel] = b""
             n_blank += 1
         elif rel in got.index:
-            live = set().union(*(set(k) for k, _, _ in got.of(rel)))
-            view, real = masked(path, live)
-            if view != real:
-                want[rel] = view
-                n_mask += 1
-                n_lines += sum(1 for a, b in zip(view.split(b"\n"), real.split(b"\n")) if a != b)
-            else:
-                want[rel] = None
+            to_mask.append(rel)
+            want[rel] = None
         else:
             want[rel] = None
+    masks = ((os.path.join(ksrc, rel), set().union(*(set(k) for k, _, _ in got.of(rel))))
+             for rel in to_mask)
+    with cf.ProcessPoolExecutor(jobs) as ex:
+        for rel, (view, blanked) in zip(to_mask, ex.map(masked, masks, chunksize=16)):
+            if view is not None:
+                want[rel] = view
+                n_mask += 1
+                n_lines += blanked
 
     written = removed = 0
     keep: set[str] = set()
