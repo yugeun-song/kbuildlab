@@ -61,8 +61,12 @@ with tempfile.TemporaryDirectory() as k:
     put(k, "tools/x/.other.o.cmd", f"cmd_{k}/tools/x/other.o := gcc\n")
     put(k, "tools/x/other.o", "output\n")
     thin(k, "vmlinux.a", ["a/live.o", "b/whole.o"])
-    want = ["a/off.o", "m/gone.ko", "m/gone.mod.o", "m/gone.o"]
-    check("stale outputs", bo.stale_outputs(k), want)
+    record(k, "old/sub.o", "gcc -c -o old/sub.o old/sub.c")
+    record(k, "old/sub.so", "ld -o old/sub.so old/sub.o")
+    record(k, "old/image.c", "gen old/sub.so > old/image.c")
+    record(k, "old/image.o", "gcc -c -o old/image.o old/image.c")
+    want = ["a/off.o", "m/gone.ko", "m/gone.mod.o", "m/gone.o", "old/image.o", "old/sub.o"]
+    check("stale outputs, also under a stale product", bo.stale_outputs(k), want)
 
     for t in want:
         bo.forget(k, t)
@@ -103,6 +107,12 @@ make[1]: *** No rule to make target 'a/old.h', needed by 'a/forced.o'.  Stop.
 """
     check("what a failure names, generated only", bo.failed_outputs(k, log), ["a/bad.o", "b/linked.o", "include/generated/foo.h"])
     check("what lies beside it, recorded only", bo.failed_directories(k, log), ["a/bad.o", "a/beside.o"])
+    record(k, "top.o", "gcc -c -o top.o top.c")
+    os.makedirs(os.path.join(k, "a/sub"), exist_ok=True)
+    only_above = "make[2]: *** [scripts/Makefile.build:544: a/sub] Error 2\n"
+    check("a failed directory says nothing of its parent", bo.failed_directories(k, only_above), [])
+    warned = "b/linked.o: warning: objtool: something\nld: warning: a/bad.o: missing .note.GNU-stack section\n"
+    check("a warning names no failure", bo.failed_outputs(k, warned), [])
 
 with tempfile.TemporaryDirectory() as k:
     put(k, "a/bad.o", "x\n")

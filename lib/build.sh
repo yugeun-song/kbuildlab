@@ -523,7 +523,9 @@ cmd_build() {
             wiped=1
         fi
         say "building     $name ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
-        if ! _kmake_logged "$tree" "$log" -k -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}"; then
+        local -a keep_going=()
+        [[ $moved -eq 1 && $wiped -eq 0 && ${#mkargs[@]} -eq 0 ]] && keep_going=(-k)
+        if ! _kmake_logged "$tree" "$log" "${keep_going[@]+"${keep_going[@]}"}" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}"; then
             [[ ${#mkargs[@]} -eq 0 ]] || die "build failed"
             [[ $wiped -eq 0 ]] || die "the build of $name from scratch failed (above)"
             [[ $moved -eq 1 ]] || die "build failed (above); $name is still at the commit of its last good build,

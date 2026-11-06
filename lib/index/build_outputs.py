@@ -74,12 +74,15 @@ def read_text(path: str) -> str:
 
 
 def reached(ksrc: str, recs: dict[str, str]) -> set[str] | None:
-    """What the products of the build reach: the thin vmlinux.a, modules.order
-    and the inputs every other record names.  None when the tree has no thin
-    vmlinux.a, which is what makes the answer complete."""
+    """What the products of the build reach: the thin vmlinux.a, modules.order and
+    the inputs of every record, from the outputs no other record names.  An output
+    only a stale record names is stale with it, so it is no starting point.  None
+    when the tree has no thin vmlinux.a, which is what makes the answer complete."""
     if thin_members(ksrc, "vmlinux.a") is None:
         return None
-    todo = ["vmlinux.a"] + [t for t in recs if not t.endswith(BUILT_PIECES)]
+    named = {t: set(words(c)) - {t} for t, c in recs.items()}
+    mentioned = set().union(*named.values()) if named else set()
+    todo = ["vmlinux.a"] + [t for t in recs if not t.endswith(BUILT_PIECES) and t not in mentioned]
     for line in read_text(os.path.join(ksrc, "modules.order")).split("\n"):
         if line:
             todo.append(os.path.normpath(line[:-2] + ".ko" if line.endswith(".o") else line))
@@ -90,18 +93,16 @@ def reached(ksrc: str, recs: dict[str, str]) -> set[str] | None:
         if t in seen:
             continue
         seen.add(t)
-        path = os.path.join(ksrc, t)
-        names = words(recs.get(t, ""))
+        names = list(named.get(t, ()))
         if t.endswith(".a"):
             names += thin_members(ksrc, t) or []
         elif t.endswith(".mod"):
-            names += words(read_text(path))
+            names += words(read_text(os.path.join(ksrc, t)))
         elif t.endswith(".o"):
             names.append(t[:-2] + ".mod")
-        for w in names:
-            if w.endswith(".sh") and w not in scripts:
-                scripts.add(w)
-                names = names + words(read_text(os.path.join(ksrc, w)))
+        for w in [w for w in names if w.endswith(".sh") and w not in scripts]:
+            scripts.add(w)
+            names += words(read_text(os.path.join(ksrc, w)))
         todo += [w for w in names if w not in seen]
     return seen
 
@@ -122,7 +123,11 @@ def stale_outputs(ksrc: str) -> list[str]:
     if live is None:
         return []
     gone = sorted(t for t in recs if t.endswith(REMOVABLE) and t not in live)
-    return [] if len(gone) * 2 > sum(t.endswith(REMOVABLE) for t in recs) else gone
+    total = sum(t.endswith(REMOVABLE) for t in recs)
+    if len(gone) * 2 > total:
+        print(f"build_outputs: {len(gone)} of {total} outputs read as stale; removing none", file=sys.stderr)
+        return []
+    return gone
 
 
 def generated(ksrc: str, paths: set[str]) -> set[str]:
@@ -142,7 +147,7 @@ def failed_outputs(ksrc: str, log: str) -> list[str]:
         m = COMPILER_ERROR.match(line)
         hits = [m[1]] if m else []
         hits += FAILED_TARGET.findall(line) + NEEDED_BY.findall(line)
-        if not PROGRESS.match(line):
+        if not PROGRESS.match(line) and "warning:" not in line:
             hits += OBJECT.findall(line)
         named |= {os.path.normpath(h) for h in hits}
     files = {n for n in named if not os.path.isabs(n) and not n.startswith("..")
@@ -152,7 +157,8 @@ def failed_outputs(ksrc: str, log: str) -> list[str]:
 
 def failed_directories(ksrc: str, log: str) -> list[str]:
     """Every output kbuild recorded beside what a failed build could not make."""
-    dirs = {os.path.dirname(os.path.normpath(t)) for t in FAILED_TARGET.findall(log)}
+    dirs = {os.path.dirname(os.path.normpath(t)) for t in FAILED_TARGET.findall(log)
+            if not os.path.isdir(os.path.join(ksrc, t))}
     dirs.discard("")
     if not dirs:
         return []
