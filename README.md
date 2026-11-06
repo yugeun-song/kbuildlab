@@ -47,12 +47,14 @@ kbuildlab attach 2349                              # gdb, in another terminal
 kbuildlab drgn   2349                              # drgn, once the guest has booted
 ```
 
-`kbuildlab update [TREE...|--all]` is the one pass over trees you already have:
+`kbuildlab update [TREE...|--all]` is the one pass over trees you already have,
+and with no option it does all of it:
 it checks what the tree needs, syncs (fast-forwarding a tracked branch, never a
 pinned tag), keeps **the .config you already had** (`olddefconfig`, then a report
 of what changed and of any preset line the newer source dropped, repairing
 neither), rebuilds incrementally with the modules, and refreshes ctags, cscope,
-gtags and clangd (`--no-tags`, `--no-clangd`, `--no-warm`, `--fresh`). Each tree runs on its
+gtags, clangd's database and index, and kmx. `--no-tags`, `--no-clangd` and
+`--no-warm` leave parts out; `--fresh` rebuilds the indexes from nothing. Each tree runs on its
 own, and a table at the end says which stages passed.
 
 Every tree is fetched in the background as the update starts; a pinned tag the
@@ -64,8 +66,11 @@ as `=`; the data directory keeps one fingerprint for the build and one for each
 index (tags, clangd, kmx), so a new clangd or kmx redoes only its own index.
 clangd indexes are warmed last, as many trees at once as free memory allows.
 
-`make` uses `KBL_JOBS` jobs, all cores when unset; the indexers size themselves
-to cores and memory. A failed incremental build is wiped (`make mrproper`,
+Every step takes all the cores it can use. `make` and ctags run `KBL_JOBS` jobs,
+all cores when unset. The build readings, clangd and kmx take all cores as well,
+but clangd's steps run fewer jobs when free memory would otherwise run short
+(`KBL_CLANGD_JOBS` and `KBL_KMX_JOBS` cap them). cscope and gtags have no parallel
+mode, so each is one process beside ctags. A failed incremental build is wiped (`make mrproper`,
 `.config` and indexes kept) and rebuilt once if the source moved since the last
 good build; otherwise it just fails. `build --fresh` wipes on request. A failed
 build from scratch leaves no kernel binary. Commands that write (`sync`,

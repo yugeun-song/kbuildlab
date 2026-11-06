@@ -119,6 +119,8 @@ COMMANDS = [
                   "then a summary", "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm] [--fresh]",
         args=["tree*"], notes=[
             TREE_NOTE,
+            "With no option it does all of it: the kernel and its modules, ctags, cscope, gtags, "
+            "clangd's database and index, and kmx, each on all cores while memory lasts.",
             "Trees are fetched in the background at the start; a failed fetch is retried after "
             "the others, then the tree is built as checked out. A tree built and indexed at its "
             "newest commit, with nothing changed since, is skipped (= in the table); a new "
