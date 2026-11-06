@@ -2198,6 +2198,12 @@ def cmd_gen(args) -> int:
         if args.fresh and os.path.isdir(cache_dir(tree)):
             shutil.rmtree(cache_dir(tree))
             print(f"    discarded {cache_dir(tree)}")
+        elif args.rebuild and os.path.isdir(cache_dir(tree)):
+            for name in os.listdir(cache_dir(tree)):
+                path = os.path.join(cache_dir(tree), name)
+                if name != ".cache":
+                    shutil.rmtree(path) if os.path.isdir(path) else os.unlink(path)
+            print(f"    discarded {cache_dir(tree)} but for clangd's shards, which are keyed on content")
         kept, dropped = gen_cdb(tree, args.force)
         print(f"    compile_commands.json: {kept} entries"
               + (f" ({dropped} assembly or repeated entries left out)" if dropped else "")
@@ -2838,6 +2844,8 @@ def main() -> int:
     g = sub.add_parser("gen", help="build the database and write the clangd config")
     g.add_argument("-f", "--force", action="store_true",
                    help="rebuild compile_commands.json even if one is cached")
+    g.add_argument("--rebuild", action="store_true",
+                   help="discard the tree's clangd cache but for clangd's own shards first")
     g.add_argument("--fresh", action="store_true",
                    help="discard everything cached for the tree first: the database, the "
                         "readings and memos, and clangd's own index")

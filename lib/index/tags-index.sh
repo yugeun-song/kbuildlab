@@ -40,9 +40,14 @@ else echo "tags-index: no 'global' in the build image; gtags skipped" >&2; fi
 rc=0
 for n in "${!pid[@]}"; do
     wait "${pid[$n]}" && continue
-    echo "tags-index: $n failed; the tree keeps its previous $n index" >&2
     mapfile -t out < <(python3 "$here/tagview.py" outputs "$n")
     rm -f -- "${out[@]}"
+    if [[ $n != ctags ]]; then
+        echo "tags-index: $n failed; indexing it again from nothing" >&2
+        make ARCH="$arch" "$n" && continue
+        rm -f -- "${out[@]}"
+    fi
+    echo "tags-index: $n failed; the tree keeps its previous $n index" >&2
     rc=1
 done
 exit $rc

@@ -145,6 +145,25 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(os.path.join(tmp, "published")) as f:
         check("a failed full run keeps the published tags", (r.returncode, f.read()), (1, "published\n"))
 
+with tempfile.TemporaryDirectory() as tmp:
+    state = os.path.join(tmp, "state")
+    tree, tools = os.path.join(tmp, "tree"), os.path.join(tmp, "tools")
+    put(tree, "a.c", "int one;\n")
+    os.mkdir(state)
+    put(state, "keys", "k\n")
+    put(state, "tags.keys", "k\n")
+    put(state, "opts.k", "-a\0")
+    put(state, "files.k", "a.c\n")
+    put(state, "cscope.ran")
+    put(tools, "make", '#!/bin/sh\ncase "$*" in\n*cscope*) [ -e "$KBL_TAGS_STATE/cscope.again" ] && exit 0\n'
+                       ': > "$KBL_TAGS_STATE/cscope.again"; exit 1 ;;\n*gtags*) exit 0 ;;\nesac\n: > tags\n')
+    os.chmod(os.path.join(tools, "make"), 0o755)
+    r = subprocess.run(["bash", os.path.join(os.path.dirname(tagview), "tags-index.sh"), "x86", "full"], cwd=tree,
+                       env=dict(os.environ, KBL_TAGS_STATE=state, KBL_JOBS="2",
+                                PATH=tools + os.pathsep + os.environ["PATH"]), capture_output=True, text=True)
+    check("one failed index is built again on its own",
+          (r.returncode, "cscope failed; indexing it again" in r.stderr, "gtags failed" in r.stderr), (0, True, False))
+
 print("tagview: the view kept only copies of files the tree has; assembler-only #define lines reach the indexes"
       if not failed else f"tagview: {failed} failed")
 sys.exit(1 if failed else 0)

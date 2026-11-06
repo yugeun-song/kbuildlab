@@ -53,8 +53,8 @@ _clangd_index() {   # _clangd_index TREE [gen|warm]
         if [[ "${KBL_TAGS_FRESH:-0}" == 1 ]]; then
             "${gencmd[@]}" --fresh || { warn "clangd index failed"; return 1; }
         elif ! "${gencmd[@]}"; then
-            warn "clangd index failed (above); generating it again from scratch"
-            "${gencmd[@]}" --fresh || { warn "clangd index failed from scratch too"; return 1; }
+            warn "clangd index failed (above); generating it again from scratch, keeping only clangd's own shards"
+            "${gencmd[@]}" --rebuild || { warn "clangd index failed from scratch too"; return 1; }
         fi
     fi
     [[ "$phase" == gen ]] && return 0
@@ -119,12 +119,23 @@ _kmx_index() {   # _kmx_index TREE
     local -a threads=()
     [[ -n "${KBL_KMX_JOBS:-}" ]] && threads=(--threads "$KBL_KMX_JOBS")
     say "indexing     kmx (macros, and the C types in the build's DWARF)"
-    if ! line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" index | sed -n 's/^  types *//p')"; then
-        warn "kmx index failed (above)"
-        return 1
+    if [[ "$(kmx --help 2>/dev/null)" != *$'\n  refresh '* ]] \
+       || ! line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" refresh | sed -n 's/^  types *//p')"; then
+        line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" index | sed -n 's/^  types *//p')" \
+            || { warn "kmx index failed (above)"; return 1; }
     fi
     [[ -n "$line" ]] && say "kmx          $line"
     return 0
+}
+
+# Every index holds what the image's compiler and tools answered, under keys that
+# do not name them.
+_index_unusable() {   # _index_unusable TREE
+    local rec old now
+    rec="$(_stamp "$1" tags)"; [[ -s "$rec" ]] || return 0
+    old="$(sed -n 's/^image //p' "$rec")"
+    now="$("$(kbl_container)" image inspect --format '{{.Id}}' "$(_tree_image "$1")" 2>/dev/null)"
+    [[ -z "$old" || -z "$now" || "$old" == "$now" ]] || printf 'its build image changed\n'
 }
 
 cmd_tags() {
@@ -147,7 +158,12 @@ cmd_tags() {
     local tree; tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local src; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source in $tree"
-    local gen=0 tin="" cin="" kin="" cs
+    local gen=0 tin="" cin="" kin="" cs why
+    why="$(_index_unusable "$tree")"
+    if [[ -n "$why" ]]; then
+        say "discarding   the indexes of $(kbl_tree_label "$tree"): $why"
+        export KBL_TAGS_FRESH=1
+    fi
     cs="$(_stamp "$tree" clangd)"
     if [[ $tags -eq 1 ]]; then rm -f "$(_stamp "$tree" tags)"; tin="$(_part_inputs "$tree" tags)"; fi
     if [[ $clangd -eq 1 ]]; then rm -f "$cs" "$cs.pending"; cin="$(_part_inputs "$tree" clangd)"; fi
