@@ -123,6 +123,28 @@ with tempfile.TemporaryDirectory() as tmp:
     os.utime(os.path.join(tmp, names[4]), (newer, newer))
     check("ctags workers, one file changed", workers(), (0, single(), []))
 
+with tempfile.TemporaryDirectory() as tmp:
+    state = os.path.join(tmp, "state")
+    tree, tools = os.path.join(tmp, "tree"), os.path.join(tmp, "tools")
+    put(tree, "a.c", "int one;\n")
+    put(tree, "tags", "published\n")
+    put(tmp, "published", "")
+    os.unlink(os.path.join(tmp, "published"))
+    os.link(os.path.join(tree, "tags"), os.path.join(tmp, "published"))
+    os.mkdir(state)
+    os.link(os.path.join(tree, "tags"), os.path.join(state, "tags.prev"))
+    put(state, "keys", "k\n")
+    put(state, "tags.keys", "k\n")
+    put(state, "opts.k", "-a\0")
+    put(state, "files.k", "a.c\n")
+    put(tools, "make", "#!/bin/sh\nexit 1\n")
+    os.chmod(os.path.join(tools, "make"), 0o755)
+    r = subprocess.run(["bash", os.path.join(os.path.dirname(tagview), "tags-index.sh"), "x86", "full"], cwd=tree,
+                       env=dict(os.environ, KBL_TAGS_STATE=state, KBL_JOBS="2",
+                                PATH=tools + os.pathsep + os.environ["PATH"]), capture_output=True, text=True)
+    with open(os.path.join(tmp, "published")) as f:
+        check("a failed full run keeps the published tags", (r.returncode, f.read()), (1, "published\n"))
+
 print("tagview: the view kept only copies of files the tree has; assembler-only #define lines reach the indexes"
       if not failed else f"tagview: {failed} failed")
 sys.exit(1 if failed else 0)

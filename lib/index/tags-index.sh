@@ -26,7 +26,12 @@ ctags_merge() {
         && ctags_done
 }
 declare -A pid
-[[ $mode == merge ]] || : > "$st/tags.prev"
+# tags.prev can be a hard link to the tree's tags, which keeps its content until
+# new indexes are published.
+if [[ $mode != merge ]]; then
+    rm -f "$st/tags.prev"
+    : > "$st/tags.prev"
+fi
 { ctags_merge || { echo "tags-index: the ctags workers failed; indexing with one" >&2; ctags_serial; }; } &
 pid[ctags]=$!
 make ARCH="$arch" cscope & pid[cscope]=$!
