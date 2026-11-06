@@ -30,6 +30,7 @@ import array
 import concurrent.futures as cf
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import shlex
@@ -457,14 +458,20 @@ class Memo:
         self.hits = 0
 
     @staticmethod
-    def stamp(paths) -> list:
+    def stamp(paths, known: dict | None = None) -> list:
+        """known keeps each file's answer over a stretch in which no file changes."""
+        known = {} if known is None else known
         out = []
         for p in sorted(paths):
-            try:
-                st = os.stat(p)
-                out.append([p, st.st_size, st.st_mtime_ns])
-            except OSError:
-                out.append([p, None, None])
+            entry = known.get(p)
+            if entry is None:
+                try:
+                    st = os.stat(p)
+                    entry = [p, st.st_size, st.st_mtime_ns]
+                except OSError:
+                    entry = [p, None, None]
+                known[p] = entry
+            out.append(entry)
         return out
 
     def key(self, *parts) -> str:
@@ -567,6 +574,7 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
         texts_of[fid] = list(zip(paths, texts))
 
     stamps: dict[str, list | None] = {}
+    known: dict[str, list] = {}
     target: dict[str, dict] = {}
     jobs_a, keys_a = [], []
     for src, wanted in per_source.items():
@@ -574,7 +582,7 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
         argv = view.flags(entry_args(s), s["file"])
         read = reads(src)
         stamps[src] = None if read is None else Memo.stamp(
-            set(read) | {s["file"]} | {p for fid in wanted for p, _ in texts_of[fid]})
+            set(read) | {s["file"]} | {p for fid in wanted for p, _ in texts_of[fid]}, known)
         key = memo.key("trace", argv, sorted(w[0] for w in wanted.values()), stamps[src])
         found = memo.get(key) if stamps[src] is not None else None
         if found is not None:
@@ -778,6 +786,30 @@ def collect() -> None:
             sys.stdout.flush()
 
 
+_UNIT_KEYS: tuple = ()
+
+
+def _unit_key(n: int) -> tuple[list[str], str | None]:
+    units, memo, reads, known = _UNIT_KEYS
+    u = units[n]
+    argv = unit_argv(u["command"])
+    read = reads(u)
+    return argv, None if read is None else memo.key(
+        "reading", argv, Memo.stamp(set(read) | {u["file"]}, known))
+
+
+def unit_keys(units: list[dict], memo: Memo, jobs: int, reads) -> list[tuple[list[str], str | None]]:
+    """Each unit's command and memo key.  Units share most of what they read, and
+    a kernel's units name millions of paths, so this is the slow part of a run
+    that has little to preprocess.  reads may be a closure, so the workers fork."""
+    global _UNIT_KEYS
+    _UNIT_KEYS = (units, memo, reads, {})
+    if jobs < 2:
+        return [_unit_key(n) for n in range(len(units))]
+    with multiprocessing.get_context("fork").Pool(jobs) as pool:
+        return pool.map(_unit_key, range(len(units)), chunksize=16)
+
+
 def readings(shell: list[str], ksrc: str, units: list[dict], memo: Memo, jobs: int,
              reads, take, progress=None) -> list:
     """Hand take(n, record) each unit's per-file readings and the files it read
@@ -787,11 +819,7 @@ def readings(shell: list[str], ksrc: str, units: list[dict], memo: Memo, jobs: i
     whose inputs changed is not preprocessed again.
     """
     todo, keys = [], {}
-    for n, u in enumerate(units):
-        argv = unit_argv(u["command"])
-        read = reads(u)
-        key = None if read is None else memo.key(
-            "reading", argv, Memo.stamp(set(read) | {u["file"]}))
+    for n, (argv, key) in enumerate(unit_keys(units, memo, jobs, reads)):
         found = memo.get_packed(key) if key else None
         if found is not None:
             take(n, found)
