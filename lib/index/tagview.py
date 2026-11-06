@@ -293,7 +293,7 @@ def cmd_build(args) -> int:
     if not units:
         print(f"    no compile recorded in {ksrc}: nothing to read the view from")
         return 2
-    jobs = args.jobs or clangd.auto_jobs(job_mb=clangd.PREPROCESS_MB)
+    jobs = clangd.auto_jobs(cap=args.jobs or None, job_mb=clangd.PREPROCESS_MB)
     memo = Memo(os.path.join(args.view, "readings"),
                 None if args.fresh else os.path.join(clangd.cache_dir(tree), "readings"),
                 ir.collector_code())

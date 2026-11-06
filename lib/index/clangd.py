@@ -301,7 +301,7 @@ def build_units(tree: str) -> list[dict]:
         return json.load(f)
 
 
-def unit_deps(unit: dict, symbols: bool = False) -> frozenset[str] | None:
+def unit_deps(unit: dict, symbols: bool = False) -> tuple[str, ...] | None:
     """What kbuild recorded one unit as reading, tree-relative; None without a record."""
     args = entry_args(unit)
     if "-o" not in args[:-1]:
@@ -597,21 +597,14 @@ CONTEXT_FILE = "header_context.json"
 
 
 @functools.lru_cache(maxsize=None)
-def kbuild_deps(cmd_file: str, symbols: bool = False) -> frozenset[str] | None:
-    """The headers fixdep recorded for one object, tree-relative; None when the
-    object has no dependency list to consult.
-
-    With symbols, also the file Kconfig touches whenever a symbol the object
-    tests changes.  fixdep takes autoconf.h out of every list and names those
-    files instead, so they are how kbuild knows to rebuild after a config
-    change that edits no header, and how a result kept for the object knows
-    it is stale."""
+def _cmd_deps(cmd_file: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     try:
         with open(cmd_file, encoding="utf-8", errors="replace") as f:
             lines = f.read().split("\n")
     except OSError:
         return None
-    deps: set[str] = set()
+    deps: dict[str, None] = {}
+    wild: dict[str, None] = {}
     listing = False
     for line in lines:
         if line.startswith("deps_"):
@@ -623,10 +616,25 @@ def kbuild_deps(cmd_file: str, symbols: bool = False) -> frozenset[str] | None:
         if not word:
             break
         if not word.startswith("$("):
-            deps.add(os.path.normpath(word))
-        elif symbols and word.startswith("$(wildcard ") and word.endswith(")"):
-            deps.add(os.path.normpath(word[len("$(wildcard "):-1].strip()))
-    return frozenset(deps) or None
+            deps[sys.intern(os.path.normpath(word))] = None
+        elif word.startswith("$(wildcard ") and word.endswith(")"):
+            wild[sys.intern(os.path.normpath(word[len("$(wildcard "):-1].strip()))] = None
+    return tuple(deps), tuple(wild)
+
+
+def kbuild_deps(cmd_file: str, symbols: bool = False) -> tuple[str, ...] | None:
+    """The headers fixdep recorded for one object, tree-relative; None when the
+    object has no dependency list to consult.
+
+    With symbols, also the file Kconfig touches whenever a symbol the object
+    tests changes.  fixdep takes autoconf.h out of every list and names those
+    files instead, so they are how kbuild knows to rebuild after a config
+    change that edits no header, and how a result kept for the object knows
+    it is stale."""
+    parsed = _cmd_deps(cmd_file)
+    if parsed is None:
+        return None
+    return (parsed[0] + parsed[1] if symbols else parsed[0]) or None
 
 
 def header_entries(tree: str, entries: list[dict], verbose: bool, floor: str,
@@ -719,12 +727,13 @@ def header_entries(tree: str, entries: list[dict], verbose: bool, floor: str,
     # each object, so a source that read the header outranks one that only
     # names it; the latter is still better than nothing for a header no object
     # in this configuration reads.
-    read_by: dict[str, set[str] | None] = {}
+    read_by: dict[str, frozenset[str] | None] = {}
     proven: set[str] = set()
 
     def really_reads(source: str, target: str) -> bool:
         if source not in read_by:
-            read_by[source] = unit_deps(by_source[source])
+            deps = unit_deps(by_source[source])
+            read_by[source] = None if deps is None else frozenset(deps)
         deps = read_by[source]
         return deps is not None and target in deps
 
@@ -1732,6 +1741,7 @@ def available_mb() -> int | None:
 PREPROCESS_MB = 160        # measured: clang -E on kernel/sched/core.c plus its reader
 WARM_MB = 2900
 WARM_ROOM_MB = 1024
+WARM_MB_PER_INDEX_MB = 12  # measured: 9.7 to 11.3 times the shards, from 63 to 292 MiB of them
 
 
 def auto_jobs(cap: int | None = None, reserve_mb: int = RESERVE_MB,
@@ -2202,7 +2212,7 @@ def index_size(tree: str) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_gen(args) -> int:
-    jobs = args.jobs or auto_jobs(job_mb=PREPROCESS_MB)
+    jobs = auto_jobs(cap=args.jobs or None, job_mb=PREPROCESS_MB)
     for tree in args.trees:
         print(f"[{tree}]")
         if args.fresh and os.path.isdir(cache_dir(tree)):
@@ -2777,6 +2787,16 @@ def _line(text: str) -> None:
         sys.stdout.flush()
 
 
+def warm_need_mb(tree: str) -> int:
+    d = os.path.join(cache_dir(tree), ".cache", "clangd", "index")
+    try:
+        with os.scandir(d) as entries:
+            shards = sum(e.stat().st_size for e in entries) // (1 << 20)
+    except OSError:
+        shards = 0
+    return shards * WARM_MB_PER_INDEX_MB if shards else WARM_MB
+
+
 def cmd_warm(args) -> int:
     # One indexing thread is far cheaper than a whole session, but they still
     # add up on a tree this size; scale them the same way and leave the same
@@ -2799,15 +2819,17 @@ def cmd_warm(args) -> int:
         _line(f"warming {len(ready)} clangd indexes, up to {width} at a time, "
               f"{jobs} thread(s) each")
     room = threading.Condition()
-    running = [0]
+    running: dict[str, int] = {}
 
     def one(tree: str) -> bool:
         # Reading a warm index back takes one or two cores and most of its memory
-        # late, so another starts for as long as there is memory to end on.
+        # late, so a session starts while memory is free for it and for what those
+        # already running have yet to take.
+        need = warm_need_mb(tree)
         with room:
-            while running[0] and (available_mb() or 0) < WARM_MB + WARM_ROOM_MB:
+            while running and (available_mb() or 0) < sum(running.values()) + need + WARM_ROOM_MB:
                 room.wait(timeout=5)
-            running[0] += 1
+            running[tree] = need
         _line(f"[{tree}] warming clangd's index ({jobs} threads), "
               f"currently {index_size(tree)}")
         started = time.time()
@@ -2815,7 +2837,7 @@ def cmd_warm(args) -> int:
             ok = warm_index(tree, jobs, args.timeout)
         finally:
             with room:
-                running[0] -= 1
+                del running[tree]
                 room.notify_all()
         took = time.time() - started
         lead = "    " if len(ready) == 1 else f"[{tree}] "
