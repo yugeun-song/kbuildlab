@@ -287,12 +287,6 @@ _update_summary() {   # _update_summary RECORD
     return 0
 }
 
-_update_cleanup() {
-    local p
-    for p in $(jobs -p); do _kbl_kill_tree "$p"; done
-    rm -rf -- "$_KBL_UPDATE_TMP"
-}
-
 _kbl_kill_tree() {   # _kbl_kill_tree PID
     local c
     for c in $(pgrep -P "$1" 2>/dev/null); do _kbl_kill_tree "$c"; done
@@ -325,9 +319,7 @@ cmd_update() {
             [[ -n "${seen[$t]+x}" ]] || { seen[$t]=1; trees+=("$t"); }
         done
     fi
-    local tmp rec; tmp="$(mktemp -d)" || die "cannot create a temporary directory"
-    _KBL_UPDATE_TMP="$tmp"; rec="$tmp/record"; : > "$rec"
-    trap _update_cleanup EXIT
+    local tmp="$KBL_RUN_TMP" rec="$KBL_RUN_TMP/record"; : > "$rec"
     _KBL_WARM_QUEUE="$tmp/warm.queue"; : > "$_KBL_WARM_QUEUE"
     _KBL_INDEX_QUEUE=()
     for t in "${trees[@]}"; do

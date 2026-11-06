@@ -74,7 +74,8 @@ _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     }
     for p in "${rw[@]}"; do _kbl_mount "$p" rw; done
     for p in "${ro[@]}"; do _kbl_mount "$p" ro; done
-    _KBL_RUN=("$c" run --rm "${_logopt[@]+"${_logopt[@]}"}" -e KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-kbuildlab}"
+    _KBL_RUN=("$c" run --rm --label "kbuildlab.run=${KBL_RUN_ID:-$$}" "${_logopt[@]+"${_logopt[@]}"}"
+              -e KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-kbuildlab}"
               "$@" "${_idopt[@]+"${_idopt[@]}"}" "${mounts[@]}" -w "$wd" "$img")
 }
 
