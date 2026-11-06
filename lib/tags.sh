@@ -119,7 +119,7 @@ _kmx_index() {   # _kmx_index TREE
     local -a threads=()
     [[ -n "${KBL_KMX_JOBS:-}" ]] && threads=(--threads "$KBL_KMX_JOBS")
     say "indexing     kmx (macros, and the C types in the build's DWARF)"
-    if [[ "$(kmx --help 2>/dev/null)" != *$'\n  refresh '* ]] \
+    if [[ "${KBL_TAGS_FRESH:-0}" == 1 || "$(kmx --help 2>/dev/null)" != *$'\n  refresh '* ]] \
        || ! line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" refresh | sed -n 's/^  types *//p')"; then
         line="$(kmx "$src" --quiet "${threads[@]+"${threads[@]}"}" index | sed -n 's/^  types *//p')" \
             || { warn "kmx index failed (above)"; return 1; }
@@ -129,13 +129,27 @@ _kmx_index() {   # _kmx_index TREE
 }
 
 # Every index holds what the image's compiler and tools answered, under keys that
-# do not name them.
-_index_unusable() {   # _index_unusable TREE
+# do not name them.  The image a part was last finished with outlives its stamp,
+# which a run removes as it starts, so an interrupted run does not hide the change.
+_index_unusable() {   # _index_unusable TREE PART
     local rec old now
-    rec="$(_stamp "$1" tags)"; [[ -s "$rec" ]] || return 0
-    old="$(sed -n 's/^image //p' "$rec")"
+    rec="$(_stamp "$1" "$2")"
+    old="$(sed -n 's/^image //p' "$rec" 2>/dev/null)"
+    if [[ -n "$old" ]]; then printf '%s\n' "$old" > "$rec.image"
+    else old="$(cat "$rec.image" 2>/dev/null)"; fi
     now="$("$(kbl_container)" image inspect --format '{{.Id}}' "$(_tree_image "$1")" 2>/dev/null)"
     [[ -z "$old" || -z "$now" || "$old" == "$now" ]] || printf 'its build image changed\n'
+}
+
+# A part, from nothing when its reason says so.
+_index_part() {   # _index_part WHY PART-COMMAND...
+    local why="$1"; shift
+    if [[ -n "$why" ]]; then
+        say "discarding   what this index holds: $why"
+        KBL_TAGS_FRESH=1 "$@"
+    else
+        "$@"
+    fi
 }
 
 cmd_tags() {
@@ -158,22 +172,20 @@ cmd_tags() {
     local tree; tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local src; src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source in $tree"
-    local gen=0 tin="" cin="" kin="" cs why
-    why="$(_index_unusable "$tree")"
-    if [[ -n "$why" ]]; then
-        say "discarding   the indexes of $(kbl_tree_label "$tree"): $why"
-        export KBL_TAGS_FRESH=1
-    fi
+    local gen=0 tin="" cin="" kin="" cs twhy="" cwhy="" kwhy=""
+    [[ $tags -eq 0 ]] || twhy="$(_index_unusable "$tree" tags)"
+    [[ $clangd -eq 0 ]] || cwhy="$(_index_unusable "$tree" clangd)"
+    [[ $kmx -eq 0 ]] || kwhy="$(_index_unusable "$tree" kmx)"
     cs="$(_stamp "$tree" clangd)"
     if [[ $tags -eq 1 ]]; then rm -f "$(_stamp "$tree" tags)"; tin="$(_part_inputs "$tree" tags)"; fi
     if [[ $clangd -eq 1 ]]; then rm -f "$cs" "$cs.pending"; cin="$(_part_inputs "$tree" clangd)"; fi
     if [[ $kmx -eq 1 ]]; then rm -f "$(_stamp "$tree" kmx)"; kin="$(_part_inputs "$tree" kmx)"; fi
     # Asked for clangd alone, its failure is the command's.
     if [[ $clangd -eq 1 ]]; then
-        _clangd_index "$tree" gen || { gen=1; [[ $alone -eq 0 ]] || exit 1; }
+        _index_part "$cwhy" _clangd_index "$tree" gen || { gen=1; [[ $alone -eq 0 ]] || exit 1; }
     fi
-    if [[ $tags -eq 1 ]]; then _index_tree "$tree" && _stamp_part "$tree" tags "$tin"; fi
-    if [[ $kmx -eq 1 ]]; then _kmx_index "$tree" && _stamp_part "$tree" kmx "$kin"; fi
+    if [[ $tags -eq 1 ]]; then _index_part "$twhy" _index_tree "$tree" && _stamp_part "$tree" tags "$tin"; fi
+    if [[ $kmx -eq 1 ]]; then _index_part "$kwhy" _kmx_index "$tree" && _stamp_part "$tree" kmx "$kin"; fi
     if [[ $clangd -eq 1 && $gen -eq 0 ]] && _clangd_index "$tree" warm; then
         _stamp_part "$tree" clangd "$cin" "${_KBL_WARM_QUEUE:+pending}"
     fi
