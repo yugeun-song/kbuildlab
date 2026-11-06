@@ -399,6 +399,47 @@ _build_moved() {   # _build_moved TREE
     [[ -z "$head" || "$(cat "$(_built_rec "$1")" 2>/dev/null)" != "$head" ]]
 }
 
+_built_with() { printf '%s\n' "$(kbl_tree_data "$1")/built-with"; }
+
+# What every object depends on and kbuild does not track.
+_build_identity() {   # _build_identity TREE
+    local tree="$1" arch a cc="" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"
+    arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    _kmake_args "$tree"
+    for a in "${_KBL_MAKE[@]}"; do [[ "$a" == CC=* ]] && cc="${a#CC=}"; done
+    a="$(_in_container "$src" sh -c "${cc:-$(_cross "$arch")gcc} --version | head -1")" && [[ -n "$a" ]] || return 0
+    printf 'arch %s\n%s\n' "$arch" "$a"
+}
+
+_kmake_logged() {   # _kmake_logged TREE LOG MAKE-ARG...
+    local tree="$1" log="$2"; shift 2
+    _kmake "$tree" "$@" 2>&1 | tee "$log"
+    return "${PIPESTATUS[0]}"
+}
+
+# The middle of the ladder: what the failed build names for as long as that makes
+# progress, then what lies beside it.  A set discarded before did not help.
+_build_retry_failed() {   # _build_retry_failed TREE JOBS LOG
+    local tree="$1" jobs="$2" log="$3" src what=failed key
+    local -a gone=()
+    local -A tried=()
+    src="$(kbl_tree_src "$tree")" || exit 1
+    while :; do
+        mapfile -t gone < <(python3 "${KBL_REPO}/lib/index/build_outputs.py" "$what" "$src" "$log")
+        key="$what ${gone[*]}"
+        if [[ ${#gone[@]} -eq 0 || -n "${tried[$key]:-}" ]]; then
+            [[ "$what" == failed ]] || return 1
+            what=failed-directories
+            continue
+        fi
+        tried[$key]=1
+        say "discarding   ${#gone[@]} generated file(s) of what failed: ${gone[*]:0:5}${gone[5]:+ ...}"
+        _kmake_logged "$tree" "$log" -k -j"$jobs" && return 0
+        what=failed
+    done
+}
+
 _build_moved_why() {   # _build_moved_why TREE
     local was now
     now="$(_src_head "$(kbl_tree_src "$1")")"
@@ -466,25 +507,43 @@ cmd_build() {
     fi
     _kmake_args "$tree"
     if [[ $extonly -eq 0 ]]; then
+        local identity="" log="$(kbl_tree_data "$tree")/build.log"
+        mkdir -p "$(kbl_tree_data "$tree")" || die "cannot write $(kbl_tree_data "$tree")"
+        if [[ ${#mkargs[@]} -eq 0 ]]; then
+            identity="$(_build_identity "$tree")"
+            if [[ $fresh -eq 0 && -f "$src/vmlinux" && -n "$identity" && -s "$(_built_with "$tree")" \
+                  && "$identity" != "$(cat "$(_built_with "$tree")")" ]]; then
+                say "discarding   the build of $name: its compiler or architecture changed, which kbuild does not track"
+                fresh=1
+            fi
+        fi
         if [[ $fresh -eq 1 ]]; then
             _wipe_build "$tree" || die "the wipe of $name failed (above)"
             wiped=1
         fi
         say "building     $name ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
-        if ! _kmake "$tree" -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}"; then
+        if ! _kmake_logged "$tree" "$log" -k -j"$jobs" "${mkargs[@]+"${mkargs[@]}"}"; then
             [[ ${#mkargs[@]} -eq 0 ]] || die "build failed"
             [[ $wiped -eq 0 ]] || die "the build of $name from scratch failed (above)"
             [[ $moved -eq 1 ]] || die "build failed (above); $name is still at the commit of its last good build,
        so the cause is in what changed since and the build is kept (kbuildlab build $name --fresh wipes it)"
-            warn "the incremental build of $name failed (above) and $why; wiping the build and building it from scratch"
-            _wipe_build "$tree" || die "the wipe of $name failed (above)"
-            wiped=1
-            say "building     $name from scratch ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
-            _kmake "$tree" -j"$jobs" || die "the build of $name from scratch failed too (above)"
+            warn "the incremental build of $name failed (above) and $why"
+            if ! _build_retry_failed "$tree" "$jobs" "$log"; then
+                warn "discarding what failed did not help; wiping the build of $name and building it from scratch"
+                _wipe_build "$tree" || die "the wipe of $name failed (above)"
+                wiped=1
+                say "building     $name from scratch ($arch, -j$jobs${_KBL_MAKE[3]+, ${_KBL_MAKE[3]#CC=}})"
+                _kmake "$tree" -j"$jobs" || die "the build of $name from scratch failed too (above)"
+            fi
         fi
         [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
         if [[ ${#mkargs[@]} -eq 0 ]]; then
-            mkdir -p "$(kbl_tree_data "$tree")" && _src_head "$src" > "$(_built_rec "$tree")"
+            _src_head "$src" > "$(_built_rec "$tree")"
+            [[ -z "$identity" ]] || printf '%s\n' "$identity" > "$(_built_with "$tree")"
+            local -a gone=()
+            mapfile -t gone < <(python3 "${KBL_REPO}/lib/index/build_outputs.py" stale "$src")
+            [[ ${#gone[@]} -eq 0 ]] \
+                || say "discarded    ${#gone[@]} output(s) this build no longer makes: ${gone[*]:0:5}${gone[5]:+ ...}"
         fi
         say "vmlinux      $src/vmlinux"
     else
