@@ -147,7 +147,7 @@ under the ID it was recorded with. Commit `lab/` to keep it.
 None of the three evaluates `#if`, so run over the source as it is they index
 every branch and every file the configuration never builds. `kbuildlab tags`
 instead hands them the tree **as its build compiled it**: each compile a `.cmd`
-file records is replayed with `-fdirectives-only`, a line no unit compiled is
+file records is replayed with `-fdirectives-only -dD`, a line no unit compiled is
 blanked and a file no unit read is emptied (line numbers kept). The copies live in
 `$XDG_CACHE_HOME/kbuildlab/view/<tree>/`; podman overlays them on the tree so the
 kernel's own `make tags cscope gtags` run unchanged, and the finished indexes move
@@ -159,7 +159,10 @@ does.
 
 ctags takes its options through `lib/index/ctags-shim`, which rewrites an old
 `tags.sh` the way later kernels do: `--extra` becomes `--extras`, and a tree's own
-`kconfig` language yields to ctags' built-in Kconfig parser.
+`kconfig` language yields to ctags' built-in Kconfig parser. Over the view it adds
+a macros-only pass with `--if0=yes`: Universal Ctags reads `#ifdef __ASSEMBLY__` as
+`#if 0`, and parsing that assembler as C would lose the declaration after it. New
+options make the next run full.
 
 The view is kept from run to run, and every run first drops the copies of files
 the tree no longer has, so a sync that deletes or moves a file leaves no path in

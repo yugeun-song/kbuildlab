@@ -40,5 +40,5 @@ done < "$d/keys"
 echo "tags-merge: $(wc -l < "$d/now.files") files listed;" \
      "$(LC_ALL=C comm -13 "$d/old.files" "$d/now.files" | wc -l) new," \
      "$(LC_ALL=C comm -23 "$d/old.files" "$d/now.files" | wc -l) gone," \
-     "$(LC_ALL=C sort -u "$d/newer.files" | wc -l) changed; $(cat "$d"/replay.* 2>/dev/null | wc -l) indexed again"
+     "$(LC_ALL=C sort -u "$d/newer.files" | wc -l) changed; $(LC_ALL=C sort -u "$d"/replay.* 2>/dev/null | wc -l) indexed again"
 }

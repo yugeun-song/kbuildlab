@@ -21,19 +21,31 @@ for a in "$@"; do
     esac
     args+=("$a")
 done
-[[ -n ${KBL_TAGS_PASS-} ]] && exec "$real" "${args[@]}"
+i=${#args[@]}
+while (( i > 0 )) && [[ ${args[i-1]} != -* && -f ${args[i-1]} ]]; do (( i-- )); done
+opts=("${args[@]:0:i}")
+files=("${args[@]:i}")
+macros=("${opts[@]}" --if0=yes --c-kinds=d)
+if [[ -n ${KBL_TAGS_PASS-} ]]; then
+    [[ -n ${KBL_TAGS_STATE-} ]] || exec "$real" "${args[@]}"
+    "$real" "${args[@]}" && exec "$real" "${macros[@]}" "${files[@]}"
+    exit
+fi
 
 d=${KBL_TAGS_STATE:?ctags shim: KBL_TAGS_STATE is not set}
 if [[ -n ${KBL_TAGS_EMIT-} ]]; then
     [[ -e $d/emitted ]] || { cat "$d/tags.new" > tags && : > "$d/emitted"; }
     exit
 fi
-i=${#args[@]}
-while (( i > 0 )) && [[ ${args[i-1]} != -* && -f ${args[i-1]} ]]; do (( i-- )); done
-key=$(printf '%s\0' "${args[@]:0:i}" | md5sum | cut -c1-16)
-if [[ ! -e $d/opts.$key ]]; then
-    printf '%s\0' "${args[@]:0:i}" > "$d/opts.$key"
-    printf '%s\n' "$key" >> "$d/keys"
-fi
-(( i < ${#args[@]} )) && printf '%s\n' "${args[@]:i}" >> "$d/files.$key"
+record() {
+    local key
+    key=$(printf '%s\0' "$@" | md5sum | cut -c1-16)
+    if [[ ! -e $d/opts.$key ]]; then
+        printf '%s\0' "$@" > "$d/opts.$key"
+        printf '%s\n' "$key" >> "$d/keys"
+    fi
+    (( ${#files[@]} )) && printf '%s\n' "${files[@]}" >> "$d/files.$key"
+}
+record "${opts[@]}"
+record "${macros[@]}"
 : >> tags

@@ -15,6 +15,7 @@ The view directory is kbuildlab's to choose; under it: upper/ (the copies), work
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import re
@@ -105,7 +106,7 @@ def unit_files(ksrc: str, unit: dict) -> set[str] | None:
 def forced_closure(shell: list[str], ksrc: str, units: list[dict]) -> set[str]:
     probes: dict[tuple, list[str]] = {}
     for u in units:
-        argv = ir.unit_argv(u["command"])[:-5]
+        argv = ir.unit_argv(u["command"])[:-6]
         forced = tuple(argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-include")
         lang = "assembler-with-cpp" if u["file"].endswith(".S") else "c"
         probes.setdefault((argv[0], forced, lang), argv + ["-M", "-x", lang, os.devnull])
@@ -158,6 +159,16 @@ def pattern_end(rest: bytes) -> int:
     return -1
 
 
+def matching_lines(order: list[tuple[bytes, int]], want: bytes, whole: bool) -> list[int]:
+    i = bisect.bisect_left(order, (want, 0))
+    out = []
+    while i < len(order) and order[i][0].startswith(want):
+        if not whole or order[i][0] == want:
+            out.append(order[i][1])
+        i += 1
+    return sorted(out)
+
+
 def address() -> None:
     with open("tags", "rb") as f:
         lines = f.read().split(b"\n")
@@ -176,9 +187,7 @@ def address() -> None:
                 text = f.read().split(b"\n")
         except OSError:
             continue
-        first: dict[bytes, int] = {}
-        for no, t in enumerate(text, 1):
-            first.setdefault(t, no)
+        order = sorted((t, no) for no, t in enumerate(text, 1))
         for i in idx:
             tag, path, rest = lines[i].split(b"\t", 2)
             k = pattern_end(rest)
@@ -187,13 +196,16 @@ def address() -> None:
             body = rest[2:k - 1]
             slashes = len(body[:-1]) - len(body[:-1].rstrip(b"\\"))
             whole = body.endswith(b"$") and slashes % 2 == 0
-            want = unescape(body[:-1] if whole else body)
-            no = first.get(want) if whole else next(
-                (n for n, t in enumerate(text, 1) if t.startswith(want)), None)
-            if no is not None:
-                lines[i] = b"\t".join((tag, path, str(no).encode() + rest[k:]))
+            nos = matching_lines(order, unescape(body[:-1] if whole else body), whole)
+            # ctags merges a macro's definitions in several branches into one
+            # pattern, and every line still in the view was compiled.
+            macro = rest[k:] == b';"\td' or rest[k:].startswith(b';"\td\t')
+            for no in nos if macro else nos[:1]:
+                lines.append(b"\t".join((tag, path, str(no).encode() + rest[k:])))
+            if nos:
+                lines[i] = b""
     out, last = [], None
-    for l in sorted(x + b"\n" for x in lines):
+    for l in sorted(x + b"\n" for x in lines if x):
         if l != last:
             out.append(l)
         last = l

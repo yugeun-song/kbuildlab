@@ -13,11 +13,17 @@ if [[ $mode == fresh ]]; then
     rm -f -- "${out[@]}"
     mode=full
 fi
-ctags_full() { KBL_TAGS_PASS=1 PATH="$here/ctags-shim:$PATH" make ARCH="$arch" tags && python3 "$here/tagview.py" address; }
+if [[ $mode == merge ]] && ! cmp -s "$st/keys" "$st/tags.keys"; then
+    echo "tags-index: tags was made with other ctags options; indexing it in full"
+    rm -f tags
+    mode=full
+fi
+ctags_done() { python3 "$here/tagview.py" address && cp "$st/keys" "$st/tags.keys"; }
+ctags_full() { KBL_TAGS_PASS=1 PATH="$here/ctags-shim:$PATH" make ARCH="$arch" tags && ctags_done; }
 ctags_merge() {
     bash "$here/tags-merge.sh" && rm -f "$st/emitted" \
         && KBL_TAGS_EMIT=1 PATH="$here/ctags-shim:$PATH" make ARCH="$arch" tags \
-        && python3 "$here/tagview.py" address
+        && ctags_done
 }
 declare -A pid
 if [[ $mode == merge ]]; then

@@ -19,8 +19,9 @@ build compiler's answers as a forced include wherever clang can follow them.
 
 `collect` runs inside the build image: every unit goes through the build
 compiler with -fdirectives-only, which copies each surviving line verbatim, so
-the groups a unit compiled are read off the output.  `readings` drives it from
-the host and keeps each unit's result until its inputs change.
+the groups a unit compiled are read off the output.  gcc's specs turn that flag
+off for assembler input, so -dD keeps such a unit's #define lines.  `readings`
+drives it from the host and keeps each unit's result until its inputs change.
 """
 
 from __future__ import annotations
@@ -697,7 +698,7 @@ def unit_argv(command: str) -> list[str]:
         else:
             out.append(a)
             i += 1
-    return out + ["-E", "-fdirectives-only", "-o", "-", args[-1]]
+    return out + ["-E", "-fdirectives-only", "-dD", "-o", "-", args[-1]]
 
 
 _LAYOUTS: dict = {}
