@@ -2165,11 +2165,12 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
         "textDocument": {"uri": "file://" + seed, "languageId": "c",
                          "version": 1, "text": text}}})
 
-    started = time.time()
+    moved = time.time()
+    seen = ""
     last_shown = 0.0
     ok = False
     try:
-        while time.time() - started < timeout:
+        while time.time() - moved < timeout:
             with lock:
                 done, last = state["done"], state["last"]
             if done:
@@ -2177,6 +2178,8 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
                 break
             if proc.poll() is not None:
                 break           # clangd is gone; nothing will finish now
+            if last != seen:
+                seen, moved = last, time.time()
             if not quiet and last and time.time() - last_shown > 15:
                 last_shown = time.time()
                 _line(f"      indexing {tree}: {last}")
@@ -2798,9 +2801,6 @@ def warm_need_mb(tree: str) -> int:
 
 
 def cmd_warm(args) -> int:
-    # One indexing thread is far cheaper than a whole session, but they still
-    # add up on a tree this size; scale them the same way and leave the same
-    # headroom.
     cpus = os.cpu_count() or 2
     rc = 0
     ready = []
@@ -2812,9 +2812,13 @@ def cmd_warm(args) -> int:
         ready.append(tree)
     if not ready:
         return rc
-    width = max(1, min(len(ready), cpus // 2))
+    # A session reads its index back on about one core, so memory alone decides how
+    # many run.  The largest go first, or the end is one tree on an idle machine.
+    needs = {tree: warm_need_mb(tree) for tree in ready}
+    ready.sort(key=needs.__getitem__, reverse=True)
     total = args.jobs or cpus
-    jobs = max(1, total // width)
+    width = max(1, min(len(ready), total))
+    jobs = min(total, max(2, total // width))
     if len(ready) > 1:
         _line(f"warming {len(ready)} clangd indexes, up to {width} at a time, "
               f"{jobs} thread(s) each")
@@ -2825,7 +2829,7 @@ def cmd_warm(args) -> int:
         # Reading a warm index back takes one or two cores and most of its memory
         # late, so a session starts while memory is free for it and for what those
         # already running have yet to take.
-        need = warm_need_mb(tree)
+        need = needs[tree]
         with room:
             while running and (available_mb() or 0) < sum(running.values()) + need + WARM_ROOM_MB:
                 room.wait(timeout=5)
@@ -2952,10 +2956,10 @@ def main() -> int:
 
     w = sub.add_parser("warm", help="build clangd's background index now")
     w.add_argument("-j", "--jobs", type=int, default=0,
-                   help="clangd indexing threads; 0 (default) picks a number "
-                        "from free memory")
+                   help="clangd indexing threads shared among the trees; "
+                        "0 (default) means all cores")
     w.add_argument("--timeout", type=float, default=7200.0,
-                   help="give up after this many seconds (default 2h)")
+                   help="give up after this many seconds without progress (default 2h)")
     w.add_argument("--results", metavar="FILE", default="",
                    help="append TREE, ok or fail, and the seconds taken to FILE, "
                         "one tab-separated line per tree")
