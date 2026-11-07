@@ -12,7 +12,8 @@ origin() { LC_ALL=C awk -F'\t' '$1 == "!_TAG_PROC_CWD" || $1 == "!_TAG_PROGRAM_V
 [[ ! -s $prev || "$(origin < "$prev")" == "$(ctags --extras=+p -o - /dev/null 2>/dev/null | origin)" ]] \
     || { echo "tags-merge: $prev was made in another directory or by another ctags" >&2; exit 1; }
 
-LC_ALL=C awk -F'\t' '!/^!_TAG_/ && !seen[$2]++ { print $2 }' "$prev" | LC_ALL=C sort -u > "$d/old.files"
+# build_symbols.py decides the lines marked origin:build anew on every run.
+LC_ALL=C awk -F'\t' '!/^!_TAG_/ && !/\torigin:build$/ && !seen[$2]++ { print $2 }' "$prev" | LC_ALL=C sort -u > "$d/old.files"
 : > "$d/now.files"
 : > "$d/newer.files"
 while read -r k; do
@@ -29,7 +30,7 @@ LC_ALL=C sort -u "$d/now.files" -o "$d/now.files"
 
 LC_ALL=C awk -F'\t' -v dropf="$d/drop.files" '
     BEGIN { while ((getline f < dropf) > 0) drop[f] = 1 }
-    /^!_TAG_/ || !($2 in drop)' "$prev" > "$new"
+    /^!_TAG_/ || (!/\torigin:build$/ && !($2 in drop))' "$prev" > "$new"
 
 # ctags re-sorts its whole output after every run, so each worker writes its own
 # and they are sorted together once; an empty $prev indexes everything.

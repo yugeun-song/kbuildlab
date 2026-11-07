@@ -189,6 +189,17 @@ a macros-only pass with `--if0=yes`: Universal Ctags reads `#ifdef __ASSEMBLY__`
 same pass tags what a C header defines for the assembler (`.macro`, `.set`, `.equ`,
 `.equiv`, `.eqv`), which the C parser cannot see. New options make the next run full.
 
+ctags reads text, so it misses a variable followed by an attribute, whatever a macro
+call makes (`DEFINE_PER_CPU`, `SYM_FUNC_ALIAS`, `DO_ERROR_INFO`) and `.req`. Once it
+has finished, `lib/index/build_symbols.py` adds what the build knows and `tags` lacks:
+each C object's debug info gives a definition's declaration line, and each assembler
+unit, preprocessed by its recorded command, gives labels, assignments, `.req`, `.macro`
+and the arguments of macros whose bodies make a label of them. These lines end in
+`origin:build`; a merge leaves them out, so what ctags itself wrote stays byte for byte,
+and each object's answer is read again only when the object changes. Line tables are
+not used: `nm -l` put riscv functions in a relocatable object far from their lines.
+What fails here warns and leaves `tags` as ctags wrote it.
+
 The view is kept from run to run, and every run first drops the copies of files
 the tree no longer has, so a sync that deletes or moves a file leaves no path in
 the view that the tree lacks. An incremental run that fails all the same is

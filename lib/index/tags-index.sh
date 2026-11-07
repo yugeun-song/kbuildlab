@@ -18,7 +18,16 @@ if [[ $mode == merge ]] && ! cmp -s "$st/keys" "$st/tags.keys"; then
     rm -f tags
     mode=full
 fi
-ctags_done() { python3 "$here/tagview.py" address && cp "$st/keys" "$st/tags.keys"; }
+# What the build defined and ctags did not see: never worth failing tags over, but
+# said when it is missing.  Its memory is the first suspect.
+build_symbols() {
+    python3 "$here/build_symbols.py" && return
+    echo "tags-index: reading the build's symbols failed; reading every object again" >&2
+    rm -f "$st/symbols.json"
+    python3 "$here/build_symbols.py" \
+        || echo "tags-index: tags hold only what ctags saw; definitions it missed stay missing" >&2
+}
+ctags_done() { python3 "$here/tagview.py" address && build_symbols && cp "$st/keys" "$st/tags.keys"; }
 ctags_serial() { KBL_TAGS_PASS=1 PATH="$here/ctags-shim:$PATH" make ARCH="$arch" tags && ctags_done; }
 ctags_merge() {
     bash "$here/tags-merge.sh" && rm -f "$st/emitted" \

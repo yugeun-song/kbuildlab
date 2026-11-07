@@ -164,6 +164,98 @@ with tempfile.TemporaryDirectory() as tmp:
     check("one failed index is built again on its own",
           (r.returncode, "cscope failed; indexing it again" in r.stderr, "gtags failed" in r.stderr), (0, True, False))
 
+with tempfile.TemporaryDirectory() as tmp:
+    sys.path.insert(0, os.path.dirname(tagview))
+    import build_symbols as bs
+
+    expanded = """# 1 "a.S"
+# 1 "<built-in>"
+#define FROM_COMMAND 1
+# 5 "a.S"
+#define HERE 2
+real: other: .long 1
+1: inner:
+.macro maker name, other
+\\name\\():
+ nop
+.endm
+.macro user target
+ b \\target
+.endm
+.macro relay x
+ maker \\x, 1
+.endm
+ maker made_by_macro, 1
+ user only_used
+ relay made_through
+ maker key=value, name=made_by_key
+src .req x1
+count = 3
+.set assigned, 4
+.comm shared, 8
+not_a_symbol:
+"""
+    syms = {"real", "other", "inner", "made_by_macro", "only_used", "made_through", "made_by_key", "shared"}
+    got = {(n, line, form) for n, place, line, form in bs.assembler_definitions(expanded, syms) if place == "a.S"}
+    want = {("HERE", 5, "define"), ("real", 6, "symbol"), ("other", 6, "symbol"), ("inner", 7, "symbol"),
+            ("maker", 8, "macro"), ("user", 12, "macro"), ("relay", 15, "macro"),
+            ("made_by_macro", 18, "symbol"), ("made_through", 20, "symbol"), ("made_by_key", 21, "symbol"),
+            ("src", 22, "define"), ("count", 23, "define"), ("assigned", 24, "define"), ("shared", 25, "symbol")}
+    check("assembler definitions", sorted(got), sorted(want))
+
+    state = os.path.join(tmp, "state")
+    os.mkdir(state)
+    put(tmp, "gen.h", "#define MAKE(n) int n##_made __attribute__((used))\n")
+    put(tmp, "a.c", '#include "gen.h"\n\nMAKE(foo);\nint plain;\n__attribute__((aligned(16)))\nint\nby_attr;\n'
+                    "static void quiet(void) { }\nvoid (*keep)(void) = quiet;\n/* by_asm */\n"
+                    '__asm__(".globl by_asm; .set by_asm, 3");\n')
+    put(tmp, "b.S", "#define DEF(x) .globl x; x:\nDEF(by_call)\n  nop\n.macro maker name\n\\name:\n .long 1\n.endm\n"
+                    "maker by_macro\n")
+    put(tmp, "tags", '!_TAG_FILE_SORTED\t1\t//\nkeep\ta.c\t9;"\tv\nold\tb.S\t1;"\tv\torigin:build\n'
+                     'plain\ta.c\t4;"\tv\n')
+    for src, obj, flags in (("a.c", "a.o", "-g -gdwarf-5"), ("b.S", "b.o", "-g")):
+        cmd = f"gcc {flags} -c -o {obj} {src}"
+        r = subprocess.run(cmd.split(), cwd=tmp, capture_output=True, text=True)
+        check(f"builds {src}", (r.returncode, r.stderr), (0, ""))
+        put(tmp, f".{obj}.cmd", f"savedcmd_{obj} := {cmd}\n\nsource_{obj} := {src}\n\ndeps_{obj} := \\\n  gen.h \\\n\n"
+                                f"{obj}: $(deps_{obj})\n\n$(deps_{obj}):\n")
+    put(state, "keys", "k\n")
+    put(state, "files.k", "a.c\nb.S\ngen.h\n")
+    script = os.path.join(os.path.dirname(tagview), "build_symbols.py")
+
+    def run_symbols():
+        return subprocess.run([sys.executable, "-B", script], cwd=tmp, capture_output=True, text=True,
+                              env=dict(os.environ, KBL_TAGS_STATE=state, KBL_JOBS="2"))
+
+    def added():
+        with open(os.path.join(tmp, "tags")) as f:
+            lines = f.read().split("\n")
+        check("tags stay sorted", [x for x in lines if x] == sorted(x for x in lines if x), True)
+        return {tuple(x.split("\t")[:2]) + (x.split("\t")[2].split(";")[0],) for x in lines if x.endswith("origin:build")}
+
+    r = run_symbols()
+    check("symbols run", (r.returncode, r.stderr), (0, ""))
+    want = {("foo_made", "a.c", "3"), ("by_attr", "a.c", "7"), ("quiet", "a.c", "8"), ("by_call", "b.S", "2"),
+            ("by_macro", "b.S", "8"), ("DEF", "b.S", "1"), ("maker", "b.S", "4"), ("by_asm", "a.c", "11")}
+    check("definitions ctags did not see", sorted(added()), sorted(want))
+    with open(os.path.join(tmp, "tags")) as f:
+        text = f.read()
+    check("what ctags saw stays, the last run's guesses go",
+          ('plain\ta.c\t4;"\tv\n' in text, "\nold\t" in text, 'quiet\ta.c\t8;"\tf\tfile:\torigin:build\n' in text),
+          (True, False, True))
+    r = run_symbols()
+    check("nothing changed, nothing read", (r.returncode, "2 objects (2 carried over)" in r.stdout, sorted(added())),
+          (0, True, sorted(want)))
+
+    made_by = subprocess.run(["ctags", "--extras=+p", "-o", "-", os.devnull], cwd=tmp, capture_output=True, text=True)
+    put(state, "tags.prev", "".join(x + "\n" for x in made_by.stdout.split("\n") if x.startswith("!_TAG_"))
+                            + 'keep\ta.c\t9;"\tv\nquiet\ta.c\t8;"\tf\tfile:\torigin:build\n')
+    put(state, "opts.k", "-a\0")
+    merged = subprocess.run(["bash", os.path.join(os.path.dirname(tagview), "tags-merge.sh")], cwd=tmp,
+                            env=dict(os.environ, KBL_TAGS_STATE=state, KBL_JOBS="1"), capture_output=True, text=True)
+    with open(os.path.join(state, "tags.new")) as f:
+        check("a merge leaves the build's lines out", (merged.returncode, "origin:build" in f.read()), (0, False))
+
 print("tagview: the view kept only copies of files the tree has; assembler-only #define lines reach the indexes"
       if not failed else f"tagview: {failed} failed")
 sys.exit(1 if failed else 0)
