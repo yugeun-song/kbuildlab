@@ -66,7 +66,7 @@ or replaced does not need this file edited:
      for a header is not the state the build had on reaching it: the reaching
      file may have defined something first, and the preamble may run past the
      point of inclusion.  inactive_regions.py replays the header's context source and
-     restores the difference; `regions` measures what clangd greys out against
+     defines what the preamble lacks; `regions` measures what clangd greys out against
      what the build compiler compiled, unit by unit, inside the build image.
 
   8. clang answering for itself.  __clang__, __GNUC__ and the __has_* tests
@@ -76,6 +76,11 @@ or replaced does not need this file edited:
      the answers; they lead every command line wherever clang can follow them.
      Only what a condition evaluates is answered: a macro reached only from
      code, such as clang's spelling of GCC's __seg_gs keyword, is left alone.
+
+A kernel unit is told to read only its tree, and the build compiler's own headers
+where the build names them: what clang would answer differently, and what it
+cannot parse, travel as -D and -U, which have no file for go-to-definition to land
+on.
 
 Nothing here names a directory, a header or a macro of a particular tree: the
 include paths, the arch directory, the header floor, the targets and the
@@ -344,34 +349,6 @@ def build_shell(tree: str, given: str | None, keep: bool = False) -> list[str]:
         return json.load(f)
 
 
-def overlay_dir(tree: str) -> str:
-    return os.path.join(cache_dir(tree), "overlay")
-
-
-def standins(tree: str, entries: list[dict]) -> dict[str, str]:
-    """Overlay copy -> the tree header it shadows on this build's include path."""
-    ov = overlay_dir(tree)
-    ksrc = kernel_root(tree)
-    dirs: list[str] = []
-    for e in entries:
-        for a in entry_args(e):
-            if a.startswith("-I"):
-                d = os.path.normpath(os.path.join(ksrc, a[2:]))
-                if d not in dirs:
-                    dirs.append(d)
-    found: dict[str, str] = {}
-    for root, _, names in os.walk(ov):
-        for n in names:
-            copy = os.path.join(root, n)
-            rel = os.path.relpath(copy, ov)
-            for d in dirs:
-                cand = os.path.join(d, rel)
-                if d != ov and os.path.isfile(cand):
-                    found[copy] = cand
-                    break
-    return found
-
-
 def forced_includes(args: list[str]) -> list[str]:
     return [args[i + 1] for i, a in enumerate(args[:-1]) if a == "-include"]
 
@@ -379,29 +356,21 @@ def forced_includes(args: list[str]) -> list[str]:
 _FORWARD_COUNTED_BY = re.compile(
     r"^#define (\w+)\((\w+)\) __attribute__\(\(__counted_by__\(\2\)\)\)$", re.M)
 
+COUNTED_BY_OFF = "-D__counted_by__(member)=__unused__"
 
-def write_compat_shim(tree: str, entries: list[dict],
-                      view: inactive_regions.View) -> tuple[str, str | None, int]:
-    """Redefine empty the attribute macros this clang cannot parse the tree's
-    use of.  Which macros, and which forced include defines them, is read from
-    preprocessing the build's most common forced-include sequence, so both
-    follow the tree's version and configuration.
 
-    Returns the shim, the forced include it has to follow, and the macro count.
-    """
-    path = os.path.join(cache_dir(tree), "shim", "clang_compat.h")
-
-    def forced(e: dict) -> tuple:
-        return tuple(i for i in forced_includes(entry_args(e)) if i != path)
-
+def counted_by_fence(entries: list[dict], view: inactive_regions.View) -> tuple[str | None, int]:
+    """The forced include that defines the attribute macros this clang cannot
+    parse the tree's use of, and how many it defines.  Read from preprocessing the
+    build's most common forced-include sequence, so both follow the tree."""
     if kbuildinfo.clang_handles_forward_counted_by():
-        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
-        return path, None, 0
+        return None, 0
     tally: dict[tuple, int] = {}
     for e in entries:
-        tally[forced(e)] = tally.get(forced(e), 0) + 1
+        seq = tuple(forced_includes(entry_args(e)))
+        tally[seq] = tally.get(seq, 0) + 1
     seq = max(tally, key=lambda k: tally[k])
-    e = next(x for x in entries if forced(x) == seq)
+    e = next(x for x in entries if tuple(forced_includes(entry_args(x))) == seq)
     argv = view.flags(entry_args(e), e["file"])
     bare = []
     skip = False
@@ -419,54 +388,24 @@ def write_compat_shim(tree: str, entries: list[dict],
 
     names = defined_after(len(seq))
     if not names:
-        shutil.rmtree(os.path.dirname(path), ignore_errors=True)
-        return path, None, 0
-    after = next(seq[n - 1] for n in range(1, len(seq) + 1) if defined_after(n) == names)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    write_text(path, "/* GCC resolves counted_by against the finished struct; this clang does not. */\n"
-               + "".join(f"#undef {n}\n#define {n}(member)\n" for n in names))
-    return path, after, len(names)
+        return None, 0
+    return next(seq[n - 1] for n in range(1, len(seq) + 1) if defined_after(n) == names), len(names)
 
 
-def apply_overlay(tree: str, shim: str | None = None, after: str | None = None,
-                  where: str | None = None) -> int:
-    """Put the annotated headers ahead of the tree's own on the include path,
-    and the compatibility shim right behind the forced include it amends.
-
-    -I is searched in order, so the entry goes in front of the kernel's own -I
-    rather than being appended, which is why this edits the database instead of
-    using the config's CompileFlags.Add.
-    """
-    ov = overlay_dir(tree)
-    if not os.path.isdir(ov):
-        return 0
-    cdb = os.path.join(where or cache_dir(tree), "compile_commands.json")
-    with open(cdb) as f:
-        entries = json.load(f)
-    flag = f"-I{ov}"
-
+def disarm_counted_by(tree: str, fence: str) -> int:
+    """Turn the attribute into one clang accepts anywhere, leaving the tree's macros
+    the definition go-to-definition finds."""
+    entries = cdb_entries(tree)
     touched = 0
     for e in entries:
         args = entry_args(e)
-        changed = False
-        if flag not in args:
-            args.insert(1, flag)
-            changed = True
-        if shim and shim not in args:
-            at = [i + 2 for i, a in enumerate(args[:-1])
-                  if a == "-include" and args[i + 1] == after]
-            if at:
-                args[at[0]:at[0]] = ["-include", shim]
-                changed = True
-        if not changed:
-            continue
-        if "command" in e:
+        if fence in forced_includes(args):
+            args.insert(1, COUNTED_BY_OFF)
+            e.pop("arguments", None)
             e["command"] = shlex.join(args)
-        else:
-            e["arguments"] = args
-        touched += 1
+            touched += 1
     if touched:
-        write_cdb(tree, entries, where)
+        write_cdb(tree, entries)
     return touched
 
 
@@ -541,14 +480,14 @@ def ask_build_image(shell: list[str], drivers: list[str], flag_sets: list[tuple]
 
 def write_identities(tree: str, targets: "Targets", flag_sets: list[tuple], answers: list,
                      questions: tuple[str, list], closure: set[str], own: set,
-                     read: list[str]) -> tuple[dict[tuple, str], dict]:
-    """Per flag set, a forced include holding the build compiler's answers
-    where clang's differ; flag sets that answer alike share one file."""
+                     read: list[str]) -> tuple[dict[tuple, tuple[str, ...]], dict]:
+    """Per flag set, the command-line macros holding the build compiler's answers
+    where clang's differ."""
     d = identity_dir(tree)
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
     ask, pairs = questions
-    paths: dict[tuple, str] = {}
+    flags: dict[tuple, tuple[str, ...]] = {}
     meta = {"macros": set(), "followed": set(), "kept": set(), "redefined": set()}
     for sig, (bpre, bans) in zip(flag_sets, answers):
         if bpre is None or bans is None:
@@ -557,19 +496,16 @@ def write_identities(tree: str, targets: "Targets", flag_sets: list[tuple], answ
         clang = tuple(subprocess.run(argv + ["-E", "-dM", "-x", "c", src], input=ask,
                                      capture_output=True, text=True).stdout
                       for src in (os.devnull, "-"))
-        header, m = inactive_regions.identity((bpre, bans), clang, closure, pairs, own)
+        answer, m = inactive_regions.identity((bpre, bans), clang, closure, pairs, own)
         for k in meta:
             meta[k].update(m[k])
-        if header:
-            path = os.path.join(d, hashlib.sha1(header.encode()).hexdigest()[:16] + ".h")
-            if not os.path.exists(path):
-                write_text(path, header)
-            paths[sig] = path
+        if answer:
+            flags[sig] = tuple(answer)
     kept = sorted(meta["kept"])
     with open(os.path.join(d, KEPT_FILE), "w") as f:
         json.dump({"tests": kept, "names": inactive_regions.kept_names(read, kept) if kept else []},
                   f, indent=0)
-    return paths, {k: sorted(v) for k, v in meta.items()}
+    return flags, {k: sorted(v) for k, v in meta.items()}
 
 
 @functools.lru_cache(maxsize=None)
@@ -1034,10 +970,10 @@ class Targets:
 
 
 def rewrite_entries(tree: str, units: list[dict], targets: Targets,
-                    identities: dict[tuple, str], compiler_include: dict[str, str],
+                    identities: dict[tuple, tuple[str, ...]], compiler_include: dict[str, str],
                     quiet: set[str], where: str | None = None) -> int:
     """Turn each build command into the command clangd should run: the unit's
-    target named, the flags clang refuses there dropped, the identity include
+    target named, the flags clang refuses there dropped, the identity macros
     first, and a -isystem naming the build compiler's own headers pointed at
     clang's instead, since each compiler can only read its own."""
     resource = os.path.join(subprocess.run(["clang", "-print-resource-dir"], capture_output=True,
@@ -1057,8 +993,7 @@ def rewrite_entries(tree: str, units: list[dict], targets: Targets,
             return d if os.path.isdir(d) else resource if own is None else None
 
         out = [args[0]] + ([f"--target={base}"] if base else [])
-        if sig in identities:
-            out += ["-include", identities[sig]]
+        out += identities.get(sig, ())
         for g in option_groups(args[1:-1]):
             if g[0] == "-isystem" and len(g) == 2:
                 d = system(g[1])
@@ -1094,7 +1029,6 @@ def write_assembler_cdb(tree: str, base: dict[str, str | None],
     write_cdb(tree, list(first.values()), assembler_dir(tree))
     rewrite_entries(tree, units, Targets(base, units, jobs), {}, compiler_include, set(),
                     assembler_dir(tree))
-    apply_overlay(tree, where=assembler_dir(tree))
     return len(first)
 
 
@@ -1484,7 +1418,7 @@ def header_floor(tree: str, entries: list[dict]) -> str:
 
 
 def identity_quiet(ident: bool, meta: dict) -> list[str]:
-    """Warnings the identity include causes by design rather than finds: its
+    """Warnings the identity macros cause by design rather than finds: its
     redefinition of clang's feature-test macros, and the attributes only the
     build compiler has, which clang meets on the build compiler's paths and
     ignores."""
@@ -1505,10 +1439,7 @@ def tree_fragments(tree: str, entries: list[dict], verbose: bool, floor: str,
     no command line can make parse."""
     ksrc = kernel_root(tree)
     prefix = re.escape(ksrc) + "/"
-    # The overlay's copies are opened too -- go-to-definition lands on them --
-    # and they take the tree's flags, so they take the tree's fragments.
-    lab = (f"({re.escape(ksrc)}|{re.escape(overlay_dir(tree))})/"
-           if os.path.isdir(overlay_dir(tree)) else prefix)
+    lab = prefix
     add = list(ERROR_LIMIT + DRIVER_QUIET + UNUSED_QUIET) + CLANG_ONLY_NOISE + list(quiet)
     own_opinions = kernel_warning_opinions(warn_argv, jobs)
     add += [w for w in own_opinions if w not in add]
@@ -2227,6 +2158,13 @@ def cmd_gen(args) -> int:
                 if name != ".cache":
                     shutil.rmtree(path) if os.path.isdir(path) else os.unlink(path)
             print(f"    discarded {cache_dir(tree)} but for clangd's shards, which are keyed on content")
+        replaced = [d for d in ("overlay", "shim", "state")
+                    if os.path.isdir(os.path.join(cache_dir(tree), d))]
+        if replaced:
+            for d in replaced:
+                shutil.rmtree(os.path.join(cache_dir(tree), d))
+            shutil.rmtree(os.path.join(cache_dir(tree), ".cache"), ignore_errors=True)
+            print(f"    discarded clangd's shards: they name {', '.join(replaced)} in the cache")
         kept, dropped = gen_cdb(tree, args.force)
         print(f"    compile_commands.json: {kept} entries"
               + (f" ({dropped} assembly or repeated entries left out)" if dropped else "")
@@ -2291,11 +2229,11 @@ def cmd_gen(args) -> int:
         else:
             shutil.rmtree(identity_dir(tree), ignore_errors=True)
         quiet = compiler_header_users(readings, compiler_include) if readings else set()
-        n = rewrite_entries(tree, units, targets, identities, compiler_include, quiet)
+        rewrite_entries(tree, units, targets, identities, compiler_include, quiet)
         if identities:
             print(f"    identity: {len(meta['macros'])} predefined macro(s) and "
                   f"{len(meta['followed'])} feature test(s) answered as the build compiler "
-                  f"answers them, in {len(set(identities.values()))} forced include(s) over "
+                  f"answers them, on the command line of "
                   f"{sum(n for sig, n in tally.items() if sig in identities)} units")
         if meta.get("kept"):
             print(f"    identity: {len(meta['kept'])} feature test(s) left to clang, which "
@@ -2303,15 +2241,10 @@ def cmd_gen(args) -> int:
         if quiet:
             print(f"    {len(quiet)} unit(s) read the build compiler's own headers")
         view = inactive_regions.View(ksrc)
-        if not args.no_overlay:
-            kbuildinfo.build_overlay(ksrc, overlay_dir(tree), srcarch(tree), verbose=True)
-            shim, after, neutralised = write_compat_shim(
-                tree, [e for e in cdb_entries(tree) if built(e)], view)
-            n = apply_overlay(tree, shim if neutralised else None, after)
-            if n:
-                print(f"    overlay put ahead of the tree on {n} command lines"
-                      + (f", {neutralised} counted_by macro(s) defined away behind "
-                         f"{after}" if neutralised else ""))
+        fence, disarmed = counted_by_fence([e for e in cdb_entries(tree) if built(e)], view)
+        if fence:
+            print(f"    {disarmed} counted_by macro(s) disarmed on "
+                  f"{disarm_counted_by(tree, fence)} command lines")
         src = [e for e in cdb_entries(tree) if built(e)]
         floor = header_floor(tree, src)
         print(f"    header floor: {floor}, what most sources include first")
@@ -2320,7 +2253,7 @@ def cmd_gen(args) -> int:
             if not args.no_macro_state:
                 by_rel = {os.path.relpath(e["file"], ksrc): e for e in src}
                 done = inactive_regions.settle(
-                    view, cache_dir(tree), by_rel, extra, chosen, standins(tree, src), floor,
+                    view, cache_dir(tree), by_rel, extra, chosen, floor,
                     entry_args, jobs, verbose=True,
                     reads=lambda source: unit_reads(ksrc, by_rel[source], symbols=True))
                 astray = [h for h in done["empty"] if truth and h in truth.readings.index]
@@ -2329,18 +2262,11 @@ def cmd_gen(args) -> int:
                           f"themselves under clang in their source: {', '.join(astray[:5])}")
             with open(os.path.join(cache_dir(tree), CONTEXT_FILE), "w") as f:
                 json.dump(chosen, f, indent=0, sort_keys=True)
-            by_file = {e["file"]: e for e in extra}
-            for copy, orig in standins(tree, src).items():
-                if orig in by_file:
-                    argv = entry_args(by_file[orig])
-                    extra.append({"directory": ksrc, "file": copy,
-                                  "command": shlex.join(argv[:-1] + [copy])})
             write_cdb(tree, src + extra)
         print(f"    assembler database: {write_assembler_cdb(tree, base, compiler_include, jobs)} "
               f"entries  -> {assembler_dir(tree)}")
-        in_tree = [e for e in cdb_entries(tree) if e["file"].startswith(ksrc + "/")]
         common = max(tally, key=lambda f: tally[f])
-        blocks = tree_fragments(tree, in_tree, True, floor, targets.argv(common), read, jobs,
+        blocks = tree_fragments(tree, cdb_entries(tree), True, floor, targets.argv(common), read, jobs,
                                 header_diagnostics=args.header_diagnostics,
                                 quiet=identity_quiet(bool(identities), meta))
         write_tree_block(tree, blocks)
@@ -2601,14 +2527,6 @@ def verdict(lay: inactive_regions.Layout, readings: list[tuple], greyed: set[int
     return (status, len(closest - lit), len(lit - union), len(union - closest - lit), other)
 
 
-def content_digest(path: str) -> str | None:
-    try:
-        with open(path, "rb") as f:
-            return hashlib.sha1(f.read()).hexdigest()
-    except OSError:
-        return None
-
-
 def audit_regions(tree: str, rels: list[str], readings: inactive_regions.Readings, jobs: int,
                   fresh: bool = False) -> tuple[list[tuple], int]:
     """Compare clangd's inactive regions with the build's readings.
@@ -2641,12 +2559,8 @@ def audit_regions(tree: str, rels: list[str], readings: inactive_regions.Reading
             return memo.key("greyed", cdb_digest, clangd_id, config, inactive_regions.Memo.stamp({path}))
         source = e if built(e) else by_rel.get(chosen.get(rel))
         read = unit_reads(ksrc, source, symbols=True) if source else None
-        # Forced includes are written afresh by every gen, so they count by
-        # content: a regeneration that changed nothing re-asks nothing.
-        own = sorted(x for x in forced_includes(entry_args(e)) if os.path.isabs(x))
         return memo.key("greyed", entry_args(e), clangd_id, config,
-                        inactive_regions.Memo.stamp(set(read or ()) | {path}),
-                        [[x, content_digest(x)] for x in own])
+                        inactive_regions.Memo.stamp(set(read or ()) | {path}))
 
     lacking = identity_kept(tree)
     greyed: dict[str, list[int] | None] = {}
@@ -2901,8 +2815,6 @@ def main() -> int:
     g.add_argument("-j", "--jobs", type=int, default=0,
                    help="preprocessors run at once; 0 (default) picks a number from "
                         "free memory and cores")
-    g.add_argument("--no-overlay", action="store_true",
-                   help="skip the annotated Kconfig/linker-script headers")
     g.add_argument("--no-header-context", action="store_true",
                    help="skip per-header database entries (headers then parse alone)")
     g.add_argument("--no-build-image", action="store_true",

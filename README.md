@@ -243,11 +243,13 @@ the include paths, the arch directory, each unit's target and the compiler's own
 headers are re-read on every run, so the next `kbuildlab tags` follows a config or
 option change.
 
-Two facts the build knows and clangd does not are injected as header comments:
-go-to-definition on a `CONFIG_` symbol lands on its `#define` with Kconfig's
-prompt, type, dependencies and help; on `_text` or `__init_begin`, on the
-declaration with its `vmlinux.lds.S` line. clangd's hover card omits these — jump,
-don't hover.
+A kernel unit is told to read only its tree, so go-to-definition and references stay
+in it. What clang would answer differently and what it cannot parse travel as `-D` and
+`-U`, which have no file to land on. Two things read outside by nature: the build
+compiler's own headers where a build names them (v4.6's `stdarg.h`, NEON intrinsics),
+and host programs, which read the system's headers as they were built to.
+`gd` on a `CONFIG_` symbol lands on its `#define` in `include/generated/autoconf.h`;
+`tags` also holds its Kconfig entry.
 
 The index is built here rather than left to the editor, so it is finished before
 the editor opens; clangd keys its shards on file contents, so a rebuild re-indexes

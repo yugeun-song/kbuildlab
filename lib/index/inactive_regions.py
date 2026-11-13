@@ -187,17 +187,6 @@ def instrument(text: str, fid: int, groups: list[Group]) -> str:
     return "\n".join(out)
 
 
-def original_lines(text: str, groups: list[Group]) -> list[int]:
-    """Line of `text` that each line of instrument(text, ...) came from."""
-    added = {}
-    for g in groups:
-        added[g.dir_last] = added.get(g.dir_last, 0) + 1
-    out = [1]
-    for no in range(1, text.count("\n") + 2):
-        out += [no] * (1 + added.get(no, 0))
-    return out
-
-
 _OUTPUT_DIRECTIVES = ("define", "undef", "pragma")
 
 
@@ -322,17 +311,14 @@ def _trace(job):
 
     wanted: marker id -> (key, names its conditionals test, group count,
     lines per group, has an include guard).
-    Returns {key: (state, later, origin)}: `state` maps each name those
-    conditionals depend on to its definition or None; `later` maps a name to
-    the chain of nested files that defines it before the header is left again;
-    `origin` says where each definition was read.
+    Returns {key: (state, lines)}: `state` maps each name those conditionals
+    depend on to its definition or None, and `lines` counts what it compiles.
     """
-    argv, source, cwd, wanted, vfs, renumber = job
+    argv, source, cwd, wanted, vfs = job
     proc = subprocess.Popen(argv + ["-ivfsoverlay", vfs, "-E", "-dD", source], cwd=cwd,
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             errors="replace")
     state: dict[str, str] = {}
-    where: dict[str, str] = {}
     entries: dict[str, list[dict]] = {}
     # A header can reach itself again before it is left -- linux/linkage.h
     # does, through asm/linkage.h -- so its open entries form a stack.
@@ -340,11 +326,9 @@ def _trace(job):
     pending = {key for key, *_ in wanted.values()}
     guarded = {w[0]: w[4] for w in wanted.values()}
     stack: list[str] = []
-    here, path, lineno = "", "", 0
     whole = False
     assert proc.stdout is not None
     for line in proc.stdout:
-        lineno += 1
         if not line.startswith("#"):
             continue
         m = _MARK.match(line)
@@ -358,21 +342,13 @@ def _trace(job):
                     open_at[key][-1][1]["live"].add(int(m.group(2)))
                 continue
             needed = _closure(names, state)
-            entry = {"state": {n: state.get(n) for n in needed}, "later": {}, "live": set(),
-                     "origin": {n: where[n] for n in needed if n in where}}
+            entry = {"state": {n: state.get(n) for n in needed}, "live": set()}
             entries.setdefault(key, []).append(entry)
             open_at.setdefault(key, []).append((len(stack), entry))
             continue
         m = _DEFINE.match(line)
         if m:
-            name = m.group(1)
-            state[name] = line.rstrip("\n")
-            shift = renumber.get(path)
-            where[name] = f"{here}:{shift[lineno - 2] if shift else lineno - 1}"
-            for opened in open_at.values():
-                for depth, entry in opened:
-                    if name in entry["state"] and len(stack) > depth:
-                        entry["later"].setdefault(name, stack[depth:])
+            state[m.group(1)] = line.rstrip("\n")
             continue
         m = _UNDEF.match(line)
         if m:
@@ -381,9 +357,7 @@ def _trace(job):
         m = _MARKER.match(line.rstrip("\n"))
         if not m:
             continue
-        lineno = int(m["line"])
         path = os.path.normpath(os.path.join(cwd, m["path"]))
-        here = os.path.relpath(path, cwd) if path.startswith(cwd + os.sep) else m["path"]
         if " 2" in m["flags"]:
             while stack and stack[-1] != path:
                 stack.pop()
@@ -400,12 +374,19 @@ def _trace(job):
     if whole:
         proc.kill()
     whole = proc.wait() == 0 or whole
-    best: dict[str, tuple[dict, dict, dict, int]] = {}
+    best: dict[str, tuple[dict, int]] = {}
     for fid, (key, _, _, lines, _) in wanted.items():
         if key in entries and key not in best:
             e = max(entries[key], key=lambda x: sum(lines[g] for g in x["live"]))
-            best[key] = (e["state"], e["later"], e["origin"], sum(lines[g] for g in e["live"]))
+            best[key] = (e["state"], sum(lines[g] for g in e["live"]))
     return best, whole
+
+
+def _define_flag(define: str) -> str:
+    """-D for a line of -dD output.  A command line runs before every forced
+    include, so it can add what a preamble lacks but not undo what one defines."""
+    name, body = re.match(r"#define (\w+(?:\([^)]*\))?) ?(.*)$", define, re.S).groups()
+    return f"-D{name}={body.rstrip()}"
 
 
 def _preamble(job):
@@ -517,28 +498,22 @@ class Memo:
 
 
 def settle(view: View, cache: str, sources: dict[str, dict], headers: list[dict],
-           chosen: dict[str, str], standins: dict[str, str], floor: str | None,
+           chosen: dict[str, str], floor: str | None,
            entry_args, jobs: int, verbose: bool, reads=None) -> dict[str, int]:
     """Give each header entry the macro state its context source has on entry.
 
-    chosen maps a header to the source whose command it borrowed; standins maps
-    an overlay copy to the tree header it shadows, since the build's include
-    path reaches the copy.  Entries are amended in place.
+    chosen maps a header to the source whose command it borrowed.  Entries are
+    amended in place.
 
     reads(source) names the files the build recorded that source as reading;
     with it, a source none of whose inputs changed is not preprocessed again.
     """
-    ksrc = view.ksrc
-    state_dir = os.path.join(cache, "state")
-    shutil.rmtree(state_dir, ignore_errors=True)
-    shadow = {tree: copy for copy, tree in standins.items()}
-
     workdir = os.path.join(cache, "settle")
     shutil.rmtree(workdir, ignore_errors=True)
     os.makedirs(workdir)
     memo = Memo(os.path.join(cache, "memo"))
     try:
-        done = _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
+        done = _settle(view, workdir, sources, headers, chosen, floor,
                        entry_args, jobs, verbose, memo, reads or (lambda source: None))
         memo.prune()
         return done
@@ -546,32 +521,28 @@ def settle(view: View, cache: str, sources: dict[str, dict], headers: list[dict]
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
+def _settle(view, workdir, sources, headers, chosen, floor,
             entry_args, jobs, verbose, memo, reads):
     ksrc = view.ksrc
     per_source: dict[str, dict] = {}
     texts_of: dict[int, list[tuple[str, str]]] = {}
     marked: dict[str, dict[str, str]] = {}
-    renumber: dict[str, dict[str, list[int]]] = {}
     traced = 0
     for fid, e in enumerate(headers):
         rel = os.path.relpath(e["file"], ksrc)
         src = chosen.get(rel)
         if src is None or src not in sources:
             continue
-        paths = [e["file"]] + ([shadow[e["file"]]] if e["file"] in shadow else [])
-        texts = []
-        for p in paths:
-            with open(p, encoding="utf-8", errors="replace") as f:
-                texts.append(f.read())
-        groups, _ = scan(texts[0])
+        with open(e["file"], encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        groups, _ = scan(text)
         if not groups:
             continue
         traced += 1
         lines = {g.gid: g.body_last - g.body_first + 1 for g in groups}
         per_source.setdefault(src, {})[fid] = (rel, tested_names(groups), len(groups), lines,
-                                               guard_of(texts[0]) is not None)
-        texts_of[fid] = list(zip(paths, texts))
+                                               guard_of(text) is not None)
+        texts_of[fid] = (e["file"], text)
 
     stamps: dict[str, list | None] = {}
     known: dict[str, list] = {}
@@ -582,24 +553,20 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
         argv = view.flags(entry_args(s), s["file"])
         read = reads(src)
         stamps[src] = None if read is None else Memo.stamp(
-            set(read) | {s["file"]} | {p for fid in wanted for p, _ in texts_of[fid]}, known)
+            set(read) | {s["file"]} | {texts_of[fid][0] for fid in wanted}, known)
         key = memo.key("trace", argv, sorted(w[0] for w in wanted.values()), stamps[src])
         found = memo.get(key) if stamps[src] is not None else None
         if found is not None:
             target.update(found)
             continue
         for fid in wanted:
-            for n, (p, text) in enumerate(texts_of[fid]):
-                own = scan(text)[0]
-                if len(own) != wanted[fid][2]:
-                    continue
-                copy = os.path.join(workdir, f"{fid}.{n}")
-                with open(copy, "w") as f:
-                    f.write(instrument(text, fid, own))
-                marked.setdefault(src, {})[os.path.normpath(p)] = copy
-                renumber.setdefault(src, {})[os.path.normpath(p)] = original_lines(text, own)
-        jobs_a.append((argv, s["file"], s["directory"], wanted,
-                       _vfs(workdir, marked[src]), renumber[src]))
+            p, text = texts_of[fid]
+            own = scan(text)[0]
+            copy = os.path.join(workdir, str(fid))
+            with open(copy, "w") as f:
+                f.write(instrument(text, fid, own))
+            marked.setdefault(src, {})[os.path.normpath(p)] = copy
+        jobs_a.append((argv, s["file"], s["directory"], wanted, _vfs(workdir, marked[src])))
         keys_a.append(key if stamps[src] is not None else None)
     unfinished = 0
     with cf.ProcessPoolExecutor(jobs) as ex:
@@ -610,8 +577,7 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
             unfinished += not whole
     retraced = len(jobs_a)
 
-    written = 0
-    guards: dict[str, str | None] = {}
+    written = held = 0
     empty = os.path.join(workdir, "empty.h")
     open(empty, "w").close()
     jobs_b, keys_b = [], []
@@ -638,53 +604,32 @@ def _settle(view, state_dir, workdir, sources, headers, chosen, shadow, floor,
             unfinished += not whole
 
     for rel, have in have_of.items():
-        want_state, later, origin, _ = target[rel]
-        fix, reopen = [], []
+        want_state = target[rel][0]
+        flags = []
         for name in sorted(want_state):
             want = want_state[name]
             if want == have.get(name):
                 continue
-            fix.append(f"#undef {name}")
-            if want:
-                fix.append(f"{want.rstrip()} /* {origin[name]} */")
-            else:
-                reopen += later.get(name, [])
-        # A name the header's own includes define later must be defined
-        # there again, so the files on the way to it are made enterable.
-        for nested in dict.fromkeys(reopen):
-            guard = guards.get(nested)
-            if guard is None and nested not in guards:
-                try:
-                    with open(nested, encoding="utf-8", errors="replace") as f:
-                        guard = guard_of(f.read())
-                except OSError:
-                    guard = None
-                guards[nested] = guard
-            if guard:
-                fix.append(f"#undef {guard}")
-        if not fix:
+            if have.get(name) is not None:
+                held += 1
+            elif want:
+                flags.append(_define_flag(want))
+        if not flags:
             continue
-        path = os.path.join(state_dir, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(f"/* Macro state {chosen[rel]} has on entering this header. */\n")
-            if floor:
-                f.write(f"#include <{floor}>\n")
-            f.write("\n".join(fix) + "\n")
         e = by_rel[rel]
         args = entry_args(e)
         e.pop("arguments", None)
-        e["command"] = shlex.join(args[:-3] + ["-include", path] + args[-3:])
+        e["command"] = shlex.join(args[:-3] + flags + args[-3:])
         written += 1
     if verbose:
         print(f"    {len(target)} headers traced through {len(per_source)} sources "
               f"({retraced} preprocessed, the rest unchanged since last time); "
-              f"{written} needed their macro state corrected, "
+              f"{written} needed macros defined, {held} macro(s) its preamble defines stay, "
               f"{traced - len(target)} are never reached by their source"
               + (f"; {unfinished} clang run(s) did not finish and are not kept" if unfinished else ""))
     empty = {os.path.relpath(headers[fid]["file"], ksrc): src
              for src, wanted in per_source.items() for fid, w in wanted.items()
-             if w[0] not in target or not target[w[0]][3]}
+             if w[0] not in target or not target[w[0]][1]}
     return {"traced": len(target), "corrected": written, "unreached": traced - len(target),
             "empty": empty}
 
@@ -1129,8 +1074,8 @@ def _same(a: str | None, b: str | None) -> bool:
 
 
 def identity(build: tuple[str, str], clang: tuple[str, str], closure: set[str],
-             pairs: list[tuple[str, str]], own: set[tuple[str, str]]) -> tuple[str, dict]:
-    """A forced include holding the build compiler's answers where clang's differ.
+             pairs: list[tuple[str, str]], own: set[tuple[str, str]]) -> tuple[list[str], dict]:
+    """Command-line macros holding the build compiler's answers where clang's differ.
 
     build and clang are each compiler's (predefined macros, answers) output for
     the same questions; own names the pairs only clang's headers ask, which keep
@@ -1140,14 +1085,14 @@ def identity(build: tuple[str, str], clang: tuple[str, str], closure: set[str],
     """
     bpre, cpre = macros(build[0]), macros(clang[0])
     bans, cans = macros(build[1]), macros(clang[1])
-    lines = []
+    flags = []
     meta = {"macros": [], "followed": [], "kept": [], "redefined": []}
     for name in sorted(closure):
         if _same(bpre.get(name), cpre.get(name)):
             continue
-        lines.append(f"#undef {name}")
+        flags.append(f"-U{name}")
         if name in bpre:
-            lines.append(f"#define {name} {bpre[name]}")
+            flags.append(f"-D{name}={bpre[name]}")
         meta["macros"].append(name)
     for op in sorted({op for op, _ in pairs}):
         mine = [(f"KBL_ANSWER_{n}", arg, (o, arg) in own)
@@ -1165,13 +1110,9 @@ def identity(build: tuple[str, str], clang: tuple[str, str], closure: set[str],
         if not differs:
             continue
         meta["redefined"].append(op)
-        lines += [f"#undef {op}", f"#define {op}(x) __kbl_{op.strip('_')}_##x"]
-        lines += [f"#define __kbl_{op.strip('_')}_{arg} {v}" for arg, v in sorted(table.items())]
-    if not lines:
-        return "", meta
-    version = bpre.get("__VERSION__", "the build compiler")
-    return (f"/* Answers of {version} where clang's differ. */\n" + "\n".join(lines) + "\n",
-            meta)
+        flags += [f"-U{op}", f"-D{op}(x)=__kbl_{op.strip('_')}_##x"]
+        flags += [f"-D__kbl_{op.strip('_')}_{arg}={v}" for arg, v in sorted(table.items())]
+    return flags, meta
 
 
 def ask() -> None:
