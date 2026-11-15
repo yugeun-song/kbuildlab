@@ -127,7 +127,8 @@ EOF
 # The workspace's own files -- the text files at its top and at the top of each
 # directory a tree.conf points into, where the rootfs and firmware it boots are
 # built -- and the source checkouts it builds them from, as path, URL and
-# commit read off each checkout.  Dot files and build output are not recipes.
+# commit read off each checkout.  Dot files and build output are not recipes,
+# and a file that is not in English stays in the workspace alone.
 _record_workspace() {
     local ws dst d f rel v t
     ws="$(kbl_workspace_opt)" || return 0
@@ -152,6 +153,16 @@ _record_workspace() {
                 rm -f "$dst/$rel"
                 continue
             fi
+            python3 "$KBL_REPO/lib/english.py" -q "$f"
+            case $? in
+                0) ;;
+                1)
+                    say "not recorded $rel (not in English, and this repository holds English only)"
+                    rm -f "$dst/$rel"
+                    continue
+                    ;;
+                *) die "record: cannot read $f" ;;
+            esac
             mkdir -p "$dst/$(dirname "$rel")" && _lab_copy "$f" "$dst/$rel" "$ws" @KBL_WORKSPACE@
         done
     done

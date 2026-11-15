@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Hold a checkout to its formatters: shfmt lays out the shell and ruff the
-Python, each by the settings the checkout carries (.editorconfig, ruff.toml).
+"""Hold a checkout to its formatters and to English: shfmt lays out the shell and
+ruff the Python, each by the settings the checkout carries (.editorconfig,
+ruff.toml), and no tracked file or commit message holds a letter of another
+script than Latin.
 
     style.py [DIR]
 
@@ -14,6 +16,9 @@ import subprocess
 import sys
 
 here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(here), "lib"))
+import english  # noqa: E402
+
 failed = 0
 checked = 0
 
@@ -42,18 +47,43 @@ def formatted(root):
     return len(shells)
 
 
+def in_english(root):
+    rc, out, err = run(root, "git", "ls-files", "-z")
+    check(rc == 0, "git lists the tracked files of %s" % root, err)
+    found = []
+    for name in filter(None, out.split("\0")):
+        path = os.path.join(root, name)
+        if not os.path.isfile(path) or os.path.islink(path):
+            continue
+        text = english.read(path)
+        hit = english.foreign(text) if text is not None else None
+        if hit:
+            found.append("%s:%d: %s" % (name, hit[0], hit[1]))
+    check(not found, "every tracked file is in English", "\n".join(found))
+    rc, out, err = run(root, "git", "log", "--format=%h%x00%B%x01")
+    check(rc == 0, "git lists the commits of %s" % root, err)
+    found = []
+    for record in out.split("\x01"):
+        commit, _, message = record.strip().partition("\0")
+        hit = english.foreign(message)
+        if hit:
+            found.append("%s: %s" % (commit, hit[1]))
+    check(not found, "every commit message is in English", "\n".join(found))
+
+
 def main(argv):
     if argv and argv[0] in ("-h", "--help"):
         print(__doc__.strip())
         return 0
     root = os.path.abspath(argv[0]) if argv else os.path.dirname(here)
-    for tool in ("shfmt", "ruff"):
+    for tool in ("shfmt", "ruff", "git"):
         if shutil.which(tool) is None:
             print("style.py: %s is not installed" % tool, file=sys.stderr)
             return 2
     for name in (".editorconfig", "ruff.toml"):
         check(os.path.isfile(os.path.join(root, name)), "%s carries %s" % (root, name))
     shells = formatted(root)
+    in_english(root)
     print(
         "%d checks on %s (%d shell files), %s"
         % (checked, root, shells, "all hold" if not failed else "%d failed" % failed)

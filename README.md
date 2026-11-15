@@ -158,8 +158,9 @@ Every `config` and `update` records the tree in this repository under
 `lab/workspace/` keeps the workspace's own files (those at its top and at the top
 of each directory a `tree.conf` points into, where the rootfs and firmware are
 built) and `sources` (path, URL and commit of each non-kernel checkout, such as
-buildroot and u-boot). A file over GitHub's 100 MiB limit is left out by name. A
-record spells the workspace path as `@KBL_WORKSPACE@`, so it names no machine.
+buildroot). A file over GitHub's 100 MiB limit is left out by name, and so is one
+that is not in English: this repository holds English only. A record spells the
+workspace path as `@KBL_WORKSPACE@`, so it names no machine.
 
 So the workspace can be deleted, or kbuildlab cloned onto another machine:
 
@@ -917,7 +918,8 @@ lib/registry.sh        trees, inspect, add, get/set/unset, edit, mv, rm, prune
                        (lib/treeinfo.py reads what they report)
 lib/build.sh           the build container and its toolchain; sync, config, build,
                        module staging (lib/softconfig.py applies the soft preset)
-lib/lab.sh             init and the lab/ records
+lib/lab.sh             init and the lab/ records (lib/english.py tells which files
+                       are not in English)
 lib/tags.sh            tags: ctags, cscope, gtags and the clangd index
 lib/update.sh          update
 lib/firmware.sh        firmware: the global one and a tree's own
@@ -934,7 +936,8 @@ completions/           the bash and zsh completions install.sh puts in place
 tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs,
                        fdt.py against fdtget and damaged blobs, the refusals of dt and
                        firmware, guest.py, which boots a tree and runs commands in it,
-                       and style.py, which holds a checkout to its formatters
+                       and style.py, which holds a checkout to its formatters and to
+                       English
 ```
 
 ## Dependencies
@@ -952,6 +955,7 @@ mtools, for a `ROOT=disk` guest. `dtc`, for `kbuildlab dt`.
 
 To work on kbuildlab: `shfmt` lays out the shell and `ruff` the Python, by
 `.editorconfig` and `ruff.toml`. `shfmt -w .` and `ruff format .` format a
-checkout, and `tests/style.py` fails while either would change a file.
+checkout, and `tests/style.py` fails while either would change a file, or a
+tracked file or commit message is not in English.
 
 Nothing is installed for you, and no system setting is changed.
