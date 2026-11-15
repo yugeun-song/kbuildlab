@@ -6,9 +6,9 @@ MASK = (1 << 64) - 1
 
 
 class _Firmware:
-    path = None
-    spans = []
-    offsets = []
+    path: str | None = None
+    spans: list[tuple[int, int]] = []
+    offsets: list[int] = []
 
 
 def _spans(path):
@@ -63,10 +63,13 @@ def _offset_of(pc):
 
 
 def _place(offset):
+    path = _Firmware.path
+    if path is None:
+        raise gdb.GdbError("fw-symbols has not been given the firmware's ELF yet")
     if offset in _Firmware.offsets:
         return
     gdb.execute(
-        'add-symbol-file "%s" -o %#x' % (_Firmware.path.replace("\\", "\\\\").replace('"', '\\"'), offset),
+        'add-symbol-file "%s" -o %#x' % (path.replace("\\", "\\\\").replace('"', '\\"'), offset),
         to_string=True,
     )
     _Firmware.offsets.append(offset)

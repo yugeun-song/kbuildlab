@@ -110,6 +110,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import dataclasses
 import fcntl
 import functools
 import hashlib
@@ -127,6 +128,8 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from collections.abc import Sequence
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -504,11 +507,11 @@ def write_identities(
         if bpre is None or bans is None:
             continue
         argv = targets.argv(sig)
-        clang = tuple(
+        cpre, cans = (
             subprocess.run(argv + ["-E", "-dM", "-x", "c", src], input=ask, capture_output=True, text=True).stdout
             for src in (os.devnull, "-")
         )
-        answer, m = inactive_regions.identity((bpre, bans), clang, closure, pairs, own)
+        answer, m = inactive_regions.identity((bpre, bans), (cpre, cans), closure, pairs, own)
         for k in meta:
             meta[k].update(m[k])
         if answer:
@@ -951,7 +954,7 @@ class Targets:
 
         flag_sets = sorted({signature(a) for a in commands})
         with cf.ThreadPoolExecutor(jobs) as ex:
-            singles = {(sig[0], ()) for sig in flag_sets}
+            singles: set[tuple[Any, tuple[str, ...]]] = {(sig[0], ()) for sig in flag_sets}
             singles |= {(sig[0], g) for sig in flag_sets for g in option_groups(list(sig[1:]))}
             where = dict(ex.map(triple, sorted(singles)))
             self.moving = {
@@ -1466,7 +1469,7 @@ def tree_fragments(
     read: list[str],
     jobs: int,
     header_diagnostics: bool = False,
-    quiet: list[str] = (),
+    quiet: Sequence[str] = (),
 ) -> list[str]:
     """The tree's blocks of clangd policy.  What each file is compiled with --
     its target, the flags clang takes -- is already in its database entry;
@@ -2067,6 +2070,13 @@ def run_check(tree: str, files: list[str], jobs: int, journal=None, progress_eve
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass
+class _Indexing:
+    done: bool = False
+    last: str = ""
+    replies: dict[Any, Any] = dataclasses.field(default_factory=dict)
+
+
 def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> bool:
     """Build clangd's background index now, from the command line.
 
@@ -2109,16 +2119,18 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    state = {"done": False, "last": "", "replies": {}}
+    state = _Indexing()
     lock = threading.Lock()
 
     def write(obj):
         body = json.dumps(obj).encode()
+        assert proc.stdin is not None
         proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
         proc.stdin.flush()
 
     def reader():
         out = proc.stdout
+        assert out is not None
         while True:
             line = out.readline()
             if not line:
@@ -2138,13 +2150,13 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
                     if kind == "report":
                         pct = v.get("percentage")
                         msgtxt = v.get("message", "")
-                        state["last"] = f"{pct}% {msgtxt}".strip() if pct is not None else msgtxt
+                        state.last = f"{pct}% {msgtxt}".strip() if pct is not None else msgtxt
                     elif kind == "end":
-                        state["done"] = True
+                        state.done = True
                 elif "id" in msg and "method" in msg:
                     write({"jsonrpc": "2.0", "id": msg["id"], "result": None})
                 elif "id" in msg:
-                    state["replies"][msg["id"]] = msg
+                    state.replies[msg["id"]] = msg
 
     threading.Thread(target=reader, daemon=True).start()
     write(
@@ -2174,13 +2186,13 @@ def warm_index(tree: str, jobs: int, timeout: float, quiet: bool = False) -> boo
     )
 
     moved = time.time()
-    seen = ""
+    seen: str = ""
     last_shown = 0.0
     ok = False
     try:
         while time.time() - moved < timeout:
             with lock:
-                done, last = state["done"], state["last"]
+                done, last = state.done, state.last
             if done:
                 ok = True
                 break
@@ -2498,7 +2510,7 @@ def altered_config_units(tree: str, readings: inactive_regions.Readings) -> set[
     compile is not what the tree's config compiles."""
     ksrc = kernel_root(tree)
     symbols: set[str] | None = None
-    lines_of: dict[str, tuple[list[int], inactive_regions.Layout]] = {}
+    lines_of: dict[str, tuple[list[int], inactive_regions.Layout | None]] = {}
     reads = []
     for u in readings.units:
         mine = {os.path.relpath(u["file"], ksrc)} | {d for d in unit_deps(u) or () if not os.path.isabs(d)}
@@ -2523,6 +2535,7 @@ def altered_config_units(tree: str, readings: inactive_regions.Readings) -> set[
         live = readings.live(n)
         for rel in undefs:
             hits, lay = lines_of[rel]
+            assert lay is not None
             if any(lay.owner[no] < 0 or lay.owner[no] in live.get(rel, ()) for no in hits):
                 altered.add(n)
                 break
@@ -2708,13 +2721,14 @@ def audit_regions(
         t.join()
     rows = []
     for rel in rels:
-        if greyed.get(rel) is None:
+        marks = greyed.get(rel)
+        if marks is None:
             rows.append((rel, "clangd reported nothing", 0, 0, 0, None))
             continue
         with open(os.path.join(ksrc, rel), encoding="utf-8", errors="replace") as f:
             lay = inactive_regions.Layout(f.read())
         seen = [(r, n, os.path.relpath(readings.units[u]["file"], ksrc)) for r, n, u in readings.of(rel)]
-        rows.append((rel, *verdict(lay, seen, set(greyed[rel]) & lay.visible, lacking)))
+        rows.append((rel, *verdict(lay, seen, set(marks) & lay.visible, lacking)))
     return sorted(rows), carried
 
 

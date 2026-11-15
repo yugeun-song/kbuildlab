@@ -46,7 +46,7 @@ OUTPUTS = {name for names in INDEXES.values() for name in names}
 
 
 class Memo(ir.Memo):
-    def __init__(self, directory: str, fallback: str, code: str):
+    def __init__(self, directory: str, fallback: str | None, code: str):
         super().__init__(directory, code)
         self.fallback = fallback
 
@@ -463,7 +463,7 @@ def cmd_harvest(args) -> int:
                     continue
                 gone.append(rel)
             elif (
-                args.keep
+                started is not None
                 and d == up
                 and rel in OUTPUTS
                 and not is_whiteout(path)

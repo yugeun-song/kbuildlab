@@ -966,7 +966,9 @@ mtools, for a `ROOT=disk` guest. `dtc`, for `kbuildlab dt`.
 
 To work on kbuildlab: `shfmt` lays out the shell and `ruff` the Python, by
 `.editorconfig` and `ruff.toml`. `shfmt -w .` and `ruff format .` format a
-checkout, and `tests/style.py` fails while either would change a file, or a
-tracked file or commit message is not in English.
+checkout. `ty.toml` tells the `ty` type checker, and so an editor, where the
+modules are (`lib/`, `lib/index/`) and which exist only inside a debugger.
+`tests/style.py` fails while a formatter would change a file, `ty` reports
+anything, or a tracked file or commit message is not in English.
 
 Nothing is installed for you, and no system setting is changed.

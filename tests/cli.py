@@ -77,7 +77,10 @@ for c in cli.COMMANDS:
             % (c.name, sorted(parsed - described) or "-", sorted(described - parsed) or "-")
         )
 
-dispatch = re.search(r"^\{\n[ \t]+cmd=.*?^\}", src, re.S | re.M).group(0)
+block = re.search(r"^\{\n[ \t]+cmd=.*?^\}", src, re.S | re.M)
+if block is None:
+    raise SystemExit("cli.py: bin/kbuildlab has no dispatch block to read")
+dispatch = block.group(0)
 dispatched = set()
 for m in re.finditer(r"^[ \t]+([a-z][a-z |]*)\)[ \t]+cmd_", dispatch, re.M):
     dispatched.update(n.strip() for n in m.group(1).split("|"))

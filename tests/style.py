@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Hold a checkout to its formatters and to English: shfmt lays out the shell and
-ruff the Python, each by the settings the checkout carries (.editorconfig,
-ruff.toml), and no tracked file or commit message holds a letter of another
-script than Latin.
+"""Hold a checkout to its formatters, its type checker and to English: shfmt lays
+out the shell and ruff the Python, each by the settings the checkout carries
+(.editorconfig, ruff.toml); ty finds nothing to report with the paths and
+modules ty.toml states; and no tracked file or commit message holds a letter of
+another script than Latin.
 
     style.py [DIR]
 
 DIR is the checkout to hold, this one when omitted.  Nothing is written: run
 `shfmt -w .` and `ruff format .` in the checkout to put right what this reports.
+ty is taken from $KBL_TY, else from PATH; without one, types are not checked and
+the last line says so.
 """
 
 import os
@@ -47,6 +50,16 @@ def formatted(root):
     return len(shells)
 
 
+def typed(root):
+    ty = os.environ.get("KBL_TY") or shutil.which("ty")
+    if not ty:
+        return False
+    check(os.path.isfile(os.path.join(root, "ty.toml")), "%s carries ty.toml" % root)
+    rc, out, err = run(root, ty, "check", "--output-format", "concise", ".")
+    check(rc == 0, "ty reports nothing", out + err)
+    return True
+
+
 def in_english(root):
     rc, out, err = run(root, "git", "ls-files", "-z")
     check(rc == 0, "git lists the tracked files of %s" % root, err)
@@ -83,10 +96,17 @@ def main(argv):
     for name in (".editorconfig", "ruff.toml"):
         check(os.path.isfile(os.path.join(root, name)), "%s carries %s" % (root, name))
     shells = formatted(root)
+    types = typed(root)
     in_english(root)
     print(
-        "%d checks on %s (%d shell files), %s"
-        % (checked, root, shells, "all hold" if not failed else "%d failed" % failed)
+        "%d checks on %s (%d shell files%s), %s"
+        % (
+            checked,
+            root,
+            shells,
+            "" if types else "; no ty, so types were not checked",
+            "all hold" if not failed else "%d failed" % failed,
+        )
     )
     return 1 if failed else 0
 

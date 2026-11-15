@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import zlib
+from typing import Any
 
 OPENERS = ("if", "ifdef", "ifndef")
 BRANCHES = ("elif", "else", "elifdef", "elifndef")
@@ -398,7 +399,10 @@ def _trace(job):
 def _define_flag(define: str) -> str:
     """-D for a line of -dD output.  A command line runs before every forced
     include, so it can add what a preamble lacks but not undo what one defines."""
-    name, body = re.match(r"#define (\w+(?:\([^)]*\))?) ?(.*)$", define, re.S).groups()
+    found = re.match(r"#define (\w+(?:\([^)]*\))?) ?(.*)$", define, re.S)
+    if found is None:
+        raise ValueError("not a #define line: %r" % define)
+    name, body = found.groups()
     return f"-D{name}={body.rstrip()}"
 
 
@@ -526,7 +530,7 @@ def settle(
     jobs: int,
     verbose: bool,
     reads=None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Give each header entry the macro state its context source has on entry.
 
     chosen maps a header to the source whose command it borrowed.  Entries are
@@ -562,7 +566,7 @@ def settle(
 def _settle(view, workdir, sources, headers, chosen, floor, entry_args, jobs, verbose, memo, reads):
     ksrc = view.ksrc
     per_source: dict[str, dict] = {}
-    texts_of: dict[int, list[tuple[str, str]]] = {}
+    texts_of: dict[int, tuple[str, str]] = {}
     marked: dict[str, dict[str, str]] = {}
     traced = 0
     for fid, e in enumerate(headers):

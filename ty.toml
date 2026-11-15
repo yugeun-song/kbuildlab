@@ -1,0 +1,5 @@
+[environment]
+extra-paths = ["lib", "lib/index"]
+
+[analysis]
+allowed-unresolved-imports = ["gdb", "gdb.**"]

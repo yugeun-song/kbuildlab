@@ -101,15 +101,17 @@ def main():
         )
         return 1
 
-    names = list(args.names)
-    if args.grep:
-        pat = re.compile(args.grep)
+    names: list[str] = list(args.names)
+    grep: str | None = args.grep
+    limit: int = args.limit
+    if grep:
+        pat = re.compile(grep)
         found = sorted({s.name for s in prog.symbols() if pat.search(s.name)})
-        print(f"{len(found)} symbol(s) matching {args.grep!r}")
-        for n in found[: args.limit or 40]:
+        print(f"{len(found)} symbol(s) matching {grep!r}")
+        for n in found[: limit or 40]:
             print(f"  {n}")
-        if args.limit:
-            names = found[: args.limit]
+        if limit:
+            names = found[:limit]
         else:
             return 0
 

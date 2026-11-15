@@ -299,7 +299,8 @@ def cmd_list(args):
         _list_blocks(infos)
         return 0
     head = ["ID", "ARCH", "KERNEL", "REF", "COMMIT", "BUILT", "GUESTS", "SOURCE"]
-    table = []
+    table: list[list[str]] = []
+    flagged: list[bool] = []
     for d in infos:
         bad = bool(d["problems"])
         table.append(
@@ -312,17 +313,17 @@ def cmd_list(args):
                 _age(d["built"]),
                 str(len(d["guests"])) if d["guests"] else "-",
                 d["src"] or "-",
-                bad,
             ]
         )
+        flagged.append(bad)
     width = [max(len(head[i]), *(len(r[i]) for r in table)) for i in range(len(head) - 1)]
     print("  ".join(c("1", h.ljust(width[i])) for i, h in enumerate(head[:-1])) + "  " + c("1", head[-1]))
-    for r in table:
+    for r, bad in zip(table, flagged):
         cells = []
-        for i, v in enumerate(r[:-1]):
+        for i, v in enumerate(r):
             cell = v.ljust(width[i]) if i < len(width) else v
             if i == 0:
-                cell = c("1;31" if r[-1] else "1", cell)
+                cell = c("1;31" if bad else "1", cell)
             elif i == 5:
                 cell = c("2", cell) if v == "-" else c("32", cell)
             elif i == 6 and v != "-":
