@@ -45,13 +45,18 @@ v4.6-arm64 and the mainline trees once shared through hardlinks were copied out 
 
 ## buildroot and u-boot
 
-Pinned to release tags and not moved by kernel updates. The rootfs builds inside the
-`kbuildlab:latest` container; early-boot debugging needs no rootfs.
+buildroot is pinned to a release tag and not moved by kernel updates. The rootfs
+builds inside the `kbuildlab:latest` container; early-boot debugging needs no rootfs.
 
 | What | Where | Tag | Source | Commit |
 |---|---|---|---|---|
 | buildroot | `.buildroot/buildroot` | `2026.02.3` | `https://git.buildroot.net/buildroot` | `679b9ead7620bbf193620d1ebf56f53c1764d37a` |
-| u-boot | `firmware/u-boot` | `v2026.07` | `https://source.denx.de/u-boot/u-boot.git` | `ece349ade2973e220f524ce59e59711cc919263f` |
+
+u-boot is no longer kept in this workspace. Since 2026-11-16 kbuildlab clones it from
+`https://source.denx.de/u-boot/u-boot.git` into its own data directory and moves it to
+the newest release tag (`presets/firmware/ARCH.conf` in kbuildlab); `kbuildlab firmware`
+prints the version and the image each tree boots. The last one pinned here was
+`v2026.07` (`ece349ade2973e220f524ce59e59711cc919263f`).
 
 ## Update log
 
