@@ -11,6 +11,7 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 source "${KBL_REPO}/lib/common.sh"
 
 PORT=""; PORT_SET=0; BOOTBREAK=1; STOP=""; STOP_AT=""; LIST=0; FIRST=0; JSON=0
+FW_RELOCATED=0
 declare -a REST=() PASS=()
 _usage() {
     cat <<USAGE
@@ -18,7 +19,7 @@ kbuildlab attach [TREE] [options] [-- GDB ARGS]
   attach gdb to a running guest, stopped at head.S _text by default
 
   --no-bootbreak|--raw   attach without running to _text (already-booted guest)
-  --stop WHERE           text (default) | firmware | start_kernel
+  --stop WHERE           text (default) | firmware | relocated | start_kernel
   --port|-p N            attach by gdb port; the tree is recovered from the
                          guest's own run state, so TREE may be omitted
   --list|-l              list live guests and exit; never prompts
@@ -58,8 +59,9 @@ done
 case "$STOP" in
     ""|text|_text)             : ;;
     firmware|_start|raw|fw)    BOOTBREAK=0 ;;
+    relocated)                 BOOTBREAK=0; FW_RELOCATED=1 ;;
     start_kernel|start-kernel) STOP_AT="start_kernel" ;;
-    *) die "attach --stop: unknown '$STOP' (text|firmware|start_kernel)" ;;
+    *) die "attach --stop: unknown '$STOP' (text|firmware|relocated|start_kernel)" ;;
 esac
 
 # --------------------------------------------------------------- which guest
@@ -231,9 +233,18 @@ if [[ -r "$_st" ]]; then
         # (reset _start, pre-relocation). Kernel symbols come from vmlinux; their
         # address ranges do not overlap, so both resolve.
         if [[ "$_bmode" == uboot ]]; then
-            _ub="$(kbl_tree_get "$tree" UBOOT)"
-            _ub="$(kbl_tree_path "$tree" "$_ub")"
-            [[ -n "$_ub" && -f "${_ub%.bin}" ]] && FWSYM="${_ub%.bin}"
+            _ub="$(sed -n 's/^KBL_FIRMWARE=//p' "$_st" | head -1)"
+            _fwof="$( (kbl_tree_firmware "$tree"; printf '%s\n%s\n' "$_fw_image" "$_fw_symbols") 2>/dev/null)" || _fwof=""
+            if [[ -n "$_ub" && "$_ub" == "$(head -1 <<<"$_fwof")" ]]; then
+                FWSYM="$(tail -n +2 <<<"$_fwof")"
+                if [[ -z "$FWSYM" || ! -f "$FWSYM" ]]; then
+                    FWSYM=""; say "firmware     no symbols: its settings name no SYMBOLS file that exists"
+                elif [[ "$_ub" -nt "$_st" ]]; then
+                    FWSYM=""; say "firmware     no symbols: $_ub was built again after this guest started"
+                fi
+            else
+                say "firmware     no symbols: this guest boots ${_ub:-a firmware its run did not record}, not the tree's"
+            fi
             # u-boot linked over the kernel's own entry (riscv64: RAM base +
             # text_offset, where booti moves the kernel) leaves its symbols bound to
             # the kernel-stage breakpoints the run-to-_text sets, and gdb 18.1 aborts
@@ -390,7 +401,14 @@ if [[ -n "$_binf" ]]; then
 else
     ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
 fi
-[[ -n "$FWSYM" ]] && ARGS+=(-ex "add-symbol-file $FWSYM -o 0")
+[[ $FW_RELOCATED -eq 0 || -n "$FWSYM" ]] \
+    || die "attach --stop relocated: no firmware symbols for this guest (it must boot the tree's firmware through uboot)"
+if [[ -n "$FWSYM" && $BOOTBREAK -eq 0 ]]; then
+    ARGS+=(-ex "source ${KBL_REPO}/lib/gdb-firmware.py" -ex "fw-symbols $FWSYM")
+    [[ $FW_RELOCATED -eq 1 ]] && ARGS+=(-ex "fw-relocated")
+elif [[ -n "$FWSYM" ]]; then
+    ARGS+=(-ex "add-symbol-file $FWSYM -o 0")
+fi
 # Default: run straight to the kernel's very first instruction (head.S _text),
 # past the QEMU reset shim -- where early-boot debugging begins, and where the
 # pre-MMU physical regime is symbolized so pwndbg's context stops erroring.
