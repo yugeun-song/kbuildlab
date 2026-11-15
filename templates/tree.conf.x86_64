@@ -8,3 +8,4 @@ QMP_PORT=11234
 STORAGE=nvme
 LAN_NICS=virtio-net-pci virtio-net-pci
 QEMU_ARGS=-device qemu-xhci
+MEM=4G

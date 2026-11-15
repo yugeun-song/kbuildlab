@@ -9,3 +9,4 @@ STORAGE=emmc
 LAN_NICS=virtio-net-pci virtio-net-pci
 QEMU_ARGS=-device qemu-xhci
 IOMMU=1
+MEM=4G
