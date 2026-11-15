@@ -7,6 +7,9 @@ fdt.py id FILE                 a digest of the hardware it describes (/chosen le
 fdt.py check FILE              status 0 for a well-formed blob
 fdt.py kind FILE               tree or overlay; status 2 when FILE is no blob
 fdt.py carried WANT GOT        what of WANT did not arrive in GOT; status 1 when something did not
+fdt.py agrees BASE OWN [--load NAME START SIZE]...
+                               where OWN states other hardware than BASE, sets memory aside that
+                               the machine lacks, or covers what is loaded at START; status 1 then
 fdt.py prop FILE PATH NAME     one property's value; status 1 when it is not there
 fdt.py image-size IMAGE        the memory a Linux Image header says the kernel occupies
 """
@@ -26,6 +29,8 @@ MAGIC = 0xD00DFEED
 HEADER = 40
 BEGIN_NODE, END_NODE, PROP, NOP, END = 1, 2, 3, 4, 9
 SEEDS = {("/chosen", "kaslr-seed"), ("/chosen", "rng-seed")}
+OWN = ("/chosen", "/aliases", "/__symbols__", "/__fixups__", "/__local_fixups__")
+RESERVED = "/reserved-memory"
 IMAGE_MAGICS = (b"ARM\x64", b"RSC\x05")
 SHOWN_CELLS = 16
 MAX_DEPTH = 64
@@ -510,6 +515,140 @@ def carried(want, got):
     return out
 
 
+def _merged(spans):
+    out = []
+    for base, size in sorted(s for s in spans if s[1]):
+        if out and base <= out[-1][0] + out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][0] + out[-1][1], base + size) - out[-1][0])
+        else:
+            out.append((base, size))
+    return out
+
+
+def _inside(base, size, spans):
+    return any(b <= base and base + size <= b + s for b, s in spans)
+
+
+def _overlap(a, b):
+    return bool(a[1] and b[1]) and a[0] < b[0] + b[1] and b[0] < a[0] + a[1]
+
+
+def memory(tree):
+    return _merged(
+        r for n in tree.root.children if n.text("device_type") == "memory" and n.enabled() for r in ranges(n)
+    )
+
+
+def agrees(base, own, loads=()):
+    out, added = [], []
+
+    def same(x, y):
+        path = x.path
+        for k, v in x.props.items():
+            if k not in y.props:
+                out.append("- %s %s" % (path, k))
+            elif y.props[k] != v:
+                out.append(
+                    "~ %s %s: %s -> %s"
+                    % (path, k, render(v, SHOWN_CELLS) or "(empty)", render(y.props[k], SHOWN_CELLS) or "(empty)")
+                )
+        for k, v in y.props.items():
+            if k not in x.props:
+                out.append("+ %s %s%s" % (path, k, (": " + render(v, SHOWN_CELLS)) if v else ""))
+
+    def visit(x, y):
+        same(x, y)
+        theirs = {n.name: n for n in y.children}
+        for n in x.children:
+            m = theirs.pop(n.name, None)
+            if n.path in OWN:
+                continue
+            if m is None:
+                out.append("- %s (node)" % n.path)
+            elif n.path == RESERVED:
+                same(n, m)
+                kept = {c.name: c for c in m.children}
+                for child in n.children:
+                    if child.name in kept:
+                        visit(child, kept.pop(child.name))
+                    else:
+                        out.append("- %s (node)" % child.path)
+                added.extend(kept.values())
+            else:
+                visit(n, m)
+        for m in theirs.values():
+            if m.path == RESERVED:
+                added.extend(m.children)
+            elif m.path not in OWN:
+                out.append("+ %s (node)" % m.path)
+
+    visit(base.root, own.root)
+    mem = memory(own)
+    held = ", ".join(span(*m) for m in mem) or "none"
+    root = own.root
+    reserved = next((n for n in root.children if n.path == RESERVED), None)
+    if reserved is not None and not any(n.path == RESERVED for n in base.root.children):
+        for k in ("#address-cells", "#size-cells"):
+            if not reserved.cells(k) or reserved.cells(k)[:1] != root.cells(k)[:1]:
+                out.append("! %s %s: the kernel passes over the whole node unless it states the root's" % (RESERVED, k))
+        if "ranges" not in reserved.props:
+            out.append("! %s ranges: the kernel passes over the whole node without it" % RESERVED)
+
+    new = {n.path for n in added}
+    fixed = []
+    for n in reserved.children if reserved is not None else []:
+        if n.enabled():
+            fixed.extend((n.path, b, s) for b, s in ranges(n))
+    for n in added:
+        if not n.enabled():
+            continue
+        step = 4 * (reserved.cell("#address-cells", 2) + reserved.cell("#size-cells", 1))
+        if "reg" in n.props:
+            if not n.props["reg"] or len(n.props["reg"]) % step:
+                out.append("! %s reg: not whole pairs of an address and a size" % n.path)
+            for b, s in ranges(n):
+                if s == 0:
+                    out.append("! %s reg: an empty range at %#x" % (n.path, b))
+                elif not _inside(b, s, mem):
+                    out.append("! %s reg: %s lies outside the machine's memory (%s)" % (n.path, span(b, s), held))
+        elif "size" in n.props:
+            if _join(n.cells("size")[: reserved.cell("#size-cells", 1)]) == 0:
+                out.append("! %s size: nothing to set aside" % n.path)
+            for b, s in ranges(n, "alloc-ranges"):
+                if not _inside(b, s, mem):
+                    out.append(
+                        "! %s alloc-ranges: %s lies outside the machine's memory (%s)" % (n.path, span(b, s), held)
+                    )
+        else:
+            out.append("! %s: neither reg nor size, so the kernel passes over it" % n.path)
+    for i, a in enumerate(fixed):
+        for b in fixed[i + 1 :]:
+            if a[0] != b[0] and (a[0] in new or b[0] in new) and _overlap(a[1:], b[1:]):
+                out.append("! %s: %s overlaps %s of %s" % (a[0], span(*a[1:]), span(*b[1:]), b[0]))
+
+    out.extend("- memreserve %s" % span(*r) for r in base.reserve if r not in own.reserve)
+    for r in own.reserve:
+        if r in base.reserve:
+            continue
+        if r[1] == 0:
+            out.append("! memreserve at %#x: an empty range" % r[0])
+        elif not _inside(r[0], r[1], mem):
+            out.append("! memreserve %s lies outside the machine's memory (%s)" % (span(*r), held))
+
+    for name, start, size in loads:
+        if not _inside(start, size, mem):
+            out.append(
+                "! the %s, loaded at %s, lies outside the machine's memory (%s)" % (name, span(start, size), held)
+            )
+        for path, b, s in fixed:
+            if _overlap((start, size), (b, s)):
+                out.append("! %s: %s covers the %s, loaded at %s" % (path, span(b, s), name, span(start, size)))
+        for b, s in own.reserve:
+            if _overlap((start, size), (b, s)):
+                out.append("! memreserve %s covers the %s, loaded at %s" % (span(b, s), name, span(start, size)))
+    return out
+
+
 def identity(tree):
     h = hashlib.sha256()
 
@@ -570,6 +709,17 @@ def main(argv):
             if lines:
                 print("\n".join(lines))
             return 1 if lines else 0
+        if cmd == "agrees" and len(args) >= 2 and (len(args) - 2) % 4 == 0:
+            loads = []
+            for i in range(2, len(args), 4):
+                if args[i] != "--load":
+                    break
+                loads.append((args[i + 1], int(args[i + 2], 0), int(args[i + 3], 0)))
+            else:
+                lines = agrees(load(args[0]), load(args[1]), loads)
+                if lines:
+                    print("\n".join(lines))
+                return 1 if lines else 0
         if cmd == "prop" and len(args) == 3:
             node = load(args[0]).node(args[1])
             if node is None or args[2] not in node.props:
@@ -582,7 +732,7 @@ def main(argv):
                 return 1
             print(n)
             return 0
-    except (OSError, FdtError) as e:
+    except (OSError, ValueError) as e:
         print("fdt.py: %s: %s" % (args[0] if args else cmd, e), file=sys.stderr)
         return 2
     print("fdt.py: unknown action %r" % cmd, file=sys.stderr)

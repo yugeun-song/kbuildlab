@@ -179,6 +179,173 @@ def with_nops(blob):
             raise SystemExit("no kaslr-seed in the test blob")
 
 
+SMALL = r"""
+/dts-v1/;
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    memory@40000000 { device_type = "memory"; reg = <0x0 0x40000000 0x0 0x40000000>; };
+%s
+};
+"""
+
+CMA = "cma { compatible"
+MEMORY = (0x40000000, 0x100000000)
+FIRMWARE = (0x80000000, 0x40000)
+
+
+def agreement(tmp, t, variant, made):
+    check(fdt.agrees(t, t) == [], "a tree agrees with itself")
+    lines = fdt.agrees(t, made["half"])
+    check(
+        len(lines) == 1 and lines[0].startswith("~ /memory@40000000 reg:"),
+        "memory the machine does not have is not agreed to",
+    )
+    check(
+        all(fdt.agrees(t, made[k]) == [] for k in ("seeds", "args", "grown")),
+        "/chosen is the tree's own to change",
+    )
+    check(fdt.agrees(t, made["gone"]) == ["- /soc/uart@9000000 (node)"], "a device of the machine may not be left out")
+    alias = variant('serial0 = "/soc/uart@9000000";', 'serial0 = "/soc/virtio@a000000"; second = "/soc/uart@9000000";')
+    check(fdt.agrees(t, alias) == [], "/aliases is the tree's own to change")
+    off = variant(
+        'uart@9000000 { compatible = "arm,pl011"', 'uart@9000000 { status = "disabled"; compatible = "arm,pl011"'
+    )
+    check(fdt.agrees(t, off) == ['+ /soc/uart@9000000 status: "disabled"'], "a device may not be switched off")
+
+    def reserved(text):
+        return fdt.agrees(t, variant(CMA, text + "\n        " + CMA))
+
+    def one(text, word):
+        lines = reserved(text)
+        return len(lines) == 1 and word in lines[0]
+
+    check(reserved("mine@50000000 { reg = <0x0 0x50000000 0x0 0x100000>; no-map; };") == [], "memory may be set aside")
+    check(
+        reserved(
+            'pool { compatible = "shared-dma-pool"; reusable; size = <0x0 0x400000>; alignment = <0x0 0x200000>; };'
+        )
+        == [],
+        "and left to the kernel to place",
+    )
+    check(
+        one("far@200000000 { reg = <0x2 0x0 0x0 0x1000>; };", "lies outside the machine's memory"),
+        "not where the machine has none: a memory node that is switched off is no memory",
+    )
+    check(
+        one("edge@13ffff000 { reg = <0x1 0x3ffff000 0x0 0x2000>; };", "lies outside the machine's memory"),
+        "nor across the end of it",
+    )
+    check(reserved("last@13ffff000 { reg = <0x1 0x3ffff000 0x0 0x1000>; };") == [], "the last page is inside")
+    check(
+        one("over@80010000 { reg = <0x0 0x80010000 0x0 0x1000>; };", "overlaps"), "nor over what is set aside already"
+    )
+    check(
+        len(
+            reserved(
+                "a@50000000 { reg = <0x0 0x50000000 0x0 0x2000>; };\n b@50001000 { reg = <0x0 0x50001000 0x0 0x2000>; };"
+            )
+        )
+        == 1,
+        "nor twice over the same memory",
+    )
+    check(
+        one("none@50000000 { reg = <0x0 0x50000000 0x0 0x0>; };", "an empty range"), "an empty range is no reservation"
+    )
+    check(one("bare { no-map; };", "neither reg nor size"), "nor is a node without reg and size")
+    check(one("cut@50000000 { reg = <0x0 0x50000000 0x0>; };", "not whole pairs"), "nor a reg cut short")
+    check(one("zero { size = <0x0 0x0>; };", "nothing to set aside"), "nor a size of nothing")
+    check(
+        one("dyn { size = <0x0 0x1000>; alloc-ranges = <0x3 0x0 0x0 0x1000000>; };", "alloc-ranges"),
+        "nor a place to allocate from that the machine lacks",
+    )
+    check(
+        reserved('unused@200000000 { reg = <0x2 0x0 0x0 0x1000>; status = "disabled"; };') == [],
+        "a node switched off sets nothing aside",
+    )
+    check(
+        fdt.agrees(t, variant("fw@80000000 { reg = <0x0 0x80000000 0x0 0x40000>; no-map; };", ""))
+        == ["- /reserved-memory/fw@80000000 (node)"],
+        "what the base sets aside stays set aside",
+    )
+    lines = fdt.agrees(
+        t, variant("reg = <0x0 0x80000000 0x0 0x40000>; no-map;", "reg = <0x0 0x80000000 0x0 0x20000>; no-map;")
+    )
+    check(len(lines) == 1 and lines[0].startswith("~ /reserved-memory/fw@80000000 reg:"), "and as large as it was")
+    lines = fdt.agrees(
+        t,
+        variant(
+            "/memreserve/ 0x00000000a0000000",
+            "/memreserve/ 0x0000000300000000 0x1000;\n/memreserve/ 0x00000000a0000000",
+        ),
+    )
+    check(
+        len(lines) == 1 and "memreserve" in lines[0] and "lies outside" in lines[0], "a reservation outside the memory"
+    )
+
+    def small(body, name):
+        return fdt.parse(dtc(SMALL % body, os.path.join(tmp, name)))
+
+    plain = small("", "small.dtb")
+    good = "reserved-memory { #address-cells = <2>; #size-cells = <2>; ranges; r@50000000 { reg = <0x0 0x50000000 0x0 0x1000>; }; };"
+    check(fdt.agrees(plain, small(good, "g.dtb")) == [], "a tree may bring /reserved-memory itself")
+    lines = fdt.agrees(
+        plain, small(good.replace("#size-cells = <2>", "#size-cells = <1>").replace("0x0 0x1000", "0x1000"), "c.dtb")
+    )
+    check(any("#size-cells" in line for line in lines), "but with the root's cells, or the kernel passes over it")
+    lines = fdt.agrees(plain, small(good.replace(" ranges;", ""), "r.dtb"))
+    check(len(lines) == 1 and "ranges" in lines[0], "and with ranges")
+    check(
+        fdt.agrees(plain, small('chosen { x; }; aliases { a = "/memory@40000000"; };', "o.dtb")) == [],
+        "or /chosen and /aliases",
+    )
+
+    kernel = [("kernel", 0x40200000, 0x2000000)]
+    check(fdt.agrees(t, t, kernel) == [], "a kernel loaded in free memory")
+    lines = fdt.agrees(t, t, [("kernel", 0x80000000, 0x100000)])
+    check(
+        len(lines) == 2 and all("covers the kernel" in line for line in lines),
+        "a kernel loaded where memory is set aside, by a node and by a reservation",
+    )
+    lines = fdt.agrees(t, t, [("initramfs", 0x200000000, 0x1000)])
+    check(
+        len(lines) == 1 and "lies outside the machine's memory" in lines[0],
+        "an initramfs loaded where there is no memory",
+    )
+    check(fdt.agrees(t, t, [("device tree", 0x13FFFF000, 0x1000)]) == [], "the last page takes a load")
+    check(fdt.memory(t) == [MEMORY] and fdt.memory(plain) == [(0x40000000, 0x40000000)], "the machine's memory")
+
+    rng = random.Random(20261116)
+    spots = [
+        0x3FFFF000,
+        0x40000000,
+        0x50000000,
+        0x7FFFF000,
+        0x80000000,
+        0x8003F000,
+        0x80040000,
+        0x13FFFF000,
+        0x140000000,
+    ]
+    sizes = [0, 0x1000, 0x2000, 0x40000, 0x10000000, 0x100000000]
+    wrong = 0
+    for case in range(300):
+        regions = [(rng.choice(spots) + rng.choice([0, 0x1000]), rng.choice(sizes)) for _ in range(rng.randint(1, 3))]
+        text = "\n".join(
+            "n%d { reg = <%#x %#x %#x %#x>; };" % (i, b >> 32, b & 0xFFFFFFFF, s >> 32, s & 0xFFFFFFFF)
+            for i, (b, s) in enumerate(regions)
+        )
+        refused = any(s == 0 or not (MEMORY[0] <= b and b + s <= MEMORY[0] + MEMORY[1]) for b, s in regions)
+        taken = [FIRMWARE] + regions
+        for i, (b, s) in enumerate(taken):
+            for c, d in taken[i + 1 :]:
+                refused = refused or (s and d and b < c + d and c < b + s)
+        if bool(reserved(text)) != bool(refused):
+            wrong += 1
+            print("FAIL case %d: %s is %s" % (case, text.replace("\n", " "), "agreed to" if refused else "refused"))
+    check(wrong == 0, "300 sets of regions are agreed to or refused as plain interval arithmetic says")
+
+
 def unit(tmp):
     rich_path = os.path.join(tmp, "rich.dtb")
     rich = dtc(RICH, rich_path)
@@ -342,6 +509,15 @@ def unit(tmp):
         "a tree without /chosen is given one",
     )
 
+    agreement(tmp, t, variant, {"half": half, "seeds": seeds, "args": args, "grown": grown, "gone": gone})
+    check(fdt.agrees(t, more) == ["+ / added: <0x7>"], "a property the machine does not state is not agreed to")
+    check(fdt.agrees(t, moved) == ["+ /zz-extra (node)"], "nor is a node it does not have")
+    check(fdt.agrees(rsv, t) == [], "a reservation inside the machine's memory may be added")
+    check(
+        fdt.agrees(t, rsv) == ["- memreserve 0xa0000000 - 0xa01fffff (2 MiB)"],
+        "a reservation the base makes may not be dropped",
+    )
+
     check(fdt.is_overlay(fdt.parse(overlay)) and not fdt.is_overlay(t), "an overlay is told from a tree")
 
     img = os.path.join(tmp, "Image")
@@ -423,7 +599,7 @@ def deep(levels):
     )
 
 
-def exercise(data):
+def exercise(data, others=()):
     try:
         tree = fdt.parse(data)
     except fdt.FdtError:
@@ -432,8 +608,13 @@ def exercise(data):
     fdt.show(s)
     fdt.identity(tree)
     fdt.is_overlay(tree)
+    fdt.memory(tree)
     assert fdt.diff(tree, tree) == []
     assert fdt.carried(tree, tree) == []
+    assert fdt.agrees(tree, tree) == []
+    for other in others:
+        fdt.agrees(other, tree, [("kernel", 0x40200000, 0x2000000), ("initramfs", 0, 1)])
+        fdt.agrees(tree, other)
     for node in tree.root.walk():
         for value in node.props.values():
             fdt.render(value, 4)
@@ -492,13 +673,14 @@ def damage(rng, blob):
 def fuzz(blobs, count, seed):
     rng = random.Random(seed)
     accepted = 0
+    whole = [fdt.parse(b) for b in blobs]
     for i in range(count):
         data = rng.choice(blobs)
         for _ in range(rng.randint(1, 3)):
             if data:
                 data = damage(rng, data)
         try:
-            accepted += exercise(data)
+            accepted += exercise(data, whole)
         except Exception as e:  # noqa: BLE001
             path = os.path.join(tempfile.gettempdir(), "kbuildlab-fdt-crash-%d-%d.dtb" % (seed, i))
             with open(path, "wb") as f:

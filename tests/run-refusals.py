@@ -5,17 +5,23 @@
 
 TREE is a registered tree that boots through U-Boot; its kernel image and its
 firmware are borrowed, read-only, by a copy of the tree in a registry of this
-test's own.  Every call must end with kbuildlab's message before a guest starts.
+test's own.  Every call must end with kbuildlab's message before a guest starts;
+the last ones ask the copy's firmware for its device tree first, which boots it
+for a moment.
 """
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 
 here = os.path.dirname(os.path.abspath(__file__))
 repo = os.path.dirname(here)
+sys.path.insert(0, os.path.join(repo, "lib"))
+import fdt  # noqa: E402
+
 KBL = os.path.join(repo, "bin", "kbuildlab")
 SHELL_ERROR = re.compile(
     r"unbound variable|syntax error|command not found|bad substitution|"
@@ -65,7 +71,7 @@ def main(argv):
         disk = os.path.join(root, "boot.img")
         image = os.path.join(real("inspect", tree, "--format", "src"), real("get", tree, "KERNEL_IMAGE_REL"))
         with open(disk, "wb") as f:
-            f.truncate(os.path.getsize(image) + (16 << 20))
+            f.truncate(1 << (os.path.getsize(image) + (16 << 20) - 1).bit_length())
         subprocess.run(
             ["sfdisk", disk], input=b"label: dos\nstart=2048, type=0c, bootable\n", check=True, capture_output=True
         )
@@ -80,7 +86,7 @@ def main(argv):
         ]
         machine, cpu = real("get", tree, "MACHINE"), real("get", tree, "CPU")
 
-        def run(fdtaddr, *args, expect, extra=""):
+        def run(fdtaddr, *args, expect, extra="", bios=firmware):
             global failed, checked
             checked += 1
             with open(os.path.join(d, "tree.conf"), "w") as f:
@@ -90,19 +96,18 @@ def main(argv):
                     + "\nBOOTDISK=%s\nMEM=1G\n%s" % (disk, ("UBOOT_FDTADDR=%s\n" % fdtaddr) if fdtaddr else "")
                 )
             r = subprocess.run(
-                [KBL, "run", ID, "--bios", firmware, "--no-initrd", *args],
+                [KBL, "run", ID, "--bios", bios, "--no-initrd", *args],
                 env=env,
                 capture_output=True,
                 text=True,
                 stdin=subprocess.DEVNULL,
-                timeout=120,
+                timeout=300,
             )
             out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.stdout + r.stderr)
             why = []
             if r.returncode == 0:
                 why.append("it ran")
-            if expect not in out:
-                why.append("no %r" % expect)
+            why += ["no %r" % word for word in ([expect] if isinstance(expect, str) else expect) if word not in out]
             m = SHELL_ERROR.search(out)
             if m:
                 why.append("a shell error (%s)" % m.group(0))
@@ -134,7 +139,52 @@ def main(argv):
         run("%#x" % (int(load, 16) - 16), "--dtb", good, expect="would lie in the kernel")
         run(free, "--dtb", args, expect="states /chosen bootargs")
         run(free, "--dtb", good, expect="RAM_BASE", extra="MACHINE=not-%s\nIOMMU=0\n" % machine)
-        run(free, "--dtb", good, expect="qemu does not start", extra="CPU=not-%s\n" % cpu)
+        run(free, "--dtb", good, expect=("qemu does not start", "not-%s" % cpu), extra="CPU=not-%s\n" % cpu)
+
+        data = os.path.join(root, "data", "kbuildlab")
+        os.makedirs(data, exist_ok=True)
+        os.symlink(
+            os.path.join(
+                os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "kbuildlab", "firmware"
+            ),
+            os.path.join(data, "firmware"),
+        )
+        held = os.path.join(data, "trees", ID, "dt", "uboot", "firmware.dtb")
+        run(free, "--dtb", good, expect="does not agree with the machine")
+        if not os.path.isfile(held):
+            checked += 1
+            failed += 1
+            print("FAIL the copy's firmware was not asked for its device tree: no %s" % held)
+        else:
+            t = fdt.load(held)
+            ac, sc = t.root.cell("#address-cells", 2), t.root.cell("#size-cells", 1)
+            at = int(load, 16)
+            child = "k@%x { reg = <%s %s>; };" % (
+                at,
+                " ".join(["0"] * (ac - 1) + ["%#x" % at]),
+                " ".join(["0"] * (sc - 1) + ["0x10000"]),
+            )
+            if any(n.path == "/reserved-memory" for n in t.root.children):
+                body = "&{/reserved-memory} { %s };" % child
+            else:
+                body = "&{/} { reserved-memory { #address-cells = <%d>; #size-cells = <%d>; ranges; %s }; };" % (
+                    ac,
+                    sc,
+                    child,
+                )
+            overlay = os.path.join(root, "over.dtbo")
+            subprocess.run(
+                ["dtc", "-q", "-@", "-I", "dts", "-O", "dtb", "-o", overlay, "-"],
+                input=("/dts-v1/;\n/plugin/;\n%s\n" % body).encode(),
+                check=True,
+            )
+            over = os.path.join(root, "over.dtb")
+            subprocess.run(["fdtoverlay", "-i", held, "-o", over, overlay], check=True, capture_output=True)
+            run(free, "--dtb", over, expect="covers the kernel")
+            cpus = sum(1 for n in t.root.walk() if n.text("device_type") == "cpu")
+            run(free, "--dtb", held, "--smp", str(cpus + 1), expect="is not the one")
+            other = shutil.copy(firmware, os.path.join(root, "other-firmware.bin"))
+            run(free, "--dtb", held, expect="boots another firmware", bios=other)
 
         def with_initrd(fdtaddr, expect):
             global failed, checked
@@ -156,7 +206,7 @@ def main(argv):
 
         with_initrd(ramdisk, "would lie in the initramfs")
         with_initrd("%#x" % (int(ramdisk, 16) + 4000), "would lie in the initramfs")
-        left = [n for n in os.listdir(root) if n.startswith("kbl-")]
+        left = [n for n in os.listdir(root) if n.startswith("kbl-") and n != "kbl-claim.lock"]
         checked += 1
         if left:
             failed += 1

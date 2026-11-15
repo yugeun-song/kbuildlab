@@ -703,6 +703,7 @@ USAGE
     _dtdir="$(kbl_tree_data "$tree")/dt/$_dtctx"
     _dtb=""
     _dtown=0
+    _loads=()
     _dtname="devicetree.dtb"
     _fa=""
     _dtroom=""
@@ -1165,6 +1166,8 @@ $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_
                     && die "boot uboot: the device tree at UBOOT_FDTADDR $_fa (up to $_dsz bytes) would lie in the initramfs,
        which occupies $(stat -c%s "$INITRD") bytes from $ra; state another UBOOT_FDTADDR in $tree/tree.conf"
                 ((_dsz <= _dtroom)) || die "boot uboot: the device tree at UBOOT_FDTADDR $_fa (up to $_dsz bytes) runs past the end of RAM"
+                _loads=(--load kernel "$la" "$_ksz" --load "device tree" "$_fa" "$_dsz")
+                [[ -z "$INITRD" ]] || _loads+=(--load initramfs "$ra" "$(stat -c%s "$INITRD")")
             fi
             if [[ -n "$PROBE" ]]; then
                 command -v sfdisk >/dev/null 2>&1 || die "sfdisk (util-linux) required to ask the firmware for its device tree"
@@ -1586,14 +1589,32 @@ $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_
         _dtmp="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")" || die "cannot write $_statedir"
         _dumpdtb "$_dtmp" "$([[ "$BOOT" == direct ]] && echo -dtb)" \
             || die "qemu does not start with this run's command line: $(cat "$_dtmp.err" 2>/dev/null)"
-        if [[ $_dtown -eq 1 ]]; then
-            [[ "$(_dt id "$_dtmp")" == "$(sed -n 's/^machine //p' "$_dtdir/custom.id" 2>/dev/null)" ]] \
-                || die "this run's machine is not the one $_dtl's own device tree was built for:
-$([[ -f "$_dtdir/machine.dtb" ]] && _dt diff "$_dtdir/machine.dtb" "$_dtmp" | head -8 | sed 's/^/         /')
-       an option of this run that changes the machine does not go with the tree; if tree.conf, a board
-       or qemu changed it, kbuildlab dt apply $_dtl takes the machine as it is now; --no-dtb boots without the tree"
-            rm -f "$_dtdir"/booted.dtb "$_dtdir"/booted.dts "$_dtdir"/booted.id "$_dtdir"/booted.lost
+        # shellcheck source=/dev/null
+        source "${KBL_REPO}/lib/dt.sh"
+        _dt_context "$tree" "$BOOT" "$board"
+        if [[ "$BOOT" == uboot && -n "$BIOS" ]]; then
+            kbl_tree_firmware "$tree"
+            [[ "$(readlink -f "$BIOS")" == "$(readlink -f "$_fw_image")" ]] \
+                || die "--bios boots another firmware than $_fw_image, which $_dtl's device tree stands on
+       --no-dtb boots this firmware without the tree"
         fi
+        _dt_ensure_base || die "$_dtl has no device tree in a $_dtctx boot to hold $_dtb against: $(_dt_why_none)"
+        _dt_unlock
+        [[ "$(_dt id "$_dtmp")" == "$(_dt id "$_dt_dir/machine.dtb")" ]] \
+            || die "this run's machine is not the one $_dtl's tree.conf states:
+$(_dt diff "$_dt_dir/machine.dtb" "$_dtmp" | head -8 | sed 's/^/         /')
+       an option of this run that changes the machine does not go with a device tree of the tree's own:
+       state it in tree.conf, or pass --no-dtb"
+        _lost="$(_dt agrees "$_dt_dir/$_dt_base.dtb" "$_dtb" ${_loads[@]+"${_loads[@]}"})"
+        case $? in
+            0) ;;
+            1) die "$_dtb does not agree with the machine $_dtl boots on, in $(wc -l <<<"$_lost") place(s):
+$(head -12 <<<"$_lost" | sed 's/^/         /')
+$(_dt_rule "$_lost")
+       --no-dtb boots without the tree" ;;
+            *) die "cannot hold $_dtb against $_dt_dir/$_dt_base.dtb" ;;
+        esac
+        [[ $_dtown -eq 0 ]] || rm -f "$_dtdir"/booted.dtb "$_dtdir"/booted.dts "$_dtdir"/booted.id "$_dtdir"/booted.lost
         if [[ "$BOOT" == direct ]]; then
             _dumpdtb "$_dtmp" || die "qemu does not start with $_dtb: $(cat "$_dtmp.err" 2>/dev/null)"
             _lost="$(_dt carried "$_dtb" "$_dtmp")" || die "qemu does not hand $_dtb on to the kernel as it is:

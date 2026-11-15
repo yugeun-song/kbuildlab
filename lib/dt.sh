@@ -1,5 +1,15 @@
 _DT_ACTIONS="show edit apply detach reset diff probe check"
 _DT_STAGES="machine firmware base custom booted"
+_DT_OWN="the hardware is the machine's to state: its memory and CPUs follow MEM and SMP in tree.conf (--mem and
+       --smp for one run), and the tree QEMU makes follows them; a tree of its own adds to /chosen, /aliases
+       and /reserved-memory"
+_DT_ROOM="what a tree sets aside lies in the machine's memory, clear of what is set aside or loaded there already"
+
+_dt_rule() { # _dt_rule LINES
+    grep -q '^[^!]' <<<"$1" && printf '       %s\n' "$_DT_OWN"
+    grep -q '^!' <<<"$1" && printf '       %s\n' "$_DT_ROOM"
+    return 0
+}
 
 _dt_fdt() { python3 "${KBL_REPO}/lib/fdt.py" "$@"; }
 
@@ -50,6 +60,12 @@ _dt_lock() {
     { mkdir -p "$_dt_dir" && exec {_dt_lock_fd}>>"$_dt_dir/.lock"; } || die "dt: cannot write $_dt_dir"
     flock "$_dt_lock_fd" || die "dt: cannot lock $_dt_dir/.lock"
     _dt_locked="$_dt_dir"
+}
+
+_dt_unlock() {
+    [[ -n "${_dt_locked:-}" ]] || return 0
+    exec {_dt_lock_fd}>&-
+    _dt_locked=""
 }
 
 _dt_inputs() {
@@ -243,7 +259,7 @@ _dt_backup_source() {
 
 _dt_apply() { # _dt_apply [FILE]
     local file="${1:-}" src="$_dt_dir/custom.dts" out="$_dt_dir/custom.dtb" new="$_dt_dir/.custom.new.dtb"
-    local log="$_dt_dir/custom.log" kind="" inc="" onto ovl n label
+    local log="$_dt_dir/custom.log" kind="" inc="" onto ovl n label lost take=""
     label="$(kbl_tree_label "$_dt_tree")"
     _dt_need dtc
     _dt_ensure_base || _dt_no_tree
@@ -257,8 +273,7 @@ _dt_apply() { # _dt_apply [FILE]
         case "$kind" in
             tree)
                 cp -f "$file" "$new" || die "dt: cannot write $new"
-                _dt_backup_source
-                _dt_decompile "$new" "$src"
+                take=decompile
                 ;;
             overlay | overlay-source)
                 _dt_need fdtoverlay
@@ -288,15 +303,13 @@ _dt_apply() { # _dt_apply [FILE]
                     rm -f "$new"
                     die "dt: applying $file left no well-formed tree"
                 }
-                _dt_backup_source
-                _dt_decompile "$new" "$src"
+                take=decompile
                 ;;
             source)
                 if [[ "$file" != "$(realpath -m -- "$src")" ]]; then
                     inc="$(dirname "$file")"
                     _dt_compile "$file" "$new" "$log" "$inc" || _dt_failed "$log" "$file does not compile"
-                    _dt_backup_source
-                    cp -f "$file" "$src" || die "dt: cannot write $src"
+                    take="$file"
                 fi
                 ;;
         esac
@@ -311,6 +324,32 @@ _dt_apply() { # _dt_apply [FILE]
         rm -f "$new"
         die "dt: the build left no well-formed tree"
     }
+    lost="$(_dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$new")"
+    case $? in
+        0) ;;
+        1)
+            rm -f "$new"
+            die "dt: ${file:-$src} does not agree with the machine $label boots on, in $(wc -l <<<"$lost") place(s):
+$(head -12 <<<"$lost" | sed 's/^/         /')
+$(_dt_rule "$lost")
+       nothing was built or attached"
+            ;;
+        *)
+            rm -f "$new"
+            die "dt: cannot hold ${file:-$src} against the $_dt_base's tree"
+            ;;
+    esac
+    case "$take" in
+        "") ;;
+        decompile)
+            _dt_backup_source
+            _dt_decompile "$new" "$src"
+            ;;
+        *)
+            _dt_backup_source
+            cp -f "$take" "$src" || die "dt: cannot write $src"
+            ;;
+    esac
     mv -f "$new" "$out" || die "dt: cannot write $out"
     {
         printf 'built %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -318,7 +357,6 @@ _dt_apply() { # _dt_apply [FILE]
         [[ -n "$file" ]] && printf 'from %s %s\n' "$kind" "$file"
         [[ -n "$inc" ]] && printf 'include %s\n' "$inc"
         printf 'base %s\n' "$_dt_base"
-        printf 'machine %s\n' "$(_dt_fdt id "$_dt_dir/machine.dtb")"
     } >"$_dt_dir/custom.id"
     date '+%Y-%m-%d %H:%M:%S' >"$_dt_dir/attached"
     n="$(grep -c 'Warning' "$log" 2>/dev/null)" || n=0
@@ -449,8 +487,8 @@ EOF
         else
             [[ "$(sed -n 's/^source //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dt_dir/custom.dts" | cut -c1-64)" ]] \
                 || note="$note; the source changed since this build (kbuildlab dt apply $label)"
-            [[ "$(sed -n 's/^machine //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(_dt_fdt id "$_dt_dir/machine.dtb")" ]] \
-                || note="$note; the machine changed since it was built"
+            _dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$_dt_dir/custom.dtb" >/dev/null 2>&1 \
+                || note="$note; it does not agree with the machine as it is now (kbuildlab dt check $label)"
             _dt_stage_line custom "$note"
         fi
     fi
@@ -513,10 +551,11 @@ _dt_check() {
         bad "source       custom.dts changed since custom.dtb was built (kbuildlab dt apply $label)"
         rc=1
     fi
-    if [[ "$(sed -n 's/^machine //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(_dt_fdt id "$_dt_dir/machine.dtb")" ]]; then
-        ok "built for    the machine as it is now"
+    if n="$(_dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$f")"; then
+        ok "agrees       it states the machine's hardware as the $_dt_base hands it on, and sets aside only memory it has"
     else
-        bad "built for    another machine: it changed since the tree was built (kbuildlab dt apply $label takes it as it is now)"
+        bad "agrees       it does not agree with the machine as it is now:"
+        head -8 <<<"$n" | sed 's/^/       /'
         rc=1
     fi
     if [[ -f "$_dt_dir/attached" ]]; then

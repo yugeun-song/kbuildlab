@@ -647,12 +647,22 @@ to `UBOOT_FDTADDR` and uses it there. A direct boot passes it to QEMU, and is
 refused where QEMU would not hand it on as it is (arm64 QEMU writes `/memory`
 itself). `run --dtb FILE` and `--no-dtb` decide for one run.
 
-A run refuses whatever would make the kernel see a tree other than the one
-attached: a source edited since its build, a machine that differs from the one it
-was built for, a blob that does not read back from the boot partition, a loader
-that rewrites it. The last is found in the guest's memory as the kernel starts,
-and stops the guest; additions to `/chosen`, memory reservations and the random
-seeds are the loader's to make. `dt check` says the same without booting.
+The tree, the machine and what is loaded into it agree, or nothing boots. The
+hardware is the machine's to state: memory and CPUs follow `MEM` and `SMP`, and the
+tree QEMU makes follows them. A tree of its own adds to `/chosen`, `/aliases` and
+`/reserved-memory`, and makes memory reservations. `dt apply` and `run` refuse one
+that states anything else otherwise than its base does, that sets aside memory the
+machine lacks or that is taken already (by another region, or by the kernel, the
+initramfs and the tree itself where the firmware loads them), or that writes
+`/reserved-memory` in a form the kernel passes over.
+
+A run also refuses whatever would make the kernel see a tree other than the one
+attached: a source edited since its build, a `--mem`, `--smp` or `--bios` that
+makes this run's machine or firmware another than `tree.conf` states, a blob that
+does not read back from the boot partition, a loader that rewrites it. The last is
+found in the guest's memory as the kernel starts, and stops the guest; additions to
+`/chosen`, memory reservations and the random seeds are the loader's to make.
+`dt check` says the same without booting.
 
 ## The tree.conf
 
@@ -936,6 +946,7 @@ completions/           the bash and zsh completions install.sh puts in place
 tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs,
                        fdt.py against fdtget and damaged blobs, the refusals of dt and
                        firmware, guest.py, which boots a tree and runs commands in it,
+                       dt-guest.py, which holds a booted kernel's memory to its tree,
                        and style.py, which holds a checkout to its formatters and to
                        English
 ```
