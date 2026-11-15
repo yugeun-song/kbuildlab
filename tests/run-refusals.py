@@ -86,7 +86,7 @@ def main(argv):
         ]
         machine, cpu = real("get", tree, "MACHINE"), real("get", tree, "CPU")
 
-        def run(fdtaddr, *args, expect, extra="", bios=firmware):
+        def run(fdtaddr, *args, expect, extra="", bios: str | None = firmware):
             global failed, checked
             checked += 1
             with open(os.path.join(d, "tree.conf"), "w") as f:
@@ -96,7 +96,7 @@ def main(argv):
                     + "\nBOOTDISK=%s\nMEM=1G\n%s" % (disk, ("UBOOT_FDTADDR=%s\n" % fdtaddr) if fdtaddr else "")
                 )
             r = subprocess.run(
-                [KBL, "run", ID, "--bios", bios, "--no-initrd", *args],
+                [KBL, "run", ID, *(["--bios", bios] if bios else []), "--no-initrd", *args],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -185,6 +185,25 @@ def main(argv):
             run(free, "--dtb", held, "--smp", str(cpus + 1), expect="is not the one")
             other = shutil.copy(firmware, os.path.join(root, "other-firmware.bin"))
             run(free, "--dtb", held, expect="boots another firmware", bios=other)
+
+        built = os.path.dirname(firmware)
+        named = os.path.dirname(built)
+        stamp = built + ".stamp"
+        if os.path.isfile(stamp) and os.path.realpath(named) == os.path.realpath(
+            os.path.join(data, "firmware", os.path.basename(named))
+        ):
+            os.unlink(os.path.join(data, "firmware"))
+            mine = os.path.join(data, "firmware", os.path.basename(named))
+            os.makedirs(os.path.join(mine, os.path.basename(built)))
+            os.symlink(os.path.join(named, "src"), os.path.join(mine, "src"))
+            shutil.copy(firmware, os.path.join(mine, os.path.basename(built), os.path.basename(firmware)))
+            with open(stamp) as f:
+                lines = f.read().splitlines()
+            with open(os.path.join(mine, os.path.basename(stamp)), "w") as f:
+                f.write("\n".join("conf 0" if line.startswith("conf ") else line for line in lines) + "\n")
+            run(free, "--no-dtb", expect="is not built from its source and settings", bios=None)
+        else:
+            print("run-refusals.py: %s boots a firmware of its own; a stale one was not tried" % tree)
 
         def with_initrd(fdtaddr, expect):
             global failed, checked

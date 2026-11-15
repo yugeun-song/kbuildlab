@@ -1095,6 +1095,13 @@ $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_
             fi
             [[ -f "$ub" ]] || die "firmware image not found: $ub
        kbuildlab firmware update $(kbl_tree_label "$tree") builds it"
+            if [[ -z "$BIOS" ]]; then
+                # shellcheck source=/dev/null
+                source "${KBL_REPO}/lib/firmware.sh"
+                _fw_fragments
+                _fw_as_stated || die "$ub is not built from its source and settings as they are now
+       kbuildlab firmware update $(kbl_tree_label "$tree") builds it again, and so does kbuildlab update"
+            fi
             if [[ "$ROOT" != disk && -z "$PROBE" ]]; then
                 bd="$(kbl_tree_get "$tree" BOOTDISK)"
                 bd="$(kbl_tree_path "$tree" "${bd:-boot/uboot.img}")"

@@ -263,6 +263,8 @@ kbl_gdb() {
 # archive) live in the tree's data directory.  The XDG variables move both.
 KBL_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/kbuildlab"
 KBL_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/kbuildlab"
+KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
+KBL_LEGACY_IMAGE="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
 KBL_TREES="$KBL_CONFIG_HOME/trees"
 
 _KBL_FW_KEYS="NAME URL SRC BUILD IMAGE SYMBOLS VERSION DEFCONFIG FRAGMENTS MAKE_ARGS"

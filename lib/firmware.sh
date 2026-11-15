@@ -15,17 +15,26 @@ _fw_fragments() { # sets _fw_frags
     done
 }
 
-_fw_inputs() {
-    local f c
+_fw_stated() { # _fw_stated [LINE]
+    local f
     printf 'head %s\n' "$(git -C "$_fw_src" rev-parse --verify --quiet HEAD 2>/dev/null)"
     printf 'edits %s\n' "$(git -C "$_fw_src" diff HEAD 2>/dev/null | sha1sum | cut -c1-40)"
     printf 'conf %s\n' "$(sha1sum <"$_fw_conf" | cut -c1-40)"
     for f in "${_fw_frags[@]+"${_fw_frags[@]}"}"; do
         printf 'fragment %s %s\n' "$f" "$(sha1sum <"$f" | cut -c1-40)"
     done
-    c="$(kbl_container)" || return 1
-    printf 'image %s\n' "$("$c" image inspect --format '{{.Id}}' "$KBL_IMAGE" 2>/dev/null)"
+    [[ $# -eq 0 ]] || printf '%s\n' "$1"
     printf 'arch %s\n' "$_fw_arch"
+}
+
+_fw_inputs() {
+    local c
+    c="$(kbl_container)" || return 1
+    _fw_stated "image $("$c" image inspect --format '{{.Id}}' "$KBL_IMAGE" 2>/dev/null)"
+}
+
+_fw_as_stated() {
+    [[ -f "$_fw_image" && -s "$_fw_stamp" && "$(_fw_stated)" == "$(grep -v '^image ' "$_fw_stamp")" ]]
 }
 
 _fw_current() {
@@ -70,8 +79,13 @@ _fw_build_now() { # _fw_build_now FRESH
     target="${_fw_image#"$_fw_build"/}"
     mkdir -p "$_fw_build" "$(dirname "$_fw_log")" || die "firmware: cannot create $_fw_build"
     : >"$_fw_log"
-    rm -f "$_fw_stamp"
     inputs="$(_fw_inputs)" || exit 1
+    if [[ "$_fw_origin" == global && -f "$_fw_build/.config" ]] \
+        && [[ "$(grep -E '^(conf|fragment) ' "$_fw_stamp" 2>/dev/null)" != "$(grep -E '^(conf|fragment) ' <<<"$inputs")" ]]; then
+        say "settings     changed since $_fw_build/.config was made; it starts from the defconfig again"
+        rm -f "$_fw_build/.config" || die "firmware: cannot write $_fw_build"
+    fi
+    rm -f "$_fw_stamp"
     before="$(sha256sum "$_fw_image" 2>/dev/null | cut -c1-64)"
     _fw_container || exit 1
     if [[ $fresh -eq 1 && -f "$_fw_build/.config" ]]; then

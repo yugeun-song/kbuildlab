@@ -614,11 +614,14 @@ kbuildlab firmware own [TREE]               register the tree's own firmware.con
 kbuildlab firmware global [TREE]            boot the global firmware again
 ```
 
-`kbuildlab update` updates the firmware of the trees it updates. An edited source
-is built as it is and never moved. A tree takes a firmware of its own from
-`firmware.conf` beside its `tree.conf` (the same keys, with `SRC` and `BUILD`
-stated in place of `NAME`): `firmware own` checks and builds it, and the tree
-boots it only while that file stays as it was registered.
+`kbuildlab update` updates the firmware of the trees it updates, and `firmware
+update` does that alone. `run` refuses an image that is not built from its source
+and settings as they are now; either command builds it again, and a global
+firmware whose settings changed starts from its `DEFCONFIG` again rather than from
+the `.config` it had. An edited source is built as it is and never moved. A tree
+takes a firmware of its own from `firmware.conf` beside its `tree.conf` (the same
+keys, with `SRC` and `BUILD` stated in place of `NAME`): `firmware own` checks and
+builds it, and the tree boots it only while that file stays as it was registered.
 
 `attach --stop firmware` stops at the firmware's first instruction; `--stop
 relocated` runs it until it has moved itself and stops in `board_init_r`. Both load
