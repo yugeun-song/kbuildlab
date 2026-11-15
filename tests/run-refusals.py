@@ -54,7 +54,11 @@ def main(argv):
     if real("get", tree, "BOOT") != "uboot":
         print("run-refusals.py: %s does not boot through U-Boot" % tree, file=sys.stderr)
         return 2
-    firmware = re.search(r"^\s*image\s+(\S+)", real("firmware", tree), re.M).group(1)
+    named = re.search(r"^\s*image\s+(\S+)", real("firmware", tree), re.M)
+    if named is None:
+        print("run-refusals.py: kbuildlab firmware %s names no image" % tree, file=sys.stderr)
+        return 2
+    firmware = named.group(1)
     load, ramdisk = real("get", tree, "UBOOT_LOADADDR"), real("get", tree, "UBOOT_RDADDR")
     with tempfile.TemporaryDirectory() as root:
         env = dict(

@@ -265,6 +265,19 @@ KBL_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/kbuildlab"
 KBL_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/kbuildlab"
 KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
 KBL_LEGACY_IMAGE="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
+KBL_DEFAULT_MEM=1G
+
+kbl_mem_bytes() { # kbl_mem_bytes VALUE: the leading size of a -m value, as qemu reads it
+    local m="${1#size=}"
+    m="${m%%,*}"
+    awk -v m="$m" 'BEGIN {
+        if (m !~ /^[0-9]+(\.[0-9]+)?[KkMmGgTt]?$/) exit 1
+        u = toupper(substr(m, length(m))); n = m + 0
+        if (u == "K") n *= 1024; else if (u == "G") n *= 1024 ^ 3
+        else if (u == "T") n *= 1024 ^ 4; else n *= 1024 ^ 2
+        printf "%.0f\n", n
+    }'
+}
 KBL_TREES="$KBL_CONFIG_HOME/trees"
 
 _KBL_FW_KEYS="NAME URL SRC BUILD IMAGE SYMBOLS VERSION DEFCONFIG FRAGMENTS MAKE_ARGS"

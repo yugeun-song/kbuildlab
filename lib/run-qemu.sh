@@ -14,6 +14,7 @@ source "${KBL_REPO}/lib/common.sh"
     PORT=""
     PORT_SET=0
     MEM=""
+    MEM_GIVEN=0
     SMP=""
     KVM=0
     KASLR=""
@@ -94,7 +95,8 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      a QMP client does not pause the guest or displace gdb
   --no-qmp           no QMP monitor and no vmcoreinfo device
   --mem|-m SIZE  --smp N   (default: the tree's MEM and SMP, else 1G and 2;
-                     handed to qemu's -m and -smp as written)
+                     handed to qemu's -m and -smp as written; with the tree's
+                     own device tree attached the memory is the one it states)
   --bios PATH        a relative PATH here is from the current directory; in
                      tree.conf it is from the tree's data directory
   The console is the guest's serial line: Ctrl-C goes to the guest, Ctrl-A X
@@ -132,6 +134,7 @@ USAGE
                 ;;
             --mem | -m)
                 MEM="${2:?}"
+                MEM_GIVEN=1
                 shift 2
                 ;;
             --smp)
@@ -359,8 +362,20 @@ USAGE
 
     # What the tree states for its runs; a flag wins over it, and the values after
     # :- are the defaults when neither says.
+    _owned=""
+    if [[ $NO_DTB -eq 0 && -z "$DTB" ]]; then
+        _own="${BOOT:-$(kbl_tree_get "$tree" BOOT)}"
+        _own="$(kbl_tree_data "$tree")/dt/$([[ -n "$board" ]] && echo "board-$board" || echo "${_own:-direct}")"
+        [[ -f "$_own/attached" && -s "$_own/custom.machine" ]] \
+            && _owned="$(sed -n 's/^mem //p' "$_own/custom.machine" | head -1)"
+    fi
+    if [[ -n "$_owned" ]]; then
+        [[ $MEM_GIVEN -eq 0 || "$MEM" == "$_owned" ]] || die "--mem $MEM is not the memory $(kbl_tree_label "$tree")'s own device tree states, $_owned
+       the machine takes its memory from that tree: kbuildlab dt edit changes it, and --no-dtb boots without the tree"
+        MEM="$_owned"
+    fi
     [[ -n "$MEM" ]] || MEM="$(kbl_tree_get "$tree" MEM)"
-    MEM="${MEM:-1G}"
+    MEM="${MEM:-$KBL_DEFAULT_MEM}"
     [[ -n "$SMP" ]] || SMP="$(kbl_tree_get "$tree" SMP)"
     SMP="${SMP:-2}"
     [[ -n "$KASLR" ]] || KASLR="$(kbl_tree_get "$tree" KASLR)"
@@ -370,21 +385,7 @@ USAGE
     # 4,cores=2) and qemu judges them; only a blank would split its command line.
     [[ "$MEM" != *[[:space:]]* ]] || die "MEM is '$MEM'; it may not contain blanks"
     [[ "$SMP" != *[[:space:]]* ]] || die "SMP is '$SMP'; it may not contain blanks"
-    # The leading size of a -m value in bytes, read as qemu reads it (a bare number
-    # is MiB, a fraction such as 1.5G is allowed), or nothing for a form this does
-    # not parse.  Only the u-boot address check below needs it.
-    _mem_bytes() {
-        local m="${1#size=}"
-        m="${m%%,*}"
-        awk -v m="$m" 'BEGIN {
-        if (m !~ /^[0-9]+(\.[0-9]+)?[KkMmGgTt]?$/) exit 1
-        u = toupper(substr(m, length(m))); n = m + 0
-        if (u == "K") n *= 1024; else if (u == "G") n *= 1024 ^ 3
-        else if (u == "T") n *= 1024 ^ 4; else n *= 1024 ^ 2
-        printf "%.0f\n", n
-    }'
-    }
-    _membytes="$(_mem_bytes "$MEM")" || _membytes=""
+    _membytes="$(kbl_mem_bytes "$MEM")" || _membytes=""
 
     # A persistent disk must not be opened read-write by two guests at once, or the
     # ext4 on it corrupts. QEMU's own image lock would refuse the second guest and
@@ -698,9 +699,11 @@ USAGE
 
     _dt() { python3 "${KBL_REPO}/lib/fdt.py" "$@"; }
     _overlaps() { (($1 < $3 + $4 && $3 < $1 + $2)); } # _overlaps START SIZE START SIZE
-    _dtctx="$BOOT"
-    [[ -n "$board" ]] && _dtctx="board-$board"
-    _dtdir="$(kbl_tree_data "$tree")/dt/$_dtctx"
+    # shellcheck source=/dev/null
+    source "${KBL_REPO}/lib/dt.sh"
+    _dt_context "$tree" "$BOOT" "$board"
+    _dtctx="$_dt_ctx"
+    _dtdir="$_dt_dir"
     _dtb=""
     _dtown=0
     _loads=()
@@ -717,8 +720,8 @@ USAGE
         _dtown=1
         [[ -f "$_dtb" ]] || die "$(kbl_tree_label "$tree")'s own device tree is attached to its $_dtctx boot and $_dtb is gone
        kbuildlab dt apply $(kbl_tree_label "$tree") builds it again; kbuildlab dt detach, or --no-dtb for one run, boots without it"
-        [[ "$(sed -n 's/^source //p' "$_dtdir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dtdir/custom.dts" 2>/dev/null | cut -c1-64)" ]] \
-            || die "$_dtdir/custom.dts changed since $_dtb was built from it
+        [[ "$(sed -n 's/^source //p' "$_dtdir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dt_src" 2>/dev/null | cut -c1-64)" ]] \
+            || die "$_dt_src changed since $_dtb was built from it
        kbuildlab dt apply $(kbl_tree_label "$tree") builds and attaches the source; --no-dtb boots without the tree's own for one run"
     fi
     if [[ -n "$_dtb" ]]; then
@@ -1596,15 +1599,13 @@ $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_
         _dtmp="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")" || die "cannot write $_statedir"
         _dumpdtb "$_dtmp" "$([[ "$BOOT" == direct ]] && echo -dtb)" \
             || die "qemu does not start with this run's command line: $(cat "$_dtmp.err" 2>/dev/null)"
-        # shellcheck source=/dev/null
-        source "${KBL_REPO}/lib/dt.sh"
-        _dt_context "$tree" "$BOOT" "$board"
         if [[ "$BOOT" == uboot && -n "$BIOS" ]]; then
             kbl_tree_firmware "$tree"
             [[ "$(readlink -f "$BIOS")" == "$(readlink -f "$_fw_image")" ]] \
                 || die "--bios boots another firmware than $_fw_image, which $_dtl's device tree stands on
        --no-dtb boots this firmware without the tree"
         fi
+        [[ $_dtown -eq 1 ]] || _dt_want=""
         _dt_ensure_base || die "$_dtl has no device tree in a $_dtctx boot to hold $_dtb against: $(_dt_why_none)"
         _dt_unlock
         [[ "$(_dt id "$_dtmp")" == "$(_dt id "$_dt_dir/machine.dtb")" ]] \
@@ -1710,6 +1711,7 @@ $(head -12 <<<"$_lost" | sed 's/^/         /')
         say "boot         $BOOT firmware chain; rootfs on boot disk"
     fi
     [[ "$ROOT" == disk ]] && say "root         disk $_sdboot (PARTUUID $_puuid)"
+    [[ -z "$_owned" ]] || say "memory       $MEM, the size the tree's own device tree states"
     if [[ -n "$_dtb" && "$BOOT" == uboot ]]; then
         say "dt           $_dtb, which the firmware loads to $_fa"
     elif [[ -n "$_dtb" ]]; then say "dt           $_dtb, which qemu hands to the kernel"; fi

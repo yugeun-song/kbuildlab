@@ -396,7 +396,13 @@ COMMANDS = [
             Opt("--qmp-port", "QMP port (default: the tree's QMP_PORT)", "N", "number:a QMP port"),
             Opt("--qmp", "a QMP monitor and the vmcoreinfo device (the default)"),
             Opt("--no-qmp", "no QMP monitor and no vmcoreinfo device"),
-            Opt("--mem|-m", "guest memory, as qemu's -m takes it", "SIZE", "text:a size, e.g. 2G"),
+            Opt(
+                "--mem|-m",
+                "guest memory, as qemu's -m takes it; with the tree's own device tree attached, the "
+                "machine takes its memory from that tree, and another size here is refused",
+                "SIZE",
+                "text:a size, e.g. 2G",
+            ),
             Opt("--smp", "guest CPUs", "N", "number:a CPU count"),
             Opt("--bios", "firmware image", "PATH", "file"),
             Opt("--dtb", "boot on this device tree blob instead of the one kbuildlab dt attached", "PATH", "file"),

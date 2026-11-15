@@ -153,6 +153,10 @@ SRC=@SRC@
 # tree that `kbuildlab dt` attached: stated, never chosen for you, and held
 # against the kernel, the initramfs and the guest's RAM.
 # UBOOT_FDTADDR=0x47000000
+#
+# Where the device tree source you write is kept, as DT_DIR/BOOT.dts.  Unset, it
+# lies in the tree's data directory beside what is built from it.
+# DT_DIR=~/kernels/v6.18-arm64/dt
 
 # --- where the gdbstub listens -----------------------------------------------
 # Default 127.0.0.1.  qemu's own `-gdb tcp::N` spelling binds 0.0.0.0 AND [::],

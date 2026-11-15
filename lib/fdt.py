@@ -10,6 +10,7 @@ fdt.py carried WANT GOT        what of WANT did not arrive in GOT; status 1 when
 fdt.py agrees BASE OWN [--load NAME START SIZE]...
                                where OWN states other hardware than BASE, sets memory aside that
                                the machine lacks, or covers what is loaded at START; status 1 then
+fdt.py machine FILE            the machine FILE asks for: its memory in MiB and its CPUs
 fdt.py prop FILE PATH NAME     one property's value; status 1 when it is not there
 fdt.py image-size IMAGE        the memory a Linux Image header says the kernel occupies
 """
@@ -596,15 +597,18 @@ def agrees(base, own, loads=()):
 
     new = {n.path for n in added}
     fixed = []
-    for n in reserved.children if reserved is not None else []:
-        if n.enabled():
-            fixed.extend((n.path, b, s) for b, s in ranges(n))
+    step = cells = 0
+    if reserved is not None:
+        cells = reserved.cell("#size-cells", 1)
+        step = 4 * (reserved.cell("#address-cells", 2) + cells)
+        for n in reserved.children:
+            if n.enabled():
+                fixed.extend((n.path, b, s) for b, s in ranges(n))
     for n in added:
         if not n.enabled():
             continue
-        step = 4 * (reserved.cell("#address-cells", 2) + reserved.cell("#size-cells", 1))
         if "reg" in n.props:
-            if not n.props["reg"] or len(n.props["reg"]) % step:
+            if step == 0 or not n.props["reg"] or len(n.props["reg"]) % step:
                 out.append("! %s reg: not whole pairs of an address and a size" % n.path)
             for b, s in ranges(n):
                 if s == 0:
@@ -612,7 +616,7 @@ def agrees(base, own, loads=()):
                 elif not _inside(b, s, mem):
                     out.append("! %s reg: %s lies outside the machine's memory (%s)" % (n.path, span(b, s), held))
         elif "size" in n.props:
-            if _join(n.cells("size")[: reserved.cell("#size-cells", 1)]) == 0:
+            if _join(n.cells("size")[:cells]) == 0:
                 out.append("! %s size: nothing to set aside" % n.path)
             for b, s in ranges(n, "alloc-ranges"):
                 if not _inside(b, s, mem):
@@ -647,6 +651,16 @@ def agrees(base, own, loads=()):
             if _overlap((start, size), (b, s)):
                 out.append("! memreserve %s covers the %s, loaded at %s" % (span(b, s), name, span(start, size)))
     return out
+
+
+def machine(tree):
+    total = sum(size for _, size in memory(tree))
+    if total == 0:
+        raise FdtError("it states no memory")
+    if total % (1 << 20):
+        raise FdtError("its memory, %d bytes, is not whole MiB, which is how qemu sizes a machine" % total)
+    cpus = sum(1 for n in tree.root.walk() if n.text("device_type") == "cpu")
+    return ["mem %dM" % (total >> 20), "smp %d" % cpus]
 
 
 def identity(tree):
@@ -720,6 +734,9 @@ def main(argv):
                 if lines:
                     print("\n".join(lines))
                 return 1 if lines else 0
+        if cmd == "machine" and args:
+            print("\n".join(machine(load(args[0]))))
+            return 0
         if cmd == "prop" and len(args) == 3:
             node = load(args[0]).node(args[1])
             if node is None or args[2] not in node.props:

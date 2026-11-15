@@ -1,8 +1,8 @@
 _DT_ACTIONS="show edit apply detach reset diff probe check"
 _DT_STAGES="machine firmware base custom booted"
-_DT_OWN="the hardware is the machine's to state: its memory and CPUs follow MEM and SMP in tree.conf (--mem and
-       --smp for one run), and the tree QEMU makes follows them; a tree of its own adds to /chosen, /aliases
-       and /reserved-memory"
+_DT_OWN="the machine takes the size of its memory from the tree, and qemu is asked for the tree it then makes:
+       whatever else the two state differently is hardware qemu has no machine for (its CPUs follow SMP in
+       tree.conf); a tree of its own adds to /chosen, /aliases and /reserved-memory"
 _DT_ROOM="what a tree sets aside lies in the machine's memory, clear of what is set aside or loaded there already"
 
 _dt_rule() { # _dt_rule LINES
@@ -49,6 +49,10 @@ _dt_context() { # _dt_context TREE BOOT BOARD
     _dt_boot="$boot"
     _dt_board="$board"
     _dt_dir="$(kbl_tree_data "$tree")/dt/$_dt_ctx"
+    _dt_src="$(kbl_tree_get "$tree" DT_DIR)"
+    if [[ -n "$_dt_src" ]]; then
+        _dt_src="$(kbl_tree_path "$tree" "$_dt_src")/$_dt_ctx.dts"
+    else _dt_src="$_dt_dir/custom.dts"; fi
     _dt_base=machine
     [[ "$boot" == uboot ]] && _dt_base=firmware
     return 0
@@ -68,6 +72,14 @@ _dt_unlock() {
     _dt_locked=""
 }
 
+_dt_machine() {
+    if [[ -n "${_dt_want+x}" ]]; then
+        printf '%s' "$_dt_want"
+    elif [[ -f "$_dt_dir/attached" && -f "$_dt_dir/custom.machine" ]]; then
+        cat "$_dt_dir/custom.machine"
+    fi
+}
+
 _dt_inputs() {
     local q ub
     q="$(kbl_tree_get "$_dt_tree" QEMU_BIN)"
@@ -83,6 +95,7 @@ _dt_inputs() {
         printf 'firmware %s %s\n' "$ub" "$(stat -L -c '%s %Y' "$ub" 2>/dev/null)"
     fi
     printf 'launcher %s\n' "$(sha1sum <"$KBL_REPO/lib/run-qemu.sh" | cut -c1-40)"
+    printf 'machine %s\n' "$(_dt_machine)"
 }
 
 _dt_decompile() { # _dt_decompile BLOB SOURCE
@@ -103,6 +116,8 @@ _dt_probe() {
     mkdir -p "$_dt_dir" || die "dt: cannot create $_dt_dir"
     tmp="$(mktemp -d -p "$_dt_dir" .probe.XXXXXX)" || die "dt: cannot write $_dt_dir"
     if [[ -n "$_dt_board" ]]; then args+=(--board "$_dt_board"); else args+=(--boot "$_dt_boot"); fi
+    s="$(_dt_machine | sed -n 's/^mem //p' | head -1)"
+    [[ -z "$s" ]] || args+=(--mem "$s")
     say "asking       the machine$([[ "$_dt_boot" == uboot ]] && echo ' and its firmware') for the device tree" >&2
     KBL_DT_PROBE="$tmp" "$KBL_REPO/lib/run-qemu.sh" "${args[@]}" </dev/null >"$tmp/log" 2>&1 {_dt_lock_fd}>&-
     rc=$?
@@ -253,17 +268,18 @@ _dt_failed() { # _dt_failed LOG WHAT
 }
 
 _dt_backup_source() {
-    [[ -f "$_dt_dir/custom.dts" ]] || return 0
-    cp -f "$_dt_dir/custom.dts" "$_dt_dir/custom.dts~" || die "dt: cannot write $_dt_dir/custom.dts~"
+    [[ -f "$_dt_src" ]] || return 0
+    cp -f "$_dt_src" "$_dt_src~" || die "dt: cannot write $_dt_src~"
 }
 
 _dt_apply() { # _dt_apply [FILE]
-    local file="${1:-}" src="$_dt_dir/custom.dts" out="$_dt_dir/custom.dtb" new="$_dt_dir/.custom.new.dtb"
-    local log="$_dt_dir/custom.log" kind="" inc="" onto ovl n label lost take=""
+    local file="${1:-}" src="$_dt_src" out="$_dt_dir/custom.dtb" new="$_dt_dir/.custom.new.dtb"
+    local log="$_dt_dir/custom.log" kind="" inc="" onto ovl n label lost take="" want stated
     label="$(kbl_tree_label "$_dt_tree")"
     _dt_need dtc
     _dt_ensure_base || _dt_no_tree
     _dt_lock
+    mkdir -p "$(dirname "$src")" || die "dt: cannot create $(dirname "$src") (DT_DIR in $_dt_tree/tree.conf)"
     rm -f "$new"
     if [[ -n "$file" ]]; then
         [[ -f "$file" && -r "$file" ]] || die "dt apply: no readable file '$file'"
@@ -324,18 +340,28 @@ _dt_apply() { # _dt_apply [FILE]
         rm -f "$new"
         die "dt: the build left no well-formed tree"
     }
+    want="$(_dt_fdt machine "$new" | grep '^mem ')" || {
+        rm -f "$new"
+        die "dt: ${file:-$src} states no machine qemu can be asked for (above)"
+    }
+    stated="$(kbl_tree_get "$_dt_tree" MEM)"
+    [[ "$(kbl_mem_bytes "${want#mem }")" != "$(kbl_mem_bytes "${stated:-$KBL_DEFAULT_MEM}")" ]] || want=""
+    _dt_want="$want"
+    _dt_ensure_base || _dt_no_tree
     lost="$(_dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$new")"
     case $? in
         0) ;;
         1)
             rm -f "$new"
-            die "dt: ${file:-$src} does not agree with the machine $label boots on, in $(wc -l <<<"$lost") place(s):
+            unset _dt_want
+            die "dt: ${file:-$src} does not agree with the machine qemu makes${want:+ for ${want#mem } of memory}, in $(wc -l <<<"$lost") place(s):
 $(head -12 <<<"$lost" | sed 's/^/         /')
 $(_dt_rule "$lost")
        nothing was built or attached"
             ;;
         *)
             rm -f "$new"
+            unset _dt_want
             die "dt: cannot hold ${file:-$src} against the $_dt_base's tree"
             ;;
     esac
@@ -358,21 +384,25 @@ $(_dt_rule "$lost")
         [[ -n "$inc" ]] && printf 'include %s\n' "$inc"
         printf 'base %s\n' "$_dt_base"
     } >"$_dt_dir/custom.id"
+    printf '%s' "${want:+$want$'\n'}" >"$_dt_dir/custom.machine"
     date '+%Y-%m-%d %H:%M:%S' >"$_dt_dir/attached"
+    unset _dt_want
     n="$(grep -c 'Warning' "$log" 2>/dev/null)" || n=0
     ok "built        $out ($(stat -c%s "$out") bytes$([[ $n -gt 0 ]] && echo ", $n dtc warning(s) in $log"))"
     say "source       $src"
+    [[ -z "$want" ]] || say "memory       ${want#mem }, as the tree states (tree.conf states ${stated:-$KBL_DEFAULT_MEM}): qemu is started so"
     n="$(_dt_fdt diff "$_dt_dir/$_dt_base.dtb" "$out" | wc -l)"
     say "differs      in $n place(s) from the $_dt_base's (kbuildlab dt diff $label)"
     say "attached     $label boots on it from its next $_dt_ctx boot (kbuildlab dt detach $label undoes that)"
 }
 
 _dt_edit() {
-    local src="$_dt_dir/custom.dts" ed before label
+    local src="$_dt_src" ed before label
     label="$(kbl_tree_label "$_dt_tree")"
     _dt_need dtc
     _dt_ensure_base || _dt_no_tree
     if [[ ! -f "$src" ]]; then
+        mkdir -p "$(dirname "$src")" || die "dt: cannot create $(dirname "$src") (DT_DIR in $_dt_tree/tree.conf)"
         _dt_decompile "$_dt_dir/$_dt_base.dtb" "$src"
         say "source       $src, made from the $_dt_base's tree"
     fi
@@ -397,7 +427,7 @@ _dt_detach() {
     if [[ -f "$_dt_dir/attached" ]]; then
         rm -f "$_dt_dir/attached" || die "dt: cannot write $_dt_dir"
         ok "detached     $label boots on the $_dt_base's own tree again ($_dt_ctx boot)"
-        [[ -f "$_dt_dir/custom.dts" ]] && say "kept         $_dt_dir/custom.dts and its build; kbuildlab dt apply $label attaches them again"
+        [[ -f "$_dt_src" ]] && say "kept         $_dt_src and its build; kbuildlab dt apply $label attaches them again"
     else
         say "detached     nothing was attached to $label's $_dt_ctx boot"
     fi
@@ -408,13 +438,16 @@ _dt_reset() { # _dt_reset YES
     local label f n=0
     label="$(kbl_tree_label "$_dt_tree")"
     _dt_lock
-    for f in "$_dt_dir"/custom.* "$_dt_dir"/booted.* "$_dt_dir/attached"; do [[ -e "$f" ]] && n=$((n + 1)); done
+    for f in "$_dt_src" "$_dt_src~" "$_dt_dir"/custom.* "$_dt_dir"/booted.* "$_dt_dir/attached"; do
+        [[ -e "$f" ]] && n=$((n + 1))
+    done
     [[ $n -gt 0 ]] || {
         say "reset        $label has no device tree of its own for the $_dt_ctx boot"
         return 0
     }
-    _kbl_confirm "$1" "delete $label's own device tree source and builds in $_dt_dir?" || die "dt reset: cancelled"
-    rm -f "$_dt_dir"/custom.* "$_dt_dir"/booted.* "$_dt_dir/attached" || die "dt: cannot write $_dt_dir"
+    _kbl_confirm "$1" "delete $label's own device tree source, $_dt_src, and its builds in $_dt_dir?" || die "dt reset: cancelled"
+    rm -f "$_dt_src" "$_dt_src~" "$_dt_dir"/custom.* "$_dt_dir"/booted.* "$_dt_dir/attached" \
+        || die "dt: cannot write $_dt_dir or $_dt_src"
     ok "reset        $label boots on the $_dt_base's own tree; the next dt edit starts from it"
 }
 
@@ -454,15 +487,15 @@ _dt_show() { # _dt_show STAGE SOURCE JSON
         return 0
     fi
     if [[ $json -eq 1 ]]; then
-        python3 - "$label" "$_dt_ctx" "$force" "$_dt_dir" "$f" "${KBL_REPO}/lib" <<'EOF'
+        python3 - "$label" "$_dt_ctx" "$force" "$_dt_dir" "$f" "${KBL_REPO}/lib" "$_dt_src" <<'EOF'
 import json, os, sys
-label, ctx, force, d, f, lib = sys.argv[1:]
+label, ctx, force, d, f, lib, source = sys.argv[1:]
 sys.path.insert(0, lib)
 import fdt
 stages = {s: os.path.join(d, s + ".dtb") for s in ("machine", "firmware", "custom", "booted")
           if os.path.isfile(os.path.join(d, s + ".dtb"))}
-print(json.dumps({"tree": label, "boot": ctx, "in_force": force, "directory": d, "stages": stages,
-                  "shown": f, "structure": fdt.summary(fdt.load(f))}, indent=1))
+print(json.dumps({"tree": label, "boot": ctx, "in_force": force, "directory": d, "source": source,
+                  "stages": stages, "shown": f, "structure": fdt.summary(fdt.load(f))}, indent=1))
 EOF
         return 0
     fi
@@ -479,17 +512,19 @@ EOF
     fi
     _dt_stage_line machine "as QEMU holds it"
     _dt_stage_line firmware "as the firmware holds it when it starts the kernel"
-    if [[ -f "$_dt_dir/custom.dts" ]]; then
+    if [[ -f "$_dt_src" ]]; then
         note="not attached"
         [[ -f "$_dt_dir/attached" ]] && note="attached $(cat "$_dt_dir/attached")"
         if [[ ! -f "$_dt_dir/custom.dtb" ]]; then
-            say "custom       $_dt_dir/custom.dts  not built (kbuildlab dt apply $label)"
+            say "custom       $_dt_src  not built (kbuildlab dt apply $label)"
         else
-            [[ "$(sed -n 's/^source //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dt_dir/custom.dts" | cut -c1-64)" ]] \
+            [[ "$(sed -n 's/^source //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dt_src" | cut -c1-64)" ]] \
                 || note="$note; the source changed since this build (kbuildlab dt apply $label)"
             _dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$_dt_dir/custom.dtb" >/dev/null 2>&1 \
                 || note="$note; it does not agree with the machine as it is now (kbuildlab dt check $label)"
-            _dt_stage_line custom "$note"
+            say "custom       $_dt_src, built as $_dt_dir/custom.dtb  $(date -r "$_dt_dir/custom.dtb" '+%Y-%m-%d %H:%M')  $note"
+            note="$(sed -n 's/^mem //p' "$_dt_dir/custom.machine" 2>/dev/null | head -1)"
+            [[ -z "$note" ]] || say "memory       $note, as the tree states: qemu is started so while it is attached"
         fi
     fi
     if [[ -f "$_dt_dir/booted.dtb" ]]; then
@@ -527,7 +562,7 @@ _dt_check() {
             rc=1
         fi
     done
-    if [[ ! -f "$_dt_dir/custom.dts" && ! -f "$f" ]]; then
+    if [[ ! -f "$_dt_src" && ! -f "$f" ]]; then
         ok "custom       none: $label boots on the $_dt_base's own tree"
         [[ ! -f "$_dt_dir/attached" ]] || {
             bad "attached     a tree is marked attached and there is none (kbuildlab dt detach $label)"
@@ -536,7 +571,7 @@ _dt_check() {
         return $rc
     fi
     if [[ ! -f "$f" ]]; then
-        bad "custom       $_dt_dir/custom.dts is not built (kbuildlab dt apply $label)"
+        bad "custom       $_dt_src is not built (kbuildlab dt apply $label)"
         return 1
     fi
     if _dt_fdt check "$f" 2>/dev/null; then
@@ -545,10 +580,10 @@ _dt_check() {
         bad "custom       $f is not a well-formed tree (kbuildlab dt apply $label)"
         rc=1
     fi
-    if [[ "$(sed -n 's/^source //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dt_dir/custom.dts" 2>/dev/null | cut -c1-64)" ]]; then
-        ok "source       custom.dts is what custom.dtb was built from"
+    if [[ "$(sed -n 's/^source //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(sha256sum <"$_dt_src" 2>/dev/null | cut -c1-64)" ]]; then
+        ok "source       $_dt_src is what custom.dtb was built from"
     else
-        bad "source       custom.dts changed since custom.dtb was built (kbuildlab dt apply $label)"
+        bad "source       $_dt_src changed since custom.dtb was built (kbuildlab dt apply $label)"
         rc=1
     fi
     if n="$(_dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$f")"; then
@@ -556,6 +591,13 @@ _dt_check() {
     else
         bad "agrees       it does not agree with the machine as it is now:"
         head -8 <<<"$n" | sed 's/^/       /'
+        rc=1
+    fi
+    n="$(sed -n 's/^mem //p' "$_dt_dir/custom.machine" 2>/dev/null | head -1)"
+    if [[ "$(_dt_fdt machine "$f" 2>/dev/null | sed -n 's/^mem //p')" == "${n:-$(_dt_fdt machine "$_dt_dir/machine.dtb" 2>/dev/null | sed -n 's/^mem //p')}" ]]; then
+        ok "memory       qemu is started with the memory the tree states${n:+, $n}"
+    else
+        bad "memory       the tree states other memory than qemu is started with (kbuildlab dt apply $label)"
         rc=1
     fi
     if [[ -f "$_dt_dir/attached" ]]; then

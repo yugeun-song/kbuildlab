@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Hold a tree's own device tree to the machine, end to end: one that states
-other hardware is refused, one that only sets memory aside is attached and
-booted, and what the kernel then reports is held against it.  The tree is put
-back as it was.
+"""Hold a tree's own device tree to the machine, end to end: the machine takes
+its memory from the tree, a tree that states hardware qemu has no machine for is
+refused, and what the booted kernel reports is held against the tree.  The tree
+is put back as it was.
 
     dt-guest.py TREE [RUN-OPTION...]
 
 The overlays are made from what `kbuildlab dt --json` reports, so nothing here
-knows a machine: one halves the first memory range and one sets aside a page
-past the end of memory (both refused), one sets aside a region in the middle of
-the first range (attached).  Refuses a tree that already has a device tree of
-its own.  The guest is driven as tests/guest.py drives it, and the same
-environment variables apply.
+knows a machine: one moves the first memory range and one sets aside a page past
+the end of memory (both refused); one halves the first memory range and one sets
+aside a region in the middle of what is left (both attached, one on the other).
+Refuses a tree that already has a device tree of its own.  The guest is driven
+as tests/guest.py drives it, and the same environment variables apply.
 """
 
 import base64
@@ -29,6 +29,8 @@ sys.path.insert(0, os.path.join(repo, "lib"))
 import fdt  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("guest", os.path.join(here, "guest.py"))
+if spec is None or spec.loader is None:
+    raise SystemExit("dt-guest.py: cannot load tests/guest.py")
 guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
 
@@ -123,30 +125,40 @@ def main(argv):
     if state.get("device_tree", "") is None:
         print("dt-guest.py: %s boots without a device tree" % tree)
         return 2
-    d = state["directory"]
-    if state["in_force"] == "custom" or os.path.exists(os.path.join(d, "custom.dts")):
+    d, source = state["directory"], state["source"]
+    if state["in_force"] == "custom" or os.path.exists(source):
         print(
-            "dt-guest.py: %s has a device tree of its own in %s; this test would replace it" % (tree, d),
+            "dt-guest.py: %s has a device tree of its own, %s; this test would replace it" % (tree, source),
             file=sys.stderr,
         )
         return 2
     s = state["structure"]
     stated = [m for m in s["memory"] if m["reg"] and m["status"] in (None, "okay")]
-    if not stated or stated[0]["reg"][0][1] < 4 * HOLE:
-        print("dt-guest.py: the base tree of %s has too little memory to set some aside" % tree, file=sys.stderr)
+    if not stated or stated[0]["reg"][0][1] < 8 * HOLE:
+        print(
+            "dt-guest.py: the base tree of %s has too little memory to halve and set some aside" % tree, file=sys.stderr
+        )
         return 2
     memory = stated[0]
     ac, sc = s["address_cells"], s["size_cells"]
     start, size = memory["reg"][0]
-    end = max(b + n for m in stated for b, n in m["reg"])
-    hole = ((start + size // 2) & ~((2 << 20) - 1), HOLE)
+    whole = joined(r for m in stated for r in map(tuple, m["reg"]))
+    end = max(b + n for b, n in whole)
+    halved = [list(r) for r in memory["reg"]]
+    halved[0][1] //= 2
+    left = joined([tuple(r) for r in halved] + [r for m in stated[1:] for r in map(tuple, m["reg"])])
+    hole = ((start + halved[0][1] // 2) & ~((2 << 20) - 1), HOLE)
     has = any(n.path == RESERVED for n in fdt.load(state["shown"]).root.children)
 
-    def halved(tmp):
-        reg = [list(r) for r in memory["reg"]]
-        reg[0][1] //= 2
+    def write(tmp, name, body):
+        path = os.path.join(tmp, name)
+        with open(path, "w") as f:
+            f.write("/dts-v1/;\n/plugin/;\n%s\n" % body)
+        return path
+
+    def ranged(tmp, name, reg):
         text = " ".join("%s %s" % (cells(b, ac), cells(n, sc)) for b, n in reg)
-        return write(tmp, "half-memory.dtso", "&{%s} { reg = <%s>; };" % (memory["path"], text))
+        return write(tmp, name, "&{%s} { reg = <%s>; };" % (memory["path"], text))
 
     def aside(tmp, name, at, length):
         child = "%s@%x { reg = <%s %s>; no-map; };" % (name, at, cells(at, ac), cells(length, sc))
@@ -155,22 +167,17 @@ def main(argv):
         head = "#address-cells = <%d>; #size-cells = <%d>; ranges;" % (ac, sc)
         return write(tmp, name + ".dtso", "&{/} { reserved-memory { %s %s }; };" % (head, child))
 
-    def write(tmp, name, body):
-        path = os.path.join(tmp, name)
-        with open(path, "w") as f:
-            f.write("/dts-v1/;\n/plugin/;\n%s\n" % body)
-        return path
-
     def own():
         rc, out = kbl("dt", tree, "--json", stdout_only=True)
-        return rc == 0 and (json.loads(out)["in_force"] == "custom" or os.path.exists(os.path.join(d, "custom.dts")))
+        return rc == 0 and (json.loads(out)["in_force"] == "custom" or os.path.exists(source))
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            rc, out = kbl("dt", "apply", tree, halved(tmp))
+            moved = [[b + (16 << 20), n] for b, n in memory["reg"]]
+            rc, out = kbl("dt", "apply", tree, ranged(tmp, "moved.dtso", moved))
             check(
                 rc != 0 and "does not agree with the machine" in out and memory["path"] + " reg" in out and not own(),
-                "an overlay that halves %s is refused, and nothing is attached" % memory["path"],
+                "memory moved to %#x, where qemu has no machine with it, is refused" % moved[0][0],
                 out,
             )
             rc, out = kbl("dt", "apply", tree, aside(tmp, "kbl-past", end, 4096))
@@ -179,10 +186,23 @@ def main(argv):
                 "a page set aside at %#x, past the end of memory, is refused" % end,
                 out,
             )
+            rc, out = kbl("dt", "apply", tree, ranged(tmp, "half.dtso", halved))
+            if not check(
+                rc == 0 and "attached" in out and "%dM" % (sum(n for _, n in left) >> 20) in out,
+                "%s halved is attached, and qemu is to be started with %d MiB"
+                % (memory["path"], sum(n for _, n in left) >> 20),
+                out,
+            ):
+                return 1
+            check(
+                fdt.memory(fdt.load(os.path.join(d, "machine.dtb"))) == left,
+                "qemu, asked with that memory, states it as the tree does",
+                spans(fdt.memory(fdt.load(os.path.join(d, "machine.dtb")))),
+            )
             rc, out = kbl("dt", "apply", tree, aside(tmp, "kbl-hole", *hole))
             if not check(
                 rc == 0 and "attached" in out,
-                "%d MiB set aside at %#x, inside the memory, is built and attached" % (hole[1] >> 20, hole[0]),
+                "%d MiB set aside at %#x, inside what is left, is attached on top" % (hole[1] >> 20, hole[0]),
                 out,
             ):
                 return 1
@@ -191,12 +211,11 @@ def main(argv):
         rc, out = kbl("dt", "diff", tree)
         check(
             rc == 0 and out.count("\n") == 1 and RESERVED in out,
-            "it differs from the base in %s alone" % RESERVED,
+            "it differs from what qemu and the firmware hand on in %s alone" % RESERVED,
             out,
         )
         custom = fdt.load(os.path.join(d, "custom.dtb"))
 
-        source = os.path.join(d, "custom.dts")
         with open(source) as f:
             kept = f.read()
         with open(source, "a") as f:
@@ -214,6 +233,12 @@ def main(argv):
         check(
             rc != 0 and "is not the one" in out,
             "a run with %s CPUs, which is not the machine tree.conf states, is refused" % smp,
+            out,
+        )
+        rc, out = kbl("run", tree, "--run", "--mem", "%dM" % (sum(n for _, n in whole) >> 20), *options, timeout=120)
+        check(
+            rc != 0 and "is not the memory" in out,
+            "a run with other memory than the tree states is refused",
             out,
         )
 
@@ -234,15 +259,15 @@ def main(argv):
                 with open(log, "w") as f:
                     f.write(g.text)
         check(status == 0, "kbuildlab run ends with status 0", status)
+        check(
+            "the size the tree's own device tree states" in g.text,
+            "the launcher says it took the memory from the tree",
+        )
         got = fdt.parse(base64.b64decode(re.sub(r"[^A-Za-z0-9+/=]", "", text)))
         lost = fdt.carried(custom, got)
         check(lost == [], "the kernel's /sys/firmware/fdt carries the attached tree whole", "\n".join(lost))
         check(hole in unmapped(got), "it sets %#x aside, unmapped" % hole[0], spans(unmapped(got)))
-        check(
-            fdt.memory(got) == joined(r for m in stated for r in map(tuple, m["reg"])),
-            "its memory is the machine's",
-            spans(fdt.memory(got)),
-        )
+        check(fdt.memory(got) == left, "its memory is the halved one", spans(fdt.memory(got)))
         ram = joined(
             (int(lo, 16), int(hi, 16) + 1 - int(lo, 16))
             for lo, hi in re.findall(r"^([0-9a-f]+)-([0-9a-f]+) : System RAM\s*$", iomem, re.M | re.I)
@@ -254,10 +279,12 @@ def main(argv):
             "/proc/iomem  %s\nthe tree     %s" % (spans(ram), spans(want)),
         )
         usable = sum(n for _, n in want)
-        kb = int(re.search(r"MemTotal:\s+(\d+)", total).group(1))
+        found = re.search(r"MemTotal:\s+(\d+)", total)
+        kb = int(found.group(1)) if found else 0
         check(
             usable * 0.8 < kb * 1024 <= usable,
             "MemTotal is %d kB, within the %d MiB that leaves" % (kb, usable >> 20),
+            total,
         )
         booted = os.path.join(d, "booted.dtb")
         if check(os.path.isfile(booted), "the launcher kept what the kernel was handed (booted.dtb)"):
@@ -272,13 +299,17 @@ def main(argv):
         rc, out = kbl("dt", "detach", tree)
         check(rc == 0, "detach", out)
         rc, out = kbl("dt", tree, "--json", stdout_only=True)
-        check(rc == 0 and json.loads(out)["in_force"] != "custom", "detached, the base is in force again", out)
+        check(
+            rc == 0
+            and json.loads(out)["in_force"] != "custom"
+            and fdt.memory(fdt.load(json.loads(out)["shown"])) == whole,
+            "detached, the base is in force again, with the memory tree.conf states",
+            out,
+        )
     finally:
         rc, out = kbl("dt", "reset", tree, "--yes")
         check(
-            rc == 0
-            and not os.path.exists(os.path.join(d, "custom.dts"))
-            and not os.path.exists(os.path.join(d, "attached")),
+            rc == 0 and not os.path.exists(source) and not os.path.exists(os.path.join(d, "attached")),
             "reset leaves the tree as it was found",
             out,
         )

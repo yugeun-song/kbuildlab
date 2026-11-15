@@ -639,7 +639,7 @@ handed on the last boot with `custom`).
 
 ```
 kbuildlab dt [TREE] [--stage S] [--source|--json]   what is in force, where each stage is, what it describes
-kbuildlab dt edit [TREE]                 edit custom.dts (made from the base the first time), build, attach
+kbuildlab dt edit [TREE]                 edit the tree's own source (made from the base the first time), build, attach
 kbuildlab dt apply [TREE] [FILE]         the same for a source, a blob or an overlay
 kbuildlab dt diff [TREE] [A [B]]         two stages or blobs, property by property
 kbuildlab dt detach|reset|probe|check [TREE]
@@ -650,22 +650,28 @@ to `UBOOT_FDTADDR` and uses it there. A direct boot passes it to QEMU, and is
 refused where QEMU would not hand it on as it is (arm64 QEMU writes `/memory`
 itself). `run --dtb FILE` and `--no-dtb` decide for one run.
 
+The tree's own source is the whole tree: `custom.dts` in the data directory, or
+`DT_DIR/BOOT.dts` where `tree.conf` states `DT_DIR`. What you write belongs in
+your workspace; what is built from it stays in the data directory.
+
 The tree, the machine and what is loaded into it agree, or nothing boots. The
-hardware is the machine's to state: memory and CPUs follow `MEM` and `SMP`, and the
-tree QEMU makes follows them. A tree of its own adds to `/chosen`, `/aliases` and
-`/reserved-memory`, and makes memory reservations. `dt apply` and `run` refuse one
-that states anything else otherwise than its base does, that sets aside memory the
-machine lacks or that is taken already (by another region, or by the kernel, the
-initramfs and the tree itself where the firmware loads them), or that writes
-`/reserved-memory` in a form the kernel passes over.
+machine takes the size of its memory from the tree: `dt apply` reads it, asks
+QEMU and the firmware for the tree they hand on with that much memory, and holds
+the tree's own against it; while that tree is attached, `run` starts QEMU so.
+Whatever else the two state differently is hardware QEMU has no machine for (its
+CPUs follow `SMP`), and is refused. A tree of its own adds to `/chosen`,
+`/aliases` and `/reserved-memory`, and makes memory reservations; it is refused
+where it sets aside memory the machine lacks or that is taken already (by another
+region, or by the kernel, the initramfs and the tree itself where the firmware
+loads them), or writes `/reserved-memory` in a form the kernel passes over.
 
 A run also refuses whatever would make the kernel see a tree other than the one
 attached: a source edited since its build, a `--mem`, `--smp` or `--bios` that
-makes this run's machine or firmware another than `tree.conf` states, a blob that
-does not read back from the boot partition, a loader that rewrites it. The last is
-found in the guest's memory as the kernel starts, and stops the guest; additions to
-`/chosen`, memory reservations and the random seeds are the loader's to make.
-`dt check` says the same without booting.
+makes this run's machine or firmware another than the tree and `tree.conf` state,
+a blob that does not read back from the boot partition, a loader that rewrites it.
+The last is found in the guest's memory as the kernel starts, and stops the guest;
+additions to `/chosen`, memory reservations and the random seeds are the loader's
+to make. `dt check` says the same without booting.
 
 ## The tree.conf
 
@@ -688,7 +694,9 @@ qemu's `-m` and `-smp` as written. A u-boot boot loads the image where
 (arm64 at 1 GiB, riscv64 above u-boot at 2 GiB), and there an address outside the
 guest's RAM is refused. Another machine states both, and `RAM_BASE` (hex) for the
 same check. `UBOOT_FDTADDR`, where the firmware puts an attached device tree, is
-always stated and is held against the kernel, the initramfs and the RAM. A UEFI boot needs `UEFI_ENTRY`, the image base the EFI stub chooses;
+always stated and is held against the kernel, the initramfs and the RAM. `DT_DIR`
+is where the tree's own device tree sources are kept. A UEFI boot needs
+`UEFI_ENTRY`, the image base the EFI stub chooses;
 it is measured, not assumed.
 
 `run` passes `-nodefaults` and states every device itself. `STORAGE` is the bus of
