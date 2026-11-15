@@ -38,7 +38,7 @@ cmd_doctor() {
         if g="$(kbl_gdb "$a" 2>/dev/null)"; then ok "gdb for $a: $g"
         else bad "gdb for $a: none with a working Python$(kbl_pkg_hint gdb)"; rc=1; fi
     done
-    for t in mkimage mcopy clangd drgn; do
+    for t in mkimage mcopy dtc clangd drgn; do
         if command -v "$t" >/dev/null 2>&1; then ok "$t"
         else printf '  %s-%s %s (optional)%s\n' "$KBL_D" "$KBL_0" "$t" "$(kbl_pkg_hint "$t")"; fi
     done

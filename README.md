@@ -66,6 +66,11 @@ as `=`; the data directory keeps one fingerprint for the build and one for each
 index (tags, clangd, kmx), so a new clangd or kmx redoes only its own index.
 clangd indexes are warmed last, as many trees at once as free memory allows.
 
+The firmware of the trees being updated is updated first, each once, and skipped
+the same way when its source and settings are what its image was built from. Last,
+a tree that has used `kbuildlab dt` has its device trees asked again where the
+machine, the firmware or qemu changed, and is checked as `dt check` checks it (DT).
+
 Every step takes all the cores it can use. `make` and ctags run `KBL_JOBS` jobs,
 all cores when unset. The build readings, clangd and kmx take all cores as well,
 but clangd's steps run fewer jobs when free memory would otherwise run short
@@ -107,7 +112,8 @@ records stay out of the kernel source; only what the kernel's `make` writes ther
 
 ```
 ~/.config/kbuildlab/trees/ID/tree.conf            what the tree is; edit it by hand
-~/.local/share/kbuildlab/trees/ID/                boot disks, /persist, modules archive
+~/.local/share/kbuildlab/trees/ID/                boot disks, /persist, modules archive, dt/
+~/.local/share/kbuildlab/firmware/                the global firmware: its source and builds
 ```
 
 Both follow `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. Every command reads `tree.conf`
@@ -147,7 +153,7 @@ directory holding a persistent disk.
 ### The lab/ record
 
 Every `config` and `update` records the tree in this repository under
-`lab/trees/ID/`: its `tree.conf`, any `config-fragment`, and its `.config` as
+`lab/trees/ID/`: its `tree.conf`, any `config-fragment` and `firmware.conf`, and its `.config` as
 `savedefconfig` writes it (only what differs from the arch defconfig).
 `lab/workspace/` keeps the workspace's own files (those at its top and at the top
 of each directory a `tree.conf` points into, where the rootfs and firmware are
@@ -500,7 +506,8 @@ flag, `now` is the live runstate).
 read it (the editor adapter reads it through `attach --json`); its `KBL_*` keys are
 added, never renamed. It carries the boot mode, the root file system (`KBL_ROOT`,
 and `KBL_SYSDISK`, the system disk booted), a `--board` run's board (`KBL_BOARD`),
-the firmware load address, the
+the firmware load address, the firmware image (`KBL_FIRMWARE`), an attached device
+tree and where the firmware loads it (`KBL_DTB`, `KBL_DTB_ADDR`), the
 KASLR state, the ssh port, the effective kernel command line (which a firmware
 chain passes itself, so it is nowhere on qemu's command line), the QMP port and
 socket, and qemu's pid with its `/proc` start time — which tells a file that
@@ -587,13 +594,72 @@ kbuildlab set afce PCIE_DEVICES=edu IOMMU=1 EXT_MODULES=~/drivers/edu
 kbuildlab build afce --ext-only && kbuildlab run afce --run
 ```
 
+### Firmware
+
+A tree whose `BOOT` is `uboot` boots kbuildlab's global firmware for its
+architecture: one U-Boot source in `$XDG_DATA_HOME/kbuildlab/firmware/u-boot/src`,
+built for each architecture beside it, in the build container.
+`presets/firmware/ARCH.conf` describes it: `URL`, `VERSION` (a tag, a branch, or a
+glob of tags whose newest match `update` moves to), `DEFCONFIG`, `FRAGMENTS` (read
+back after the merge, as the kernel presets are), `MAKE_ARGS`, and `IMAGE` and
+`SYMBOLS`, the files `make` builds.
+
+```
+kbuildlab firmware [TREE]                   which firmware each tree boots, its version and image
+kbuildlab firmware update [TREE...|--all]   clone or fetch, move to what VERSION names, build
+kbuildlab firmware build [TREE...|--all]    build the source as checked out or edited (--fresh wipes)
+kbuildlab firmware check [TREE...|--all]    do image, source, settings and fragments still agree
+kbuildlab firmware own [TREE]               register the tree's own firmware.conf and boot that
+kbuildlab firmware global [TREE]            boot the global firmware again
+```
+
+`kbuildlab update` updates the firmware of the trees it updates. An edited source
+is built as it is and never moved. A tree takes a firmware of its own from
+`firmware.conf` beside its `tree.conf` (the same keys, with `SRC` and `BUILD`
+stated in place of `NAME`): `firmware own` checks and builds it, and the tree
+boots it only while that file stays as it was registered.
+
+`attach --stop firmware` stops at the firmware's first instruction; `--stop
+relocated` runs it until it has moved itself and stops in `board_init_r`. Both load
+`SYMBOLS` through `fw-symbols`, at the link address and again where the firmware
+runs once it has moved (`gd->reloc_off`).
+
+### The device tree
+
+QEMU generates the device tree of an arm64 or riscv64 guest, and in a `uboot` boot
+the firmware hands it on. `kbuildlab dt` keeps each stage as source and blob in the
+tree's data directory, under `dt/<boot>/`: `machine` (as QEMU holds it for this
+tree's run), `firmware` (as U-Boot holds it when it starts the kernel, read from
+the guest's memory), `custom` (the tree's own) and `booted` (what the kernel was
+handed on the last boot with `custom`).
+
+```
+kbuildlab dt [TREE] [--stage S] [--source|--json]   what is in force, where each stage is, what it describes
+kbuildlab dt edit [TREE]                 edit custom.dts (made from the base the first time), build, attach
+kbuildlab dt apply [TREE] [FILE]         the same for a source, a blob or an overlay
+kbuildlab dt diff [TREE] [A [B]]         two stages or blobs, property by property
+kbuildlab dt detach|reset|probe|check [TREE]
+```
+
+A `uboot` boot puts the attached blob on the boot partition; the firmware loads it
+to `UBOOT_FDTADDR` and uses it there. A direct boot passes it to QEMU, and is
+refused where QEMU would not hand it on as it is (arm64 QEMU writes `/memory`
+itself). `run --dtb FILE` and `--no-dtb` decide for one run.
+
+A run refuses whatever would make the kernel see a tree other than the one
+attached: a source edited since its build, a machine that differs from the one it
+was built for, a blob that does not read back from the boot partition, a loader
+that rewrites it. The last is found in the guest's memory as the kernel starts,
+and stops the guest; additions to `/chosen`, memory reservations and the random
+seeds are the loader's to make. `dt check` says the same without booting.
+
 ## The tree.conf
 
 `init` and `add` write it from `templates/`. It states what the tree is (`ARCH`,
 `VERSION`, `UPSTREAM`, and `SRC`, the absolute path of the kernel source)
 and the facts the commands consume: `QEMU_BIN`, `MACHINE`, `CPU`, `CONSOLE`,
 `KERNEL_IMAGE_REL`, `GDB_PORT`, `QMP_PORT`, and where they apply `BOOT`, `INITRD`,
-`PERSIST`, `EMULATE`, `CPU_PAGING`, the firmware paths (`UBOOT`, `BOOTDISK`,
+`PERSIST`, `EMULATE`, `CPU_PAGING`, the firmware paths (`BOOTDISK`,
 `OVMF_CODE`/`OVMF_VARS`, `UEFI_ENTRY`) and the run defaults `MEM`, `SMP`, `KASLR`,
 `SSH_PORT`. `GDB` names the gdb to use instead of the first that works;
 `CMDLINE_EXTRA` adds kernel command-line words in every boot mode; `GDB_BIND` is
@@ -607,7 +673,8 @@ qemu's `-m` and `-smp` as written. A u-boot boot loads the image where
 `UBOOT_LOADADDR`/`UBOOT_RDADDR` say; only QEMU's `virt` machine has defaults
 (arm64 at 1 GiB, riscv64 above u-boot at 2 GiB), and there an address outside the
 guest's RAM is refused. Another machine states both, and `RAM_BASE` (hex) for the
-same check. A UEFI boot needs `UEFI_ENTRY`, the image base the EFI stub chooses;
+same check. `UBOOT_FDTADDR`, where the firmware puts an attached device tree, is
+always stated and is held against the kernel, the initramfs and the RAM. A UEFI boot needs `UEFI_ENTRY`, the image base the EFI stub chooses;
 it is measured, not assumed.
 
 `run` passes `-nodefaults` and states every device itself. `STORAGE` is the bus of
@@ -853,14 +920,20 @@ lib/build.sh           the build container and its toolchain; sync, config, buil
 lib/lab.sh             init and the lab/ records
 lib/tags.sh            tags: ctags, cscope, gtags and the clangd index
 lib/update.sh          update
+lib/firmware.sh        firmware: the global one and a tree's own
+lib/dt.sh              dt (lib/fdt.py reads blobs, lib/dtcap.py copies one out of
+                       a guest's memory, lib/gdb-firmware.py follows a firmware in gdb)
 lib/host.sh            doctor, image, containers
 lib/run-qemu.sh        run; run-gdb.sh, run-drgn.sh and resume.sh are attach, drgn
                        and resume, each a program of its own (lib/qmp.py talks QMP)
 lib/cli.py             every command's options, for --help and Tab completion
 lib/index/             the indexers: clangd.py, the tag view, the build readers
 boards/                the real SoC machine models run --board boots, one file each
+presets/firmware/      the global firmware of each architecture, and its fragments
 completions/           the bash and zsh completions install.sh puts in place
-tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs
+tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs,
+                       fdt.py against fdtget and damaged blobs, the refusals of dt and
+                       firmware, and guest.py, which boots a tree and runs commands in it
 ```
 
 ## Dependencies
@@ -874,6 +947,6 @@ Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which makes symbo
 resolve before the MMU is on; `kbuildlab attach` finds it if it is installed and
 says so if it is not. `clangd` and `python3` on the host, for the clangd index;
 absent, `kbuildlab tags` says so and builds the other three. `sgdisk`, `sfdisk` and
-mtools, for a `ROOT=disk` guest.
+mtools, for a `ROOT=disk` guest. `dtc`, for `kbuildlab dt`.
 
 Nothing is installed for you, and no system setting is changed.

@@ -108,6 +108,8 @@ kbl_pkg_hint() {   # kbl_pkg_hint PROGRAM
         arch:mkimage|fedora:mkimage) pkg=uboot-tools ;;
         *:mkimage)                  pkg=u-boot-tools ;;
         *:mcopy)                    pkg=mtools ;;
+        debian:dtc)                 pkg=device-tree-compiler ;;
+        *:dtc)                      pkg=dtc ;;
         arch:clangd)                pkg=clang ;;
         debian:clangd)              pkg=clangd ;;
         fedora:clangd|void:clangd)  pkg=clang-tools-extra ;;
@@ -226,6 +228,48 @@ kbl_gdb() {
 KBL_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/kbuildlab"
 KBL_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/kbuildlab"
 KBL_TREES="$KBL_CONFIG_HOME/trees"
+
+_KBL_FW_KEYS="NAME URL SRC BUILD IMAGE SYMBOLS VERSION DEFCONFIG FRAGMENTS MAKE_ARGS"
+
+kbl_firmware_own() { [[ -f "$(kbl_tree_data "$1")/firmware.registered" ]]; }
+
+kbl_tree_firmware() {   # kbl_tree_firmware TREE: sets the _fw_ variables
+    local tree="$1" label reg name v k
+    label="$(kbl_tree_label "$tree")"
+    _fw_arch="$(kbl_tree_arch "$tree")" || exit 1
+    [[ -z "$(kbl_tree_get "$tree" UBOOT)" ]] || die "$tree/tree.conf states UBOOT, which is no longer read:
+       a tree boots kbuildlab's global firmware, or its own once that is registered
+       kbuildlab unset $label UBOOT; then kbuildlab firmware $label says which it boots"
+    reg="$(kbl_tree_data "$tree")/firmware.registered"
+    if [[ -f "$reg" ]]; then
+        _fw_origin=own; _fw_conf="$tree/firmware.conf"
+        [[ -f "$_fw_conf" ]] || die "$label's own firmware is registered and $_fw_conf is gone
+       put it back, or boot the global firmware again: kbuildlab firmware global $label"
+        [[ "$(sha256sum < "$_fw_conf" | cut -c1-64)" == "$(head -1 "$reg")" ]] \
+            || die "$_fw_conf changed since it was registered
+       kbuildlab firmware own $label checks and builds it again"
+        _fw_src="$(kbl_norm_src "$(kbl_conf_get "$_fw_conf" SRC)")" || die "$_fw_conf: SRC is not an absolute path"
+        _fw_build="$(kbl_norm_src "$(kbl_conf_get "$_fw_conf" BUILD)")" || die "$_fw_conf: BUILD is not an absolute path"
+        _fw_stamp="$(kbl_tree_data "$tree")/firmware.stamp"; _fw_log="$(kbl_tree_data "$tree")/firmware.log"
+    else
+        _fw_origin=global; _fw_conf="$KBL_REPO/presets/firmware/$_fw_arch.conf"
+        [[ -f "$_fw_conf" ]] || die "kbuildlab has no global firmware for $_fw_arch (no $_fw_conf)
+       give $label its own: write $tree/firmware.conf, then kbuildlab firmware own $label"
+        name="$(kbl_conf_get "$_fw_conf" NAME)"
+        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "$_fw_conf: NAME is '$name'; it names the source's directory"
+        _fw_src="$KBL_DATA_HOME/firmware/$name/src"; _fw_build="$KBL_DATA_HOME/firmware/$name/$_fw_arch"
+        _fw_stamp="$KBL_DATA_HOME/firmware/$name/$_fw_arch.stamp"; _fw_log="$KBL_DATA_HOME/firmware/$name/$_fw_arch.log"
+    fi
+    for k in $(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\1/p' "$_fw_conf"); do
+        [[ " $_KBL_FW_KEYS " == *" $k "* ]] || die "$_fw_conf states $k, which is not a firmware key ($_KBL_FW_KEYS)"
+    done
+    v="$(kbl_conf_get "$_fw_conf" IMAGE)"
+    [[ -n "$v" && "$v" != /* && "$v" != *..* ]] || die "$_fw_conf: IMAGE is '$v'; it is the file make builds, named from BUILD"
+    _fw_image="$_fw_build/$v"
+    v="$(kbl_conf_get "$_fw_conf" SYMBOLS)"
+    [[ "$v" != /* && "$v" != *..* ]] || die "$_fw_conf: SYMBOLS is '$v'; it is a file make builds, named from BUILD"
+    _fw_symbols="${v:+$_fw_build/$v}"
+}
 
 # The workspace is where `init` clones new trees and `sync` keeps its mirror.
 # Handed in, or recorded once.  Never searched for.  Commands that work on a

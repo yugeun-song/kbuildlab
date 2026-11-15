@@ -26,6 +26,9 @@ ARCHES = ("arm64", "riscv64", "x86_64")
 TREE_NOTE = ("TREE is a tree's ID or a unique prefix of 4 or more of its hex digits, or a path "
              "inside its source; omitted, the current tree.")
 ID_NOTE = "TREE is a tree's ID or a unique prefix of it; a path is not accepted here."
+FW_ACTIONS = ("show", "update", "build", "check", "own", "global")
+DT_ACTIONS = ("show", "edit", "apply", "detach", "reset", "diff", "probe", "check")
+DT_STAGES = ("machine", "firmware", "base", "custom", "booted")
 
 
 class Opt:
@@ -158,6 +161,45 @@ COMMANDS = [
             Opt("--clangd-only", "only the clangd database, config and index"),
             Opt("--no-warm", "leave the clangd index cold"),
             Opt("--fresh", "rebuild every index from scratch, reusing no cached state")]),
+    Cmd("firmware", "the firmware a tree boots through: kbuildlab's global one, or the tree's own",
+        "[show|update|build|check|own|global] [TREE...|--all] [--fresh]",
+        args=["fwarg*"], notes=[
+            TREE_NOTE,
+            "A tree whose BOOT is uboot boots the global firmware for its architecture, which "
+            "presets/firmware/ARCH.conf describes: where it comes from (URL), what update follows "
+            "(VERSION: a tag, a branch, or a glob of tags whose newest match wins), and how it is "
+            "built (DEFCONFIG, FRAGMENTS, MAKE_ARGS, IMAGE, SYMBOLS). kbuildlab clones and builds it.",
+            "update fetches and builds; build builds the source as it is checked out or edited; "
+            "check says whether image, source and settings still agree. kbuildlab update runs "
+            "update for the firmware of the trees it updates.",
+            "own registers a firmware of the tree's own, described in firmware.conf beside its "
+            "tree.conf with SRC and BUILD stated: it is checked and built first, and the tree boots it "
+            "only while that file stays as it was registered. global goes back."], opts=[
+            Opt("--all", "the firmware of every registered tree whose BOOT is uboot"),
+            Opt("--fresh", "wipe the build directory first; its .config is kept", when="build")]),
+    Cmd("dt", "the device tree a tree boots on: show it, edit it, build one and attach it",
+        "[show|edit|apply|detach|reset|diff|probe|check] [TREE] [FILE|STAGE...] [options]",
+        args=["dtarg*"], notes=[
+            TREE_NOTE,
+            "Stages, each kept as source and blob in the tree's data directory under dt/BOOT: "
+            "machine (as QEMU holds it), firmware (as U-Boot holds it when it starts the kernel), "
+            "custom (the tree's own) and booted (what the kernel was handed on the last boot with "
+            "custom). base is the stage custom starts from: firmware in a uboot boot, else machine.",
+            "edit opens custom.dts, made from base the first time, then builds and attaches it. "
+            "apply does that for a FILE: a source replaces custom.dts, a blob is taken as it is, an "
+            "overlay is applied to the tree's own or to base. detach boots without it and keeps it; "
+            "reset deletes it. diff compares two stages or blobs (default: base custom).",
+            "A run refuses a tree that is not the one attached: a source edited after its build, a "
+            "machine other than the one it was built for, a loader that rewrites it. check tells."],
+        opts=[
+            Opt("--boot", "the boot the device tree is for: direct or uboot (default: the tree's BOOT)",
+                "MODE", "choice:direct,uboot,uefi"),
+            Opt("--board", "the device tree of a board run, boards/NAME.conf", "NAME", "board"),
+            Opt("--stage", "show: machine, firmware, base, custom or booted (default: the one in force)",
+                "NAME", "choice:" + ",".join(DT_STAGES)),
+            Opt("--source", "show: print the stage's source"),
+            Opt("--json", "show: the stage's files and structure as JSON"),
+            Opt("--yes|-y", "do not ask", when="reset")]),
     Cmd("image", "build the container image", "[legacy]",
         args=["choice:legacy"], notes=["legacy: Ubuntu 24.04 with gcc-9 through gcc-13 (aarch64 cross "
                                        "only), for a tree that names it with IMAGE= in its tree.conf."]),
@@ -199,13 +241,16 @@ COMMANDS = [
             Opt("--no-qmp", "no QMP monitor and no vmcoreinfo device"),
             Opt("--mem|-m", "guest memory, as qemu's -m takes it", "SIZE", "text:a size, e.g. 2G"),
             Opt("--smp", "guest CPUs", "N", "number:a CPU count"),
-            Opt("--bios", "firmware image", "PATH", "file")]),
+            Opt("--bios", "firmware image", "PATH", "file"),
+            Opt("--dtb", "boot on this device tree blob instead of the one kbuildlab dt attached",
+                "PATH", "file"),
+            Opt("--no-dtb", "boot without the tree's own device tree")]),
     Cmd("attach", "attach gdb to a running guest, stopped at head.S _text by default",
         "[TREE] [options] [-- GDB ARGS]", args=["tree"], own_help=True, rest="GDB ARGS", opts=[
             Opt("--no-bootbreak|--raw", "attach without running to _text (an already-booted guest)"),
             Opt("--bootbreak", "run to _text first (the default)"),
-            Opt("--stop", "where the attach stops: text, firmware or start_kernel", "WHERE",
-                "choice:text,firmware,start_kernel"),
+            Opt("--stop", "where the attach stops: text, firmware, relocated or start_kernel", "WHERE",
+                "choice:text,firmware,relocated,start_kernel"),
             Opt("--port|-p", "pick the guest by its gdb port", "N", "port"),
             Opt("--list|-l", "list live guests and exit"),
             Opt("--first", "with several matches, take the lowest port instead of asking"),
@@ -395,6 +440,21 @@ def _values(kind, pos, cur):
                                                    ", frozen" if g.get("frozen") else ""))
         if not rows:
             print("@message\tno live guest (kbuildlab run starts one)")
+    elif kind in ("fwarg", "dtarg"):
+        actions = FW_ACTIONS if kind == "fwarg" else DT_ACTIONS
+        act = pos[0] if pos and pos[0] in actions else None
+        if not pos:
+            for a in actions:
+                _emit("value", a)
+        if kind == "dtarg" and act == "diff":
+            for st in DT_STAGES:
+                _emit("value", st)
+        if kind == "dtarg" and act == "apply" and len(pos) >= 2:
+            print("@files")
+            return
+        _values("tree", pos, cur)
+        if kind == "dtarg" and act == "apply":
+            print("@files")
     elif kind == "cmd":
         for c in COMMANDS:
             _emit("command", c.name, c.summary)

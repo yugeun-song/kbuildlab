@@ -21,6 +21,7 @@ EMULATE=""; EMULATE_SET=0   # emulated controllers for the preset's drivers to b
 MODULES=1                   # append the modules kbuildlab build staged to the initramfs
 BOARD=""; BOARD_SET=0       # --board: a real SoC's machine model (boards/NAME.conf)
 IOMMU=""; IOMMU_SET=0
+DTB=""; NO_DTB=0; PROBE="${KBL_DT_PROBE:-}"
 declare -a PCIE_EXTRA=()
 declare -a EXTRA=()
 declare -a REST=()
@@ -60,6 +61,9 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
                      initramfs (with ROOT=disk, put them on the boot partition),
                      those the devices present ask for loaded at boot
                      (default: on whenever the build has modules)
+  --dtb PATH | --no-dtb    boot on the device tree blob PATH, or without the
+                     tree's own (kbuildlab dt attaches one; default: that one,
+                     else what the machine and its firmware hand on)
   --board [NAME]     boot on a real SoC's machine model, boards/NAME.conf, in
                      place of the tree's machine: direct boot, the tree's
                      initramfs; without NAME, list the boards for the tree's arch
@@ -111,6 +115,8 @@ while [[ $# -gt 0 ]]; do
         --no-iommu)   IOMMU=0; IOMMU_SET=1; shift ;;
         --modules)    MODULES=1; shift ;;
         --no-modules) MODULES=0; shift ;;
+        --dtb)        DTB="${2:?--dtb needs a path}"; DTB="$(realpath -m -s -- "$DTB")"; shift 2 ;;
+        --no-dtb)     NO_DTB=1; shift ;;
         --board)      BOARD_SET=1; if [[ $# -gt 1 && "$2" != -* ]]; then BOARD="$2"; shift; fi; shift ;;
         --) shift; EXTRA=("$@"); break ;;
         -*) die "run: unknown option '$1' (pass QEMU arguments after --)" ;;
@@ -118,6 +124,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+[[ -z "$DTB" || $NO_DTB -eq 0 ]] || die "--dtb contradicts --no-dtb"
+if [[ -n "$PROBE" ]]; then
+    [[ -d "$PROBE" && -z "$DTB" ]] || die "KBL_DT_PROBE names the directory a probe writes to; it is set by kbuildlab dt"
+    RUN=1; QMP=1; NO_INITRD=1; PERSIST=0; PERSIST_SET=1; NO_DTB=1
+fi
 tree="$(kbl_tree "${REST[0]:-}")" || exit 1
 arch="$(kbl_tree_arch "$tree")" || exit 1
 src="$(kbl_tree_src "$tree")" || exit 1
@@ -374,6 +385,10 @@ _cleanup() {
         kill -TERM "$_wpid" 2>/dev/null
         wait "$_wpid" 2>/dev/null
     fi
+    if [[ -n "${_dpid:-}" ]]; then
+        kill -TERM "$_dpid" 2>/dev/null
+        wait "$_dpid" 2>/dev/null
+    fi
     if [[ -n "${_qpid:-}" ]] && kill -0 "$_qpid" 2>/dev/null; then
         kill -TERM "$_qpid" 2>/dev/null
         local _i
@@ -395,7 +410,7 @@ _cleanup() {
     rm -f ${shmdisk:+"$shmdisk"} ${shmvars:+"$shmvars"} ${_ird:+"$_ird"} \
           ${_bc:+"$_bc"} ${_bs:+"$_bs"} ${_gc:+"$_gc"} ${qmpsock:+"$qmpsock"} \
           ${wsock:+"$wsock"} ${_sdcopy:+"$_sdcopy"} ${_sdnew:+"$_sdnew"} \
-          ${_claims[@]+"${_claims[@]}"}
+          ${_dtmp:+"$_dtmp" "$_dtmp.err"} ${_claims[@]+"${_claims[@]}"}
     # Last, and only once the guest that owns the terminal is gone.  A no-op on
     # every path where qemu put it back itself, and the difference between a
     # usable shell and an apparently dead one where it did not.
@@ -481,6 +496,31 @@ fi
 if [[ "$BOOT" == uefi && "$arch" == x86_64 && "$machine" == pc ]]; then
     machine=q35
     say "machine      q35 for this UEFI boot (the tree states pc; OVMF wants q35)"
+fi
+
+_dt() { python3 "${KBL_REPO}/lib/fdt.py" "$@"; }
+_overlaps() { (( $1 < $3 + $4 && $3 < $1 + $2 )); }   # _overlaps START SIZE START SIZE
+_dtctx="$BOOT"; [[ -n "$board" ]] && _dtctx="board-$board"
+_dtdir="$(kbl_tree_data "$tree")/dt/$_dtctx"
+_dtb=""; _dtown=0; _dtname="devicetree.dtb"; _fa=""; _dtroom=""; _dpid=""; _dtmp=""
+if [[ -n "$DTB" ]]; then
+    [[ -f "$DTB" ]] || die "--dtb: no file $DTB"
+    _dtb="$DTB"
+elif [[ $NO_DTB -eq 0 && -f "$_dtdir/attached" ]]; then
+    _dtb="$_dtdir/custom.dtb"; _dtown=1
+    [[ -f "$_dtb" ]] || die "$(kbl_tree_label "$tree")'s own device tree is attached to its $_dtctx boot and $_dtb is gone
+       kbuildlab dt apply $(kbl_tree_label "$tree") builds it again; kbuildlab dt detach, or --no-dtb for one run, boots without it"
+    [[ "$(sed -n 's/^source //p' "$_dtdir/custom.id" 2>/dev/null)" == "$(sha256sum < "$_dtdir/custom.dts" 2>/dev/null | cut -c1-64)" ]] \
+        || die "$_dtdir/custom.dts changed since $_dtb was built from it
+       kbuildlab dt apply $(kbl_tree_label "$tree") builds and attaches the source; --no-dtb boots without the tree's own for one run"
+fi
+if [[ -n "$_dtb" ]]; then
+    _dt check "$_dtb" || die "$_dtb is not a well-formed device tree blob"
+    [[ "$BOOT" != uefi ]] || die "a uefi boot takes no device tree from kbuildlab ($_dtb): pass --no-dtb, or boot direct or uboot"
+    if [[ "$BOOT" == uboot ]] && _dt prop "$_dtb" /chosen bootargs >/dev/null; then
+        die "$_dtb states /chosen bootargs, and a uboot boot sets the kernel command line itself
+       remove the property; CMDLINE_EXTRA in tree.conf and --append add words to the command line"
+    fi
 fi
 
 # The bus of every disk this run attaches (STORAGE): virtio as always; nvme, one
@@ -800,20 +840,23 @@ $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_
 _bdisk=""; _bvirt=""   # the disk the boot reads first, and its virtio device
 case "$BOOT" in
     direct)
-        CMD+=(-kernel "$image" -append "$append")
+        CMD+=(-kernel "$image")
+        [[ -n "$PROBE" ]] || CMD+=(-append "$append")
         [[ -n "$INITRD" ]] && CMD+=(-initrd "$INITRD")
-        [[ -n "$_bdtb" ]] && CMD+=(-dtb "$_bdtb")
+        _usedtb="${_dtb:-$_bdtb}"
+        [[ -n "$_usedtb" ]] && CMD+=(-dtb "$_usedtb")
         if [[ "$ROOT" == disk ]]; then
             _bdisk="$_sdboot"
             _bvirt="virtio-blk-pci"
         fi
         ;;
     uboot)
-        ub="${BIOS:-$(kbl_tree_get "$tree" UBOOT)}"
-        [[ -n "$ub" ]] || die "boot uboot: state UBOOT= in $tree/tree.conf or pass --bios"
-        ub="$(kbl_tree_path "$tree" "$ub")"
-        [[ -f "$ub" ]] || die "u-boot not found: $ub"
-        if [[ "$ROOT" != disk ]]; then
+        _fwcfg=""
+        if [[ -n "$BIOS" ]]; then ub="$BIOS"
+        else kbl_tree_firmware "$tree"; ub="$_fw_image"; _fwcfg="$_fw_build/.config"; fi
+        [[ -f "$ub" ]] || die "firmware image not found: $ub
+       kbuildlab firmware update $(kbl_tree_label "$tree") builds it"
+        if [[ "$ROOT" != disk && -z "$PROBE" ]]; then
             bd="$(kbl_tree_get "$tree" BOOTDISK)"; bd="$(kbl_tree_path "$tree" "${bd:-boot/uboot.img}")"
             [[ -f "$bd" ]] || die "no boot disk: $bd -- build it first with your workspace's firmware/build-bootdisk.sh (not shipped with kbuildlab; see README)"
         fi
@@ -848,7 +891,39 @@ case "$BOOT" in
         command -v mkimage >/dev/null 2>&1 || die "mkimage (uboot-tools) required for boot uboot"
         command -v mcopy  >/dev/null 2>&1 || die "mtools (mcopy) required for boot uboot"
         _loadaddr="$la"                                 # attach's HW-bp goes here
-        if [[ "$ROOT" == disk ]]; then
+        if [[ -n "$_dtb" || -n "$PROBE" ]]; then
+            _fa="$(kbl_tree_get "$tree" UBOOT_FDTADDR)"
+            [[ -n "$_fa" ]] || die "boot uboot with a device tree: state UBOOT_FDTADDR in $tree/tree.conf, the RAM address
+       the firmware puts it at, clear of the kernel at $la and the initramfs at $ra"
+            [[ "$_fa" =~ ^0x[0-9a-fA-F]+$ ]] || die "UBOOT_FDTADDR in $tree/tree.conf is '$_fa'; it is a hex address"
+            [[ -n "$_ramb" && -n "$_membytes" ]] || die "boot uboot with a device tree: state RAM_BASE in $tree/tree.conf and a MEM
+       kbuildlab can read, so that UBOOT_FDTADDR can be held against the guest's RAM"
+            (( _fa >= _ramb && _fa < _ramb + _membytes )) \
+                || die "boot uboot: UBOOT_FDTADDR $_fa lies outside this guest's RAM ($_ramb + $MEM)"
+            _dtroom=$(( _ramb + _membytes - _fa ))
+        fi
+        if [[ -n "$_dtb" ]]; then
+            _dsz="$(stat -c%s "$_dtb")"
+            _pad="$(sed -n 's/^CONFIG_SYS_FDT_PAD=//p' "$_fwcfg" 2>/dev/null | head -1)"
+            [[ "$_pad" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$ ]] && _dsz=$(( _dsz + _pad ))
+            _ksz="$(_dt image-size "$image")" || _ksz="$(stat -c%s "$image")"
+            _overlaps "$_fa" "$_dsz" "$la" "$_ksz" \
+                && die "boot uboot: the device tree at UBOOT_FDTADDR $_fa (up to $_dsz bytes) would lie in the kernel,
+       which occupies $_ksz bytes from $la; state another UBOOT_FDTADDR in $tree/tree.conf"
+            [[ -n "$INITRD" ]] && _overlaps "$_fa" "$_dsz" "$ra" "$(stat -c%s "$INITRD")" \
+                && die "boot uboot: the device tree at UBOOT_FDTADDR $_fa (up to $_dsz bytes) would lie in the initramfs,
+       which occupies $(stat -c%s "$INITRD") bytes from $ra; state another UBOOT_FDTADDR in $tree/tree.conf"
+            (( _dsz <= _dtroom )) || die "boot uboot: the device tree at UBOOT_FDTADDR $_fa (up to $_dsz bytes) runs past the end of RAM"
+        fi
+        if [[ -n "$PROBE" ]]; then
+            command -v sfdisk >/dev/null 2>&1 || die "sfdisk (util-linux) required to ask the firmware for its device tree"
+            command -v mformat >/dev/null 2>&1 || die "mtools (mformat) required to ask the firmware for its device tree"
+            shmdisk="$_statedir/kbl-boot-${PORT}.img"
+            { truncate -s 2M "$shmdisk" \
+                && printf 'label: dos\nstart=2048, type=0c, bootable\n' | sfdisk "$shmdisk" >/dev/null 2>&1 \
+                && mformat -i "${shmdisk}@@1M" -v KBLBOOT ::; } || die "could not make the boot disk $shmdisk"
+            _bdisk="$shmdisk"; _fat="${shmdisk}@@1M"; _bfull="$shmdisk is full"
+        elif [[ "$ROOT" == disk ]]; then
             _bdisk="$_sdboot"; _fat="${_sdboot}@@${_p1off}"
             _bfull="larger than partition 1? raise BOOTPART_SIZE and pass --reset-sysdisk"
         else
@@ -869,15 +944,24 @@ case "$BOOT" in
         _ldev='${devtype} ${devnum}:${distro_bootpart}'
         [[ "$ROOT" != disk && "$STORAGE" == virtio ]] && _ldev="virtio 0:1"
         _bc="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"; _bs="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")"
+        # shellcheck disable=SC2016
+        _fdt='${fdtcontroladdr}'; [[ -n "$_dtb" ]] && _fdt="$_fa"
+        if [[ -n "$PROBE" ]]; then
+            # shellcheck disable=SC2016
+            printf 'fdt addr ${fdtcontroladdr}\nfdt header get kbl_fdt_size totalsize\ncp.b ${fdtcontroladdr} %s ${kbl_fdt_size}\n' \
+                "$_fa" > "$_bc"
+        else
         { printf 'load %s %s /Image\n' "$_ldev" "$la"
+          [[ -n "$_dtb" ]] && printf 'load %s %s /%s\nsetenv fdt_high 0xffffffffffffffff\n' "$_ldev" "$_fa" "$_dtname"
           [[ -n "$INITRD" ]] && printf 'load %s %s /rootfs.cpio.gz\n' "$_ldev" "$ra"
           printf "setenv bootargs '%s'\n" "$append"
           if [[ -n "$INITRD" ]]; then
-              printf 'booti %s %s:${filesize} ${fdtcontroladdr}\n' "$la" "$ra"
+              printf 'booti %s %s:${filesize} %s\n' "$la" "$ra" "$_fdt"
           else
-              printf 'booti %s - ${fdtcontroladdr}\n' "$la"
+              printf 'booti %s - %s\n' "$la" "$_fdt"
           fi
         } > "$_bc"
+        fi
         # mkimage's arch name for riscv is "riscv", not the tree's "riscv64".
         _mka="$arch"; [[ "$arch" == riscv64 ]] && _mka="riscv"
         mkimage -A "$_mka" -O linux -T script -C none -d "$_bc" "$_bs" >/dev/null 2>&1 \
@@ -891,6 +975,7 @@ case "$BOOT" in
         # on-disk image is untouched -- and a kernel rebuilt since then cannot
         # be shadowed by the one baked in.  That failure has no symptom: the
         # guest boots either way, and only the version string says which.
+        if [[ -z "$PROBE" ]]; then
         mcopy -o -i "$_fat" "$image" ::/Image \
             || die "could not write $image into $_bdisk -- $_bfull"
         if [[ -n "$INITRD" ]]; then
@@ -898,6 +983,15 @@ case "$BOOT" in
                 || die "could not write $INITRD into the boot-disk copy (see above)"
         else
             mdel -i "$_fat" ::/rootfs.cpio.gz >/dev/null 2>&1 || true
+        fi
+        if [[ -n "$_dtb" ]]; then
+            mcopy -o -i "$_fat" "$_dtb" "::/$_dtname" \
+                || die "could not write $_dtb into $_bdisk -- $_bfull"
+            mcopy -i "$_fat" "::/$_dtname" - 2>/dev/null | cmp -s - "$_dtb" \
+                || die "$_bdisk does not hold $_dtb as it was written: /$_dtname reads back different"
+        else
+            mdel -i "$_fat" "::/$_dtname" >/dev/null 2>&1 || true
+        fi
         fi
         _bvirt="virtio-blk-pci"
         # Firmware placement differs: on arm64 u-boot IS the -bios firmware; on
@@ -1185,6 +1279,49 @@ fi
 CMD+=(${_qargs[@]+"${_qargs[@]}"})
 CMD+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
+_dumpdtb() {   # _dumpdtb OUT [OPTION-LEFT-OUT]
+    local out="$1" skip="${2:-}" i
+    local -a c=()
+    for ((i = 0; i < ${#CMD[@]}; i++)); do
+        if [[ -n "$skip" && "${CMD[i]}" == "$skip" ]]; then i=$((i + 1)); continue; fi
+        c+=("${CMD[i]}")
+    done
+    rm -f "$out" "$out.err"
+    "${c[@]}" -machine "dumpdtb=${out//,/,,}" </dev/null >/dev/null 2>"$out.err" && [[ -s "$out" ]]
+}
+if [[ -n "$PROBE" ]]; then
+    if ! _dumpdtb "$PROBE/machine.dtb"; then
+        cat "$PROBE/machine.dtb.err" 2>/dev/null
+        exit 3
+    fi
+    [[ "$BOOT" == uboot ]] || exit 0
+elif [[ -n "$_dtb" ]]; then
+    _dtl="$(kbl_tree_label "$tree")"
+    _dtmp="$(mktemp -p "$_statedir" "kbl-tmp-${PORT}.XXXXXX")" || die "cannot write $_statedir"
+    _dumpdtb "$_dtmp" "$([[ "$BOOT" == direct ]] && echo -dtb)" \
+        || die "qemu does not start with this run's command line: $(cat "$_dtmp.err" 2>/dev/null)"
+    if [[ $_dtown -eq 1 ]]; then
+        [[ "$(_dt id "$_dtmp")" == "$(sed -n 's/^machine //p' "$_dtdir/custom.id" 2>/dev/null)" ]] \
+            || die "this run's machine is not the one $_dtl's own device tree was built for:
+$([[ -f "$_dtdir/machine.dtb" ]] && _dt diff "$_dtdir/machine.dtb" "$_dtmp" | head -8 | sed 's/^/         /')
+       an option of this run that changes the machine does not go with the tree; if tree.conf, a board
+       or qemu changed it, kbuildlab dt apply $_dtl takes the machine as it is now; --no-dtb boots without the tree"
+        rm -f "$_dtdir"/booted.dtb "$_dtdir"/booted.dts "$_dtdir"/booted.id "$_dtdir"/booted.lost
+    fi
+    if [[ "$BOOT" == direct ]]; then
+        _dumpdtb "$_dtmp" || die "qemu does not start with $_dtb: $(cat "$_dtmp.err" 2>/dev/null)"
+        _lost="$(_dt carried "$_dtb" "$_dtmp")" || die "qemu does not hand $_dtb on to the kernel as it is:
+$(head -12 <<<"$_lost" | sed 's/^/         /')
+       a direct boot cannot carry that; boot through the firmware (--boot uboot), or pass --no-dtb"
+        if [[ $_dtown -eq 1 ]]; then
+            cp -f "$_dtmp" "$_dtdir/booted.dtb" || die "cannot write $_dtdir/booted.dtb"
+            dtc -I dtb -O dts -o "$_dtdir/booted.dts" "$_dtdir/booted.dtb" >/dev/null 2>&1
+            printf 'captured %s\nport %s\nhow as qemu hands it on\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PORT" > "$_dtdir/booted.id"
+        fi
+    fi
+    rm -f "$_dtmp" "$_dtmp.err"; _dtmp=""
+fi
+
 # Record this run so `attach` (and through it an editor's adapter) can match
 # the exact boot combination on this gdb port.  Written here, not earlier,
 # because the ssh port and the final command line are only settled once the NIC
@@ -1221,6 +1358,9 @@ _write_state() {   # _write_state [QEMU_PID]
     [[ $QMP -eq 1 ]] && rec+=("KBL_QMP_PORT=$QMPPORT" "KBL_QMP_SOCK=$qmpsock")
     [[ $persist_ok -eq 1 ]] && rec+=("KBL_PERSIST=$persist_disk")
     rec+=("KBL_ROOT=$ROOT")
+    [[ "$BOOT" == uboot ]] && rec+=("KBL_FIRMWARE=$ub")
+    [[ -n "$_dtb" ]] && rec+=("KBL_DTB=$_dtb")
+    [[ -n "$_dtb" && -n "$_fa" ]] && rec+=("KBL_DTB_ADDR=$_fa")
     [[ -n "$_sdboot" ]] && rec+=("KBL_SYSDISK=$_sdboot")
     [[ -n "$board" ]] && rec+=("KBL_BOARD=$board")
     if [[ -n "$qpid" ]]; then
@@ -1255,6 +1395,8 @@ else
     say "boot         $BOOT firmware chain; rootfs on boot disk"
 fi
 [[ "$ROOT" == disk ]] && say "root         disk $_sdboot (PARTUUID $_puuid)"
+if [[ -n "$_dtb" && "$BOOT" == uboot ]]; then say "dt           $_dtb, which the firmware loads to $_fa"
+elif [[ -n "$_dtb" ]]; then say "dt           $_dtb, which qemu hands to the kernel"; fi
 [[ -z "$board" && "$STORAGE" != virtio ]] && say "storage      $STORAGE (every disk this run attaches)"
 [[ -n "$mods" && -z "$_mfw" ]] && say "modules      $mods appended; loaded at boot for the devices present"
 [[ -n "$_mfw" ]] && say "modules      $mods on the boot partition (/modules.cpio.gz); the rootfs installs it"
@@ -1306,8 +1448,27 @@ fi
 # group -- measured inside a pty, same pgid, state S+ -- so the console's
 # raw-mode handling is what it was under `exec`.  With signal=off, Ctrl-C reaches
 # neither qemu nor this script; it is a byte on the guest's serial line.
+if [[ -n "$PROBE" ]]; then
+    "${CMD[@]}" </dev/null >"$PROBE/console.log" 2>&1 &
+    _qpid=$!
+    python3 -I "${KBL_REPO}/lib/dtcap.py" --qmp "$qmpsock" --addr "$_fa" --limit "$_dtroom" \
+        --out "$PROBE/firmware.dtb" --pid "$_qpid" --timeout "${KBL_DT_PROBE_TIMEOUT:-120}" || exit 4
+    exit 0
+fi
 "${CMD[@]}" <&0 &
 _qpid=$!
+if [[ $_dtown -eq 1 && "$BOOT" == uboot && $QMP -eq 1 ]]; then
+    ( python3 -I "${KBL_REPO}/lib/dtcap.py" --qmp "$qmpsock" --addr "$_fa" --limit "$_dtroom" \
+          --out "$_dtdir/booted.dtb" --bootargs "$append" --pid "$_qpid" || exit 0
+      printf 'captured %s\nport %s\nhow read from guest memory at %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PORT" "$_fa" \
+          > "$_dtdir/booted.id"
+      if python3 "${KBL_REPO}/lib/fdt.py" carried "$_dtb" "$_dtdir/booted.dtb" > "$_dtdir/booted.lost" 2>&1; then
+          rm -f "$_dtdir/booted.lost"
+      else
+          kill -TERM "$_qpid" 2>/dev/null
+      fi ) </dev/null >/dev/null 2>&1 &
+    _dpid=$!
+fi
 if [[ -n "$wsock" ]]; then
     python3 -I "${KBL_REPO}/lib/winsize.py" "$wsock" "$_qpid" 3 3<&0 </dev/null >/dev/null 2>&1 &
     _wpid=$!
@@ -1319,6 +1480,23 @@ _write_state "$_qpid"
 # about the guest.  The status still carries the signal, so the report below is the
 # launcher's own and says what actually happened.
 wait "$_qpid" 2>/dev/null; _rc=$?
+if [[ $_dtown -eq 1 && "$BOOT" == uboot ]]; then
+    [[ -n "$_dpid" ]] && wait "$_dpid" 2>/dev/null
+    _dpid=""
+    if [[ -s "$_dtdir/booted.lost" ]]; then
+        warn "the firmware did not hand $_dtb to the kernel as it is, so the guest was stopped:"
+        head -12 "$_dtdir/booted.lost" | sed 's/^/       /' >&2
+        warn "       kbuildlab dt diff $(kbl_tree_label "$tree") custom booted shows every difference"
+        _rc=1
+    elif [[ -s "$_dtdir/booted.dtb" ]]; then
+        dtc -I dtb -O dts -o "$_dtdir/booted.dts" "$_dtdir/booted.dtb" >/dev/null 2>&1
+        say "dt           the kernel was handed $_dtb as it is; $_dtdir/booted.dtb is what it got"
+    elif [[ $QMP -eq 1 ]]; then
+        warn "the device tree the kernel was handed was not captured: the guest ended before its firmware started the kernel"
+    else
+        warn "the device tree the kernel was handed was not captured: --no-qmp leaves no way to read it"
+    fi
+fi
 if [[ $_rc -gt 128 ]]; then
     _sig="$(kill -l "$((_rc - 128))" 2>/dev/null || echo "$((_rc - 128))")"
     case "$_sig" in

@@ -256,9 +256,61 @@ _update_config() {   # _update_config TREE BEFORE
     _update_report "$1" "$2"
 }
 
+_fw_stage_sync() { kbl_tree_firmware "$1"; _fw_sync; }
+_fw_stage_build() { kbl_tree_firmware "$1"; _fw_build_now 0; }
+
+_update_firmware() {   # _update_firmware RECORD TREE...
+    local rec="$1" t key name rc=0; shift
+    local -A seen=()
+    for t in "$@"; do
+        _fw_uses "$t" || continue
+        if ! key="$( (kbl_tree_firmware "$t"; printf '%s\t%s\n' "$_fw_build" "$(_fw_title "$t")") 2>&1)"; then
+            name="firmware of $(kbl_tree_label "$t")"
+            head1 "== $name"; printf '%s\n' "$key" >&2
+            printf '%s\t%s\t%s\t%s\n' "$name" check fail 0 >> "$rec"
+            rc=1; continue
+        fi
+        name="${key#*$'\t'}"; key="${key%%$'\t'*}"
+        [[ -n "${seen[$key]+x}" ]] && continue
+        seen["$key"]=1
+        head1 "== $name"
+        _update_stage "$rec" "$name" sync _fw_stage_sync "$t" || { rc=1; continue; }
+        if ( kbl_tree_firmware "$t"; _fw_fragments; _fw_current ) 2>/dev/null; then
+            printf '%s\t%s\t%s\t%s\n' "$name" build same 0 >> "$rec"
+            say "current      built from this source with these settings; skipped"
+        else
+            _update_stage "$rec" "$name" build _fw_stage_build "$t" || rc=1
+        fi
+    done
+    return $rc
+}
+
+_dt_refresh() {   # _dt_refresh TREE
+    local d ctx rc=0
+    for d in "$(kbl_tree_data "$1")"/dt/*/; do
+        [[ -f "$d/base.inputs" ]] || continue
+        ctx="$(basename "$d")"
+        case "$ctx" in
+            board-*) _dt_context "$1" "" "${ctx#board-}" ;;
+            *)       _dt_context "$1" "$ctx" "" ;;
+        esac
+        ( _dt_check ) || rc=1
+    done
+    return $rc
+}
+
+_update_dt() {   # _update_dt RECORD TREE...
+    local rec="$1" t rc=0; shift
+    for t in "$@"; do
+        compgen -G "$(kbl_tree_data "$t")/dt/*/base.inputs" >/dev/null || continue
+        _update_stage "$rec" "$(kbl_tree_label "$t")" dt _dt_refresh "$t" || rc=1
+    done
+    return $rc
+}
+
 _update_summary() {   # _update_summary RECORD
     local rec="$1" name stage res secs t same=0
-    local -a order=() stages=(check sync config build tags)
+    local -a order=() stages=(check sync config build tags dt)
     local -A cell=() total=()
     while IFS=$'\t' read -r name stage res secs; do
         [[ -n "${total[$name]+x}" ]] || { order+=("$name"); total[$name]=0; }
@@ -267,7 +319,7 @@ _update_summary() {   # _update_summary RECORD
     [[ ${#order[@]} -gt 0 ]] || return 0
     local w=4; for name in "${order[@]}"; do (( ${#name} > w )) && w=${#name}; done
     echo
-    printf '%s%-*s  %-6s %-6s %-6s %-6s %-6s %s%s\n' "$KBL_B" "$w" TREE CHECK SYNC CONFIG BUILD TAGS TIME "$KBL_0"
+    printf '%s%-*s  %-6s %-6s %-6s %-6s %-6s %-6s %s%s\n' "$KBL_B" "$w" TREE CHECK SYNC CONFIG BUILD TAGS DT TIME "$KBL_0"
     # Each mark is one column wide but ✓ and ✗ are three bytes, and printf pads
     # by bytes, so the mark is printed alone and the column padded after it.
     for name in "${order[@]}"; do
@@ -315,6 +367,7 @@ cmd_update() {
     local tmp="$KBL_RUN_TMP" rec="$KBL_RUN_TMP/record"; : > "$rec"
     _KBL_WARM_QUEUE="$tmp/warm.queue"; : > "$_KBL_WARM_QUEUE"
     _KBL_INDEX_QUEUE=()
+    _update_firmware "$rec" "${trees[@]}" || rc=1
     for t in "${trees[@]}"; do
         mkdir -p "$tmp/$(kbl_tree_id "$t")" || die "cannot write $tmp"
         _update_fetch "$t" "$tmp/$(kbl_tree_id "$t")" &
@@ -329,6 +382,7 @@ cmd_update() {
     done
     _update_index "$rec" "${tagsopt[@]+"${tagsopt[@]}"}" || rc=1
     _update_warm "$rec" "$_KBL_WARM_QUEUE"
+    _update_dt "$rec" "${trees[@]}" || rc=1
     _update_summary "$rec"
     return $rc
 }

@@ -66,6 +66,9 @@ _restore_tree() {   # _restore_tree ID
         || die "init: cannot write $root/tree.conf"
     [[ -f "$rec/config-fragment" ]] \
         && _lab_copy "$rec/config-fragment" "$root/config-fragment" @KBL_WORKSPACE@ "$ws_now"
+    [[ -f "$rec/firmware.conf" ]] \
+        && _lab_copy "$rec/firmware.conf" "$root/firmware.conf" @KBL_WORKSPACE@ "$ws_now" \
+        && say "firmware     its own firmware.conf is back; kbuildlab firmware own $(kbl_tree_label "$root") registers it"
     ok "restored $(kbl_tree_label "$root") from $rec"
     say "source       $(kbl_tree_get "$root" SRC)"
     say "next         kbuildlab sync $(kbl_tree_label "$root")   (config then starts from the recorded .config)"
@@ -187,6 +190,9 @@ _record() {   # _record TREE
     if [[ -f "$tree/config-fragment" ]]; then
         _lab_copy "$tree/config-fragment" "$dst/config-fragment" "$ws" @KBL_WORKSPACE@
     else rm -f "$dst/config-fragment"; fi
+    if [[ -f "$tree/firmware.conf" ]]; then
+        _lab_copy "$tree/firmware.conf" "$dst/firmware.conf" "$ws" @KBL_WORKSPACE@
+    else rm -f "$dst/firmware.conf"; fi
     [[ -f "$src/.config" ]] || return 0
     if _kmake "$tree" savedefconfig >/dev/null 2>&1 && [[ -f "$src/defconfig" ]]; then
         mkdir -p "$(kbl_tree_data "$tree")" && cp -f "$src/defconfig" "$(kbl_tree_data "$tree")/defconfig.snapshot"

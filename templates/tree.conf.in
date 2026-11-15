@@ -147,6 +147,12 @@ SRC=@SRC@
 # UBOOT_LOADADDR=0x40200000
 # UBOOT_RDADDR=0x48000000
 # RAM_BASE=0x40000000
+#
+# The firmware itself is kbuildlab's global one for the architecture, or the
+# tree's own (`kbuildlab firmware`).  UBOOT_FDTADDR is where it puts a device
+# tree that `kbuildlab dt` attached: stated, never chosen for you, and held
+# against the kernel, the initramfs and the guest's RAM.
+# UBOOT_FDTADDR=0x47000000
 
 # --- where the gdbstub listens -----------------------------------------------
 # Default 127.0.0.1.  qemu's own `-gdb tcp::N` spelling binds 0.0.0.0 AND [::],
