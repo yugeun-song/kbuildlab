@@ -8,6 +8,7 @@ Waits until a well-formed tree stands at ADDR and reads the same twice; with
 --bootargs, until its /chosen bootargs is TEXT.  Ends without one when PID is
 gone or the timeout passes.
 """
+
 import argparse
 import json
 import os
@@ -49,8 +50,10 @@ def read_guest(path, addr, size, scratch):
         json.loads(stream.readline())
         s.sendall(b'{"execute":"qmp_capabilities"}\n')
         reply()
-        s.sendall(json.dumps({"execute": "pmemsave", "arguments": {
-            "val": addr, "size": size, "filename": scratch}}).encode() + b"\n")
+        s.sendall(
+            json.dumps({"execute": "pmemsave", "arguments": {"val": addr, "size": size, "filename": scratch}}).encode()
+            + b"\n"
+        )
         if "error" in reply():
             return None
     with open(scratch, "rb") as f:

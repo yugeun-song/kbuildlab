@@ -12,6 +12,7 @@ console, run commands there, power it off, and print what each command said.
 Status 0 when the guest reached a shell, every command ended with status 0 and
 the guest powered off; the launcher's own lines are part of the output.
 """
+
 import fcntl
 import os
 import pty
@@ -86,7 +87,7 @@ class Guest:
         self.until(r"KBLBEGIN%d\n" % n, "command %d to start" % n)
         start = self.seen
         m = self.until(r"KBLEND%d (\d+)" % n, "command %d to end" % n)
-        return int(m.group(1)), self.text[start:m.start()]
+        return int(m.group(1)), self.text[start : m.start()]
 
     def off(self):
         self.send("poweroff")
@@ -120,7 +121,7 @@ def main(argv):
     commands = []
     if "--" in argv:
         at = argv.index("--")
-        argv, commands = argv[:at], argv[at + 1:]
+        argv, commands = argv[:at], argv[at + 1 :]
     guest = Guest(argv[0], argv[1:], float(os.environ.get("KBL_GUEST_TIMEOUT", "900")))
     rc, error = 0, None
     try:

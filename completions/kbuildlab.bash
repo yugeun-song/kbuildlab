@@ -20,19 +20,19 @@ _kbuildlab() {
             @dirs) dirs=1 ;;
             @files) files=1 ;;
             @nospace) nospace=1 ;;
-            @message|'') ;;
+            @message | '') ;;
             *) cands+=("${rest%%$'\t'*}") ;;
         esac
     done < <("${words[0]}" __complete "${words[@]:1:cword-1}" "$cur" 2>/dev/null)
     local IFS=$'\n'
     COMPREPLY=($(compgen -W "${cands[*]}" -- "$cur"))
-    if (( dirs || files )); then
+    if ((dirs || files)); then
         local -a paths=()
-        if (( dirs )); then paths=($(compgen -d -- "$cur")); else paths=($(compgen -f -- "$cur")); fi
+        if ((dirs)); then paths=($(compgen -d -- "$cur")); else paths=($(compgen -f -- "$cur")); fi
         COMPREPLY+=("${paths[@]}")
         compopt -o filenames 2>/dev/null
     fi
-    (( nospace )) && compopt -o nospace 2>/dev/null
+    ((nospace)) && compopt -o nospace 2>/dev/null
     return 0
 }
 complete -F _kbuildlab kbuildlab

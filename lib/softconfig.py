@@ -100,8 +100,7 @@ def scopes(src: str) -> dict[str, set[str]]:
                         if stack:
                             stack.pop()
                     else:
-                        out.setdefault(rest.split()[0] if rest.split() else "", set()).update(
-                            *stack)
+                        out.setdefault(rest.split()[0] if rest.split() else "", set()).update(*stack)
                     continue
                 stripped = line.strip()
                 if opener and stack and stripped.startswith(("depends on", "visible if")):
@@ -146,8 +145,7 @@ class Kconfig:
 
     def blocks(self, sym: str) -> set[str]:
         """Names a `depends on` of sym negates: turning one on hides sym."""
-        return {n for s in self.index.get(sym, ()) for d in s.depends
-                for n in re.findall(r"!\s*(\w+)", d)}
+        return {n for s in self.index.get(sym, ()) for d in s.depends for n in re.findall(r"!\s*(\w+)", d)}
 
 
 def olddefconfig(command: list[str], config: str) -> None:
@@ -168,15 +166,13 @@ def settle(config: str, fragments: list[str], src: str, command: list[str]) -> d
         raise
 
 
-def _settle(config: str, base: list[str], fragments: list[str], src: str,
-            command: list[str]) -> dict:
+def _settle(config: str, base: list[str], fragments: list[str], src: str, command: list[str]) -> dict:
     held = {s: v for s, v in answers(config).items() if v in ("y", "m")}
     kc = Kconfig(src)
     wanted = wishes(fragments)
     absent = sorted(s for s in wanted if s not in kc.index)
     promptless = sorted(s for s in wanted if s in kc.index and not kc.has_prompt(s))
-    request = {s: v for s, v in wanted.items()
-               if s in kc.index and kc.has_prompt(s) and s not in held}
+    request = {s: v for s, v in wanted.items() if s in kc.index and kc.has_prompt(s) and s not in held}
     while True:
         write(config, base, request)
         olddefconfig(command, config)
@@ -185,8 +181,7 @@ def _settle(config: str, base: list[str], fragments: list[str], src: str,
         if not moved:
             break
         fresh = {s for s, v in got.items() if v in ("y", "m") and s not in held}
-        forcing = {s: "m" if kc.tristate(s) else "n"
-                   for s in fresh if got[s] == "y" and kc.reaches(s) & moved}
+        forcing = {s: "m" if kc.tristate(s) else "n" for s in fresh if got[s] == "y" and kc.reaches(s) & moved}
         forcing |= {s: "n" for s in fresh for p in moved if s in kc.blocks(p)}
         lower: dict[str, str] = {}
         seen: set[str] = set()
@@ -207,11 +202,12 @@ def _settle(config: str, base: list[str], fragments: list[str], src: str,
         for sym, value in forcing.items():
             down(sym, value)
         if not lower:
-            raise SystemExit("softconfig: turning the fragment on moves answers the config "
-                             f"already had, and no line explains it: {', '.join(sorted(moved))}")
+            raise SystemExit(
+                "softconfig: turning the fragment on moves answers the config "
+                f"already had, and no line explains it: {', '.join(sorted(moved))}"
+            )
         request.update(lower)
-    report = {"kept": [], "on": [], "module": [], "lowered": [], "off": [],
-              "absent": absent, "promptless": promptless}
+    report = {"kept": [], "on": [], "module": [], "lowered": [], "off": [], "absent": absent, "promptless": promptless}
     for s, v in sorted(wanted.items()):
         if s in absent or s in promptless:
             continue
@@ -233,18 +229,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--config", required=True, help="the .config to extend in place")
     ap.add_argument("--source", required=True, help="the kernel source root")
-    ap.add_argument("--olddefconfig", required=True,
-                    help="the command that runs olddefconfig for this tree, shell-quoted")
+    ap.add_argument(
+        "--olddefconfig", required=True, help="the command that runs olddefconfig for this tree, shell-quoted"
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("fragments", nargs="+")
     args = ap.parse_args()
-    r = settle(os.path.abspath(args.config), args.fragments, args.source,
-               shlex.split(args.olddefconfig))
-    print(f"{len(r['on'])} on, {len(r['lowered'])} lowered to keep every existing answer, "
-          f"{len(r['module'])} as modules their dependencies allow, "
-          f"{len(r['kept'])} already set, {len(r['off'])} off for want of a dependency, "
-          f"{len(r['absent']) + len(r['promptless'])} not settable in this kernel; "
-          f"{len(r['added'])} symbols now set that were not")
+    r = settle(os.path.abspath(args.config), args.fragments, args.source, shlex.split(args.olddefconfig))
+    print(
+        f"{len(r['on'])} on, {len(r['lowered'])} lowered to keep every existing answer, "
+        f"{len(r['module'])} as modules their dependencies allow, "
+        f"{len(r['kept'])} already set, {len(r['off'])} off for want of a dependency, "
+        f"{len(r['absent']) + len(r['promptless'])} not settable in this kernel; "
+        f"{len(r['added'])} symbols now set that were not"
+    )
     for key, label in (("lowered", "lowered"), ("module", "as modules"), ("off", "off")):
         if r[key]:
             print(f"  {label}: {' '.join(r[key])}")

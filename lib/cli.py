@@ -23,8 +23,10 @@ import treeinfo  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARCHES = ("arm64", "riscv64", "x86_64")
-TREE_NOTE = ("TREE is a tree's ID or a unique prefix of 4 or more of its hex digits, or a path "
-             "inside its source; omitted, the current tree.")
+TREE_NOTE = (
+    "TREE is a tree's ID or a unique prefix of 4 or more of its hex digits, or a path "
+    "inside its source; omitted, the current tree."
+)
 ID_NOTE = "TREE is a tree's ID or a unique prefix of it; a path is not accepted here."
 FW_ACTIONS = ("show", "update", "build", "check", "own", "global")
 DT_ACTIONS = ("show", "edit", "apply", "detach", "reset", "diff", "probe", "check")
@@ -49,8 +51,7 @@ class Opt:
 
 
 class Cmd:
-    def __init__(self, name, summary, usage, args=(), opts=(), notes=(), own_help=False,
-                 aliases=(), rest=None):
+    def __init__(self, name, summary, usage, args=(), opts=(), notes=(), own_help=False, aliases=(), rest=None):
         self.name = name
         self.summary = summary
         self.usage = usage
@@ -66,61 +67,134 @@ class Cmd:
 
 
 COMMANDS = [
-    Cmd("trees", "every registered tree: kernel, commit, build state, guests, source",
-        "[ls] [-q|--json|--narrow]", aliases=["ls"], opts=[
+    Cmd(
+        "trees",
+        "every registered tree: kernel, commit, build state, guests, source",
+        "[ls] [-q|--json|--narrow]",
+        aliases=["ls"],
+        opts=[
             Opt("-q", "IDs only, one per line"),
             Opt("--json", "everything known about each tree, as JSON"),
-            Opt("--narrow", "one block per tree instead of a table row, for a terminal "
-                            "narrower than the table")]),
-    Cmd("inspect", "everything known about one tree", "[TREE] [--json|--format KEY]",
-        args=["tree"], notes=[TREE_NOTE], opts=[
+            Opt("--narrow", "one block per tree instead of a table row, for a terminal narrower than the table"),
+        ],
+    ),
+    Cmd(
+        "inspect",
+        "everything known about one tree",
+        "[TREE] [--json|--format KEY]",
+        args=["tree"],
+        notes=[TREE_NOTE],
+        opts=[
             Opt("--json", "everything known, as JSON"),
-            Opt("--format|-f", "print one field (a JSON key or a tree.conf key) and nothing else",
-                "KEY", "fkey")]),
-    Cmd("add", "register a kernel source you already have, under a new ID",
+            Opt("--format|-f", "print one field (a JSON key or a tree.conf key) and nothing else", "KEY", "fkey"),
+        ],
+    ),
+    Cmd(
+        "add",
+        "register a kernel source you already have, under a new ID",
         "DIR [--arch A] [--version V] [--upstream U]",
-        args=["dir"], opts=[
+        args=["dir"],
+        opts=[
             Opt("--arch", "arm64, riscv64 or x86_64 (default: read from DIR/.config)", "ARCH", "arch"),
-            Opt("--version", "the tag or branch sync follows (default: what is checked out)",
-                "VERSION", "text:a tag or branch"),
-            Opt("--upstream", "where sync fetches from: stable (default) or mainline",
-                "UPSTREAM", "choice:stable,mainline")]),
-    Cmd("init", "register a new tree under a new ID, to clone into DIR with sync; recreate "
-                "recorded trees; or record the workspace",
+            Opt(
+                "--version",
+                "the tag or branch sync follows (default: what is checked out)",
+                "VERSION",
+                "text:a tag or branch",
+            ),
+            Opt(
+                "--upstream",
+                "where sync fetches from: stable (default) or mainline",
+                "UPSTREAM",
+                "choice:stable,mainline",
+            ),
+        ],
+    ),
+    Cmd(
+        "init",
+        "register a new tree under a new ID, to clone into DIR with sync; recreate "
+        "recorded trees; or record the workspace",
         "DIR --arch ARCH [--version V] [--upstream U] | --restore [ID...] | --workspace DIR",
-        args=["initarg*"], opts=[
+        args=["initarg*"],
+        opts=[
             Opt("--arch", "arm64, riscv64 or x86_64", "ARCH", "arch"),
-            Opt("--version", "the tag or branch to clone and follow", "VERSION",
-                "text:a tag or branch"),
-            Opt("--upstream", "where sync fetches from: stable (default) or mainline",
-                "UPSTREAM", "choice:stable,mainline"),
-            Opt("--restore", "recreate the recorded workspace and the recorded trees (all, or "
-                             "the IDs given), each under the ID it was recorded with"),
-            Opt("--workspace", "record the workspace: where the rootfs and firmware are built "
-                               "and what the lab/ record spells as @KBL_WORKSPACE@", "DIR", "dir")],
-        notes=["DIR is required: the kernel source goes exactly there, and the tree is known "
-               "by its ID from then on."]),
-    Cmd("get", "read a tree's tree.conf, all of it or some keys", "TREE [KEY...]",
-        args=["tree", "key*"], notes=[TREE_NOTE]),
-    Cmd("set", "write keys into a tree's tree.conf", "TREE KEY=VALUE...",
-        args=["tree", "kv*"], notes=[TREE_NOTE, "SRC is stored as an absolute path; ~ is expanded."]),
-    Cmd("unset", "remove keys from a tree's tree.conf", "TREE KEY...",
-        args=["tree", "key*"], notes=[TREE_NOTE, "SRC and ARCH cannot be removed."]),
-    Cmd("edit", "open a tree's tree.conf in $VISUAL or $EDITOR", "[TREE]", args=["tree"],
-        notes=[TREE_NOTE]),
-    Cmd("mv", "move a tree's source, or only repoint SRC", "ID DIR [--no-move]",
-        args=["treeid", "dir"], notes=[ID_NOTE], opts=[
-            Opt("--no-move|--src-only", "do not move anything: point SRC at DIR, where you "
-                                        "moved the source yourself")]),
-    Cmd("rm", "unregister a tree", "ID [--purge] [--yes]", args=["treeid"],
-        notes=[ID_NOTE], opts=[
+            Opt("--version", "the tag or branch to clone and follow", "VERSION", "text:a tag or branch"),
+            Opt(
+                "--upstream",
+                "where sync fetches from: stable (default) or mainline",
+                "UPSTREAM",
+                "choice:stable,mainline",
+            ),
+            Opt(
+                "--restore",
+                "recreate the recorded workspace and the recorded trees (all, or "
+                "the IDs given), each under the ID it was recorded with",
+            ),
+            Opt(
+                "--workspace",
+                "record the workspace: where the rootfs and firmware are built "
+                "and what the lab/ record spells as @KBL_WORKSPACE@",
+                "DIR",
+                "dir",
+            ),
+        ],
+        notes=["DIR is required: the kernel source goes exactly there, and the tree is known by its ID from then on."],
+    ),
+    Cmd(
+        "get",
+        "read a tree's tree.conf, all of it or some keys",
+        "TREE [KEY...]",
+        args=["tree", "key*"],
+        notes=[TREE_NOTE],
+    ),
+    Cmd(
+        "set",
+        "write keys into a tree's tree.conf",
+        "TREE KEY=VALUE...",
+        args=["tree", "kv*"],
+        notes=[TREE_NOTE, "SRC is stored as an absolute path; ~ is expanded."],
+    ),
+    Cmd(
+        "unset",
+        "remove keys from a tree's tree.conf",
+        "TREE KEY...",
+        args=["tree", "key*"],
+        notes=[TREE_NOTE, "SRC and ARCH cannot be removed."],
+    ),
+    Cmd("edit", "open a tree's tree.conf in $VISUAL or $EDITOR", "[TREE]", args=["tree"], notes=[TREE_NOTE]),
+    Cmd(
+        "mv",
+        "move a tree's source, or only repoint SRC",
+        "ID DIR [--no-move]",
+        args=["treeid", "dir"],
+        notes=[ID_NOTE],
+        opts=[
+            Opt("--no-move|--src-only", "do not move anything: point SRC at DIR, where you moved the source yourself")
+        ],
+    ),
+    Cmd(
+        "rm",
+        "unregister a tree",
+        "ID [--purge] [--yes]",
+        args=["treeid"],
+        notes=[ID_NOTE],
+        opts=[
             Opt("--purge", "also delete its source, its data and its indexes (asks first)"),
-            Opt("--yes|-y", "do not ask")]),
-    Cmd("prune", "drop trees whose source is gone and data no tree owns", "[--yes]", opts=[
-        Opt("--yes|-y", "do not ask")]),
-    Cmd("update", "one pass: check, sync, keep .config, incremental build, modules, indexes, "
-                  "then a summary", "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm] [--fresh]",
-        args=["tree*"], notes=[
+            Opt("--yes|-y", "do not ask"),
+        ],
+    ),
+    Cmd(
+        "prune",
+        "drop trees whose source is gone and data no tree owns",
+        "[--yes]",
+        opts=[Opt("--yes|-y", "do not ask")],
+    ),
+    Cmd(
+        "update",
+        "one pass: check, sync, keep .config, incremental build, modules, indexes, then a summary",
+        "[TREE...|--all] [--no-tags] [--no-clangd] [--no-warm] [--fresh]",
+        args=["tree*"],
+        notes=[
             TREE_NOTE,
             "With no option it does all of it: the kernel and its modules, ctags, cscope, gtags, "
             "clangd's database and index, and kmx, on all cores while memory lasts, several "
@@ -131,39 +205,73 @@ COMMANDS = [
             "the others, then the tree is built as checked out. A tree built and indexed at its "
             "newest commit, with nothing changed since, is skipped (= in the table); a new "
             "clangd or kmx redoes only its index. clangd indexes are warmed last, several at "
-            "once."], opts=[
+            "once.",
+        ],
+        opts=[
             Opt("--all", "every registered tree"),
             Opt("--no-tags", "skip ctags, cscope, gtags and clangd"),
             Opt("--no-clangd", "skip the clangd database and index"),
             Opt("--no-warm", "write the clangd database and config, leave the index cold"),
-            Opt("--fresh", "rebuild every index from scratch, reusing no cached state")]),
-    Cmd("sync", "fetch, and fast-forward to the newest patch level of the tracked version",
-        "[TREE]", args=["tree"], notes=[TREE_NOTE]),
-    Cmd("config", "make or keep .config (the recorded one, the existing one, or defconfig) "
-                  "and merge the tree's config-fragment",
-        "[TREE] [--preset]", args=["tree"], notes=[TREE_NOTE], opts=[
-            Opt("--preset", "apply the debuggability preset; its soft half adds simulated and "
-                            "emulated devices and their tracing without moving an existing answer")]),
-    Cmd("build", "build in the container, then the tree's EXT_MODULES",
+            Opt("--fresh", "rebuild every index from scratch, reusing no cached state"),
+        ],
+    ),
+    Cmd(
+        "sync",
+        "fetch, and fast-forward to the newest patch level of the tracked version",
+        "[TREE]",
+        args=["tree"],
+        notes=[TREE_NOTE],
+    ),
+    Cmd(
+        "config",
+        "make or keep .config (the recorded one, the existing one, or defconfig) and merge the tree's config-fragment",
+        "[TREE] [--preset]",
+        args=["tree"],
+        notes=[TREE_NOTE],
+        opts=[
+            Opt(
+                "--preset",
+                "apply the debuggability preset; its soft half adds simulated and "
+                "emulated devices and their tracing without moving an existing answer",
+            )
+        ],
+    ),
+    Cmd(
+        "build",
+        "build in the container, then the tree's EXT_MODULES",
         "[TREE] [--ext-only|--fresh] [-- MAKE ARGS]",
-        args=["tree"], rest="MAKE ARGS", notes=[
+        args=["tree"],
+        rest="MAKE ARGS",
+        notes=[
             TREE_NOTE,
             "make uses KBL_JOBS jobs, all cores by default. If the source moved since the last good "
             "build, a failed incremental build discards what the failure names and tries again, and "
-            "only then is wiped and rebuilt. Outputs the build no longer makes are removed."],
+            "only then is wiped and rebuilt. Outputs the build no longer makes are removed.",
+        ],
         opts=[
             Opt("--ext-only", "build only the tree's EXT_MODULES, against its last build"),
-            Opt("--fresh", "wipe the build first (make mrproper; .config and indexes kept)")]),
-    Cmd("tags", "refresh ctags, cscope, gtags and the clangd index",
-        "[TREE] [--no-clangd|--clangd-only] [--no-warm] [--fresh]", args=["tree"], notes=[TREE_NOTE],
+            Opt("--fresh", "wipe the build first (make mrproper; .config and indexes kept)"),
+        ],
+    ),
+    Cmd(
+        "tags",
+        "refresh ctags, cscope, gtags and the clangd index",
+        "[TREE] [--no-clangd|--clangd-only] [--no-warm] [--fresh]",
+        args=["tree"],
+        notes=[TREE_NOTE],
         opts=[
             Opt("--no-clangd", "only ctags, cscope and gtags"),
             Opt("--clangd-only", "only the clangd database, config and index"),
             Opt("--no-warm", "leave the clangd index cold"),
-            Opt("--fresh", "rebuild every index from scratch, reusing no cached state")]),
-    Cmd("firmware", "the firmware a tree boots through: kbuildlab's global one, or the tree's own",
+            Opt("--fresh", "rebuild every index from scratch, reusing no cached state"),
+        ],
+    ),
+    Cmd(
+        "firmware",
+        "the firmware a tree boots through: kbuildlab's global one, or the tree's own",
         "[show|update|build|check|own|global] [TREE...|--all] [--fresh]",
-        args=["fwarg*"], notes=[
+        args=["fwarg*"],
+        notes=[
             TREE_NOTE,
             "A tree whose BOOT is uboot boots the global firmware for its architecture, which "
             "presets/firmware/ARCH.conf describes: where it comes from (URL), what update follows "
@@ -174,12 +282,19 @@ COMMANDS = [
             "update for the firmware of the trees it updates.",
             "own registers a firmware of the tree's own, described in firmware.conf beside its "
             "tree.conf with SRC and BUILD stated: it is checked and built first, and the tree boots it "
-            "only while that file stays as it was registered. global goes back."], opts=[
+            "only while that file stays as it was registered. global goes back.",
+        ],
+        opts=[
             Opt("--all", "the firmware of every registered tree whose BOOT is uboot"),
-            Opt("--fresh", "wipe the build directory first; its .config is kept", when="build")]),
-    Cmd("dt", "the device tree a tree boots on: show it, edit it, build one and attach it",
+            Opt("--fresh", "wipe the build directory first; its .config is kept", when="build"),
+        ],
+    ),
+    Cmd(
+        "dt",
+        "the device tree a tree boots on: show it, edit it, build one and attach it",
         "[show|edit|apply|detach|reset|diff|probe|check] [TREE] [FILE|STAGE...] [options]",
-        args=["dtarg*"], notes=[
+        args=["dtarg*"],
+        notes=[
             TREE_NOTE,
             "Stages, each kept as source and blob in the tree's data directory under dt/BOOT: "
             "machine (as QEMU holds it), firmware (as U-Boot holds it when it starts the kernel), "
@@ -190,38 +305,75 @@ COMMANDS = [
             "overlay is applied to the tree's own or to base. detach boots without it and keeps it; "
             "reset deletes it. diff compares two stages or blobs (default: base custom).",
             "A run refuses a tree that is not the one attached: a source edited after its build, a "
-            "machine other than the one it was built for, a loader that rewrites it. check tells."],
+            "machine other than the one it was built for, a loader that rewrites it. check tells.",
+        ],
         opts=[
-            Opt("--boot", "the boot the device tree is for: direct or uboot (default: the tree's BOOT)",
-                "MODE", "choice:direct,uboot,uefi"),
+            Opt(
+                "--boot",
+                "the boot the device tree is for: direct or uboot (default: the tree's BOOT)",
+                "MODE",
+                "choice:direct,uboot,uefi",
+            ),
             Opt("--board", "the device tree of a board run, boards/NAME.conf", "NAME", "board"),
-            Opt("--stage", "show: machine, firmware, base, custom or booted (default: the one in force)",
-                "NAME", "choice:" + ",".join(DT_STAGES)),
+            Opt(
+                "--stage",
+                "show: machine, firmware, base, custom or booted (default: the one in force)",
+                "NAME",
+                "choice:" + ",".join(DT_STAGES),
+            ),
             Opt("--source", "show: print the stage's source"),
             Opt("--json", "show: the stage's files and structure as JSON"),
-            Opt("--yes|-y", "do not ask", when="reset")]),
-    Cmd("image", "build the container image", "[legacy]",
-        args=["choice:legacy"], notes=["legacy: Ubuntu 24.04 with gcc-9 through gcc-13 (aarch64 cross "
-                                       "only), for a tree that names it with IMAGE= in its tree.conf."]),
-    Cmd("run", "boot a built tree under QEMU, frozen at reset for a debugger",
-        "[TREE] [options] [-- QEMU ARGS]", args=["tree"], own_help=True, rest="QEMU ARGS", opts=[
+            Opt("--yes|-y", "do not ask", when="reset"),
+        ],
+    ),
+    Cmd(
+        "image",
+        "build the container image",
+        "[legacy]",
+        args=["choice:legacy"],
+        notes=[
+            "legacy: Ubuntu 24.04 with gcc-9 through gcc-13 (aarch64 cross "
+            "only), for a tree that names it with IMAGE= in its tree.conf."
+        ],
+    ),
+    Cmd(
+        "run",
+        "boot a built tree under QEMU, frozen at reset for a debugger",
+        "[TREE] [options] [-- QEMU ARGS]",
+        args=["tree"],
+        own_help=True,
+        rest="QEMU ARGS",
+        opts=[
             Opt("--run", "boot now instead of freezing at reset"),
-            Opt("--boot", "direct, uboot or uefi (default: the tree's BOOT)", "MODE",
-                "choice:direct,uboot,uefi"),
-            Opt("--board", "boot on a real SoC's machine model from boards/ instead of the tree's "
-                           "machine; alone, list the boards for the tree's arch", "NAME", "board",
-                optional=True),
+            Opt("--boot", "direct, uboot or uefi (default: the tree's BOOT)", "MODE", "choice:direct,uboot,uefi"),
+            Opt(
+                "--board",
+                "boot on a real SoC's machine model from boards/ instead of the tree's "
+                "machine; alone, list the boards for the tree's arch",
+                "NAME",
+                "board",
+                optional=True,
+            ),
             Opt("--kaslr", "boot with KASLR active"),
             Opt("--no-kaslr|--nokaslr", "deterministic base (the default unless the tree's KASLR says otherwise)"),
             Opt("--kvm", "x86 only: KVM, faster and less deterministic"),
             Opt("--no-kvm", "TCG, deterministic early-boot hardware breakpoints (the default)"),
             Opt("--initrd", "root fs image", "PATH", "file"),
             Opt("--no-initrd", "boot without a root fs (early-boot only)"),
-            Opt("--root", "initramfs, or disk: the tree's GPT system disk (default: the tree's ROOT)",
-                "KIND", "choice:initramfs,disk"),
+            Opt(
+                "--root",
+                "initramfs, or disk: the tree's GPT system disk (default: the tree's ROOT)",
+                "KIND",
+                "choice:initramfs,disk",
+            ),
             Opt("--reset-sysdisk", "delete the system disk and make it again from ROOTFS_IMAGE"),
-            Opt("--append", "extra kernel command-line words, repeatable", "WORDS",
-                "text:kernel command-line words", repeat=True),
+            Opt(
+                "--append",
+                "extra kernel command-line words, repeatable",
+                "WORDS",
+                "text:kernel command-line words",
+                repeat=True,
+            ),
             Opt("--net", "user-mode virtio NIC with an ssh forward"),
             Opt("--no-net", "no NIC"),
             Opt("--ssh-port", "host port forwarded to the guest's :22", "N", "number:a host port"),
@@ -229,8 +381,13 @@ COMMANDS = [
             Opt("--no-persist", "boot without it"),
             Opt("--emulate", "attach the emulated controllers the soft presets build drivers for"),
             Opt("--no-emulate", "without them"),
-            Opt("--pcie-device", "a qemu -device spec behind a PCIe root port of its own, repeatable",
-                "SPEC", "text:a qemu -device spec, e.g. edu", repeat=True),
+            Opt(
+                "--pcie-device",
+                "a qemu -device spec behind a PCIe root port of its own, repeatable",
+                "SPEC",
+                "text:a qemu -device spec, e.g. edu",
+                repeat=True,
+            ),
             Opt("--iommu", "DMA through the machine's IOMMU"),
             Opt("--no-iommu", "without one (the default unless the tree's IOMMU says otherwise)"),
             Opt("--modules", "append the staged modules to the initramfs (the boot partition with ROOT=disk)"),
@@ -242,44 +399,88 @@ COMMANDS = [
             Opt("--mem|-m", "guest memory, as qemu's -m takes it", "SIZE", "text:a size, e.g. 2G"),
             Opt("--smp", "guest CPUs", "N", "number:a CPU count"),
             Opt("--bios", "firmware image", "PATH", "file"),
-            Opt("--dtb", "boot on this device tree blob instead of the one kbuildlab dt attached",
-                "PATH", "file"),
-            Opt("--no-dtb", "boot without the tree's own device tree")]),
-    Cmd("attach", "attach gdb to a running guest, stopped at head.S _text by default",
-        "[TREE] [options] [-- GDB ARGS]", args=["tree"], own_help=True, rest="GDB ARGS", opts=[
+            Opt("--dtb", "boot on this device tree blob instead of the one kbuildlab dt attached", "PATH", "file"),
+            Opt("--no-dtb", "boot without the tree's own device tree"),
+        ],
+    ),
+    Cmd(
+        "attach",
+        "attach gdb to a running guest, stopped at head.S _text by default",
+        "[TREE] [options] [-- GDB ARGS]",
+        args=["tree"],
+        own_help=True,
+        rest="GDB ARGS",
+        opts=[
             Opt("--no-bootbreak|--raw", "attach without running to _text (an already-booted guest)"),
             Opt("--bootbreak", "run to _text first (the default)"),
-            Opt("--stop", "where the attach stops: text, firmware, relocated or start_kernel", "WHERE",
-                "choice:text,firmware,relocated,start_kernel"),
+            Opt(
+                "--stop",
+                "where the attach stops: text, firmware, relocated or start_kernel",
+                "WHERE",
+                "choice:text,firmware,relocated,start_kernel",
+            ),
             Opt("--port|-p", "pick the guest by its gdb port", "N", "port"),
             Opt("--list|-l", "list live guests and exit"),
             Opt("--first", "with several matches, take the lowest port instead of asking"),
-            Opt("--json", "print the session as JSON instead of starting gdb")]),
-    Cmd("drgn", "attach drgn to a running guest over QMP", "[TREE] [options] [-- DRGN ARGS]",
-        args=["tree"], own_help=True, rest="DRGN ARGS", opts=[
+            Opt("--json", "print the session as JSON instead of starting gdb"),
+        ],
+    ),
+    Cmd(
+        "drgn",
+        "attach drgn to a running guest over QMP",
+        "[TREE] [options] [-- DRGN ARGS]",
+        args=["tree"],
+        own_help=True,
+        rest="DRGN ARGS",
+        opts=[
             Opt("--port|-p", "pick the guest by its gdb port", "N", "port"),
             Opt("--qmp-port", "pick it by its QMP port", "N", "qmpport"),
             Opt("--tcp", "connect over the QMP TCP port rather than the unix socket"),
-            Opt("--wait", "wait for the guest to publish its vmcoreinfo note (default 300s)",
-                "SECONDS", "number:seconds", optional=True),
+            Opt(
+                "--wait",
+                "wait for the guest to publish its vmcoreinfo note (default 300s)",
+                "SECONDS",
+                "number:seconds",
+                optional=True,
+            ),
             Opt("--no-symbols", "do not pass the tree's vmlinux to drgn"),
             Opt("--list|-l", "list live guests and exit"),
-            Opt("--first", "with several matches, take the lowest port instead of asking")]),
-    Cmd("resume", "resume a guest a dead debugger left paused", "[TREE] [options]",
-        args=["tree"], own_help=True, opts=[
+            Opt("--first", "with several matches, take the lowest port instead of asking"),
+        ],
+    ),
+    Cmd(
+        "resume",
+        "resume a guest a dead debugger left paused",
+        "[TREE] [options]",
+        args=["tree"],
+        own_help=True,
+        opts=[
             Opt("--port|-p", "pick the guest by its gdb port", "N", "port"),
             Opt("--list|-l", "list live guests and exit"),
             Opt("--first", "with several matches, take the lowest port instead of asking"),
-            Opt("--force", "resume even while a debugger is attached")]),
+            Opt("--force", "resume even while a debugger is attached"),
+        ],
+    ),
     Cmd("doctor", "what is installed, and what is missing", ""),
-    Cmd("containers", "what the container runtime holds for kbuildlab, or remove it",
-        "[status | clean [--images] [--dangling]]", args=["choice:status,clean"], opts=[
-            Opt("--images", "also remove the images kbuildlab built (kbuildlab:*, kbuildlab-*:*); "
-                            "an image a tree names but kbuildlab did not build is kept", when="clean"),
-            Opt("--dangling", "also remove every untagged image on this host, not only "
-                              "kbuildlab's", when="clean")],
-        notes=["status only reports.  clean removes the stopped containers made from "
-               "kbuildlab's images and leaves running ones alone."]),
+    Cmd(
+        "containers",
+        "what the container runtime holds for kbuildlab, or remove it",
+        "[status | clean [--images] [--dangling]]",
+        args=["choice:status,clean"],
+        opts=[
+            Opt(
+                "--images",
+                "also remove the images kbuildlab built (kbuildlab:*, kbuildlab-*:*); "
+                "an image a tree names but kbuildlab did not build is kept",
+                when="clean",
+            ),
+            Opt("--dangling", "also remove every untagged image on this host, not only kbuildlab's", when="clean"),
+        ],
+        notes=[
+            "status only reports.  clean removes the stopped containers made from "
+            "kbuildlab's images and leaves running ones alone."
+        ],
+    ),
     Cmd("help", "this list, or one command's options", "[COMMAND]", args=["cmd"]),
 ]
 BY_NAME = {n: c for c in COMMANDS for n in [c.name] + c.aliases}
@@ -338,6 +539,7 @@ def cmd_help(args):
 
 # ----------------------------------------------------------------------------- completion
 
+
 def _emit(tag, value, desc=""):
     print("%s\t%s\t%s" % (tag, value, " ".join(str(desc).split())))
 
@@ -390,9 +592,17 @@ def _values(kind, pos, cur):
         for t in every:
             b = treeinfo.basic(t, every)
             g = live.get(os.path.realpath(b["config"]))
-            _emit("tree", b["label"], "%s %s %s%s" % (
-                b["arch"] or "?", b["ref"] or "", b["src"] or "",
-                ("  %d guest%s" % (g, "s" if g > 1 else "")) if g else ""))
+            _emit(
+                "tree",
+                b["label"],
+                "%s %s %s%s"
+                % (
+                    b["arch"] or "?",
+                    b["ref"] or "",
+                    b["src"] or "",
+                    ("  %d guest%s" % (g, "s" if g > 1 else "")) if g else "",
+                ),
+            )
         if kind == "tree" and (cur.startswith(("/", ".", "~")) or not every):
             print("@dirs")
     elif kind == "dir":
@@ -407,16 +617,32 @@ def _values(kind, pos, cur):
         for f in sorted(os.listdir(d)) if os.path.isdir(d) else ():
             if f.endswith(".conf"):
                 p = os.path.join(d, f)
-                _emit("value", f[:-5], "%s %s" % (treeinfo.conf_file_get(p, "ARCH") or "?",
-                                                  treeinfo.conf_file_get(p, "MACHINE") or ""))
+                _emit(
+                    "value",
+                    f[:-5],
+                    "%s %s" % (treeinfo.conf_file_get(p, "ARCH") or "?", treeinfo.conf_file_get(p, "MACHINE") or ""),
+                )
     elif kind == "labid":
         lab = os.path.join(REPO, "lab", "trees")
         have = set(treeinfo.ids())
-        rec = sorted(d for d in os.listdir(lab) if d not in have and re.fullmatch(r"[0-9a-f]{16}", d)
-                     and os.path.isfile(os.path.join(lab, d, "tree.conf"))) if os.path.isdir(lab) else []
+        rec = (
+            sorted(
+                d
+                for d in os.listdir(lab)
+                if d not in have
+                and re.fullmatch(r"[0-9a-f]{16}", d)
+                and os.path.isfile(os.path.join(lab, d, "tree.conf"))
+            )
+            if os.path.isdir(lab)
+            else []
+        )
         for d in rec:
             b = treeinfo.conf_get(os.path.join(lab, d), "ARCH") or "?"
-            _emit("value", d, "recorded in lab/trees: %s %s" % (b, treeinfo.conf_get(os.path.join(lab, d), "VERSION") or ""))
+            _emit(
+                "value",
+                d,
+                "recorded in lab/trees: %s %s" % (b, treeinfo.conf_get(os.path.join(lab, d), "VERSION") or ""),
+            )
     elif kind in ("key", "kv"):
         tdir = _tree_dir(pos[0]) if pos else None
         have = _conf_keys(tdir)
@@ -436,8 +662,7 @@ def _values(kind, pos, cur):
         for tree, g in rows:
             port = g.get("port") if kind == "port" else g.get("qmp")
             if port:
-                _emit("value", port, "%s, %s%s" % (tree, g.get("boot") or "?",
-                                                   ", frozen" if g.get("frozen") else ""))
+                _emit("value", port, "%s, %s%s" % (tree, g.get("boot") or "?", ", frozen" if g.get("frozen") else ""))
         if not rows:
             print("@message\tno live guest (kbuildlab run starts one)")
     elif kind in ("fwarg", "dtarg"):
@@ -498,8 +723,7 @@ def cmd_complete(words):
                 if i + 1 == len(rest):
                     pending = o
                     break
-                if not o.optional or rest[i + 1].isdigit() or (
-                        o.kind == "board" and not rest[i + 1].startswith("-")):
+                if not o.optional or rest[i + 1].isdigit() or (o.kind == "board" and not rest[i + 1].startswith("-")):
                     i += 1
         elif not w.startswith("-"):
             pos.append(w)

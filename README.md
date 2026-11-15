@@ -933,7 +933,8 @@ presets/firmware/      the global firmware of each architecture, and its fragmen
 completions/           the bash and zsh completions install.sh puts in place
 tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs,
                        fdt.py against fdtget and damaged blobs, the refusals of dt and
-                       firmware, and guest.py, which boots a tree and runs commands in it
+                       firmware, guest.py, which boots a tree and runs commands in it,
+                       and style.py, which holds a checkout to its formatters
 ```
 
 ## Dependencies
@@ -948,5 +949,9 @@ resolve before the MMU is on; `kbuildlab attach` finds it if it is installed and
 says so if it is not. `clangd` and `python3` on the host, for the clangd index;
 absent, `kbuildlab tags` says so and builds the other three. `sgdisk`, `sfdisk` and
 mtools, for a `ROOT=disk` guest. `dtc`, for `kbuildlab dt`.
+
+To work on kbuildlab: `shfmt` lays out the shell and `ruff` the Python, by
+`.editorconfig` and `ruff.toml`. `shfmt -w .` and `ruff format .` format a
+checkout, and `tests/style.py` fails while either would change a file.
 
 Nothing is installed for you, and no system setting is changed.

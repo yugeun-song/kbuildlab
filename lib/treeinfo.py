@@ -22,9 +22,11 @@ import sys
 import time
 
 TREES = os.environ.get("KBL_TREES") or os.path.join(
-    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "kbuildlab", "trees")
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "kbuildlab", "trees"
+)
 DATA = os.environ.get("KBL_DATA_HOME") or os.path.join(
-    os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "kbuildlab")
+    os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "kbuildlab"
+)
 STATE = os.environ.get("KBL_STATE_DIR") or "/dev/shm"
 
 ARCHES = {"arm64": "arm64", "aarch64": "arm64", "riscv64": "riscv64", "x86_64": "x86_64"}
@@ -84,8 +86,7 @@ def conf_keys(tree_dir):
 
 def ids():
     try:
-        return sorted(d for d in os.listdir(TREES)
-                      if os.path.isfile(os.path.join(TREES, d, "tree.conf")))
+        return sorted(d for d in os.listdir(TREES) if os.path.isfile(os.path.join(TREES, d, "tree.conf")))
     except OSError:
         return []
 
@@ -108,8 +109,7 @@ def resolve(word):
 
 def _git(src, *args):
     try:
-        r = subprocess.run(["git", "--no-optional-locks", "-C", src, *args],
-                           capture_output=True, text=True, timeout=20)
+        r = subprocess.run(["git", "--no-optional-locks", "-C", src, *args], capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout.strip() if r.returncode == 0 else None
@@ -183,12 +183,16 @@ def guests():
         if st.get("KBL_QEMU_START") and _starttime(pid) != st.get("KBL_QEMU_START"):
             continue
         tree = os.path.realpath(st.get("KBL_TREE", "")) if st.get("KBL_TREE") else ""
-        out.setdefault(tree, []).append({
-            "port": int(st["KBL_GDB_PORT"]) if st.get("KBL_GDB_PORT", "").isdigit() else None,
-            "pid": int(pid), "boot": st.get("KBL_BOOT") or None,
-            "frozen": st.get("KBL_FROZEN") == "1",
-            "ssh": int(st["KBL_SSH_PORT"]) if st.get("KBL_SSH_PORT", "").isdigit() else None,
-            "qmp": int(st["KBL_QMP_PORT"]) if st.get("KBL_QMP_PORT", "").isdigit() else None})
+        out.setdefault(tree, []).append(
+            {
+                "port": int(st["KBL_GDB_PORT"]) if st.get("KBL_GDB_PORT", "").isdigit() else None,
+                "pid": int(pid),
+                "boot": st.get("KBL_BOOT") or None,
+                "frozen": st.get("KBL_FROZEN") == "1",
+                "ssh": int(st["KBL_SSH_PORT"]) if st.get("KBL_SSH_PORT", "").isdigit() else None,
+                "qmp": int(st["KBL_QMP_PORT"]) if st.get("KBL_QMP_PORT", "").isdigit() else None,
+            }
+        )
     return out
 
 
@@ -215,21 +219,28 @@ def basic(tid, every=None):
     tdir = os.path.join(TREES, tid)
     raw = conf_get(tdir, "SRC")
     arch = ARCHES.get(conf_get(tdir, "ARCH") or "", conf_get(tdir, "ARCH"))
-    return {"id": tid, "label": label(tid, every), "config": tdir,
-            "data": os.path.join(DATA, "trees", tid),
-            "src": norm_src(raw), "src_stated": raw, "arch": arch,
-            "ref": conf_get(tdir, "VERSION"), "upstream": conf_get(tdir, "UPSTREAM") or "stable",
-            "boot": conf_get(tdir, "BOOT") or "direct",
-            "gdb_port": conf_get(tdir, "GDB_PORT"), "qmp_port": conf_get(tdir, "QMP_PORT"),
-            "problems": []}
+    return {
+        "id": tid,
+        "label": label(tid, every),
+        "config": tdir,
+        "data": os.path.join(DATA, "trees", tid),
+        "src": norm_src(raw),
+        "src_stated": raw,
+        "arch": arch,
+        "ref": conf_get(tdir, "VERSION"),
+        "upstream": conf_get(tdir, "UPSTREAM") or "stable",
+        "boot": conf_get(tdir, "BOOT") or "direct",
+        "gdb_port": conf_get(tdir, "GDB_PORT"),
+        "qmp_port": conf_get(tdir, "QMP_PORT"),
+        "problems": [],
+    }
 
 
 def info(tid, live=None, deep=False, every=None, describe=True):
     d = basic(tid, every)
     tdir, src = d["config"], d["src"] or ""
     arch = d["arch"]
-    is_src = bool(src) and os.path.isfile(os.path.join(src, "Makefile")) \
-        and os.path.isdir(os.path.join(src, "arch"))
+    is_src = bool(src) and os.path.isfile(os.path.join(src, "Makefile")) and os.path.isdir(os.path.join(src, "arch"))
     if not d["src_stated"]:
         d["problems"].append("tree.conf states no SRC")
     elif not src:
@@ -291,10 +302,19 @@ def cmd_list(args):
     table = []
     for d in infos:
         bad = bool(d["problems"])
-        table.append([
-            d["label"], d["arch"] or "?", d["release"] or d["version"] or "-", d["ref"] or "-",
-            (d["commit"] or "-")[:12], _age(d["built"]), str(len(d["guests"])) if d["guests"] else "-",
-            d["src"] or "-", bad])
+        table.append(
+            [
+                d["label"],
+                d["arch"] or "?",
+                d["release"] or d["version"] or "-",
+                d["ref"] or "-",
+                (d["commit"] or "-")[:12],
+                _age(d["built"]),
+                str(len(d["guests"])) if d["guests"] else "-",
+                d["src"] or "-",
+                bad,
+            ]
+        )
     width = [max(len(head[i]), *(len(r[i]) for r in table)) for i in range(len(head) - 1)]
     print("  ".join(c("1", h.ljust(width[i])) for i, h in enumerate(head[:-1])) + "  " + c("1", head[-1]))
     for r in table:
@@ -324,14 +344,17 @@ def _problems(infos):
 def _home(path):
     home = os.path.expanduser("~")
     if path and home != "/" and (path == home or path.startswith(home + "/")):
-        return "~" + path[len(home):]
+        return "~" + path[len(home) :]
     return path
 
 
 def _list_blocks(infos):
     for d in infos:
-        print("  ".join([c("1;31" if d["problems"] else "1", d["label"]), d["arch"] or "?",
-                         d["release"] or d["version"] or "-"]))
+        print(
+            "  ".join(
+                [c("1;31" if d["problems"] else "1", d["label"]), d["arch"] or "?", d["release"] or d["version"] or "-"]
+            )
+        )
         built = c("32", d["built"]) if d["built"] else c("2", "-")
         if d["guests"]:
             built += "  " + c("33", "guests %d" % len(d["guests"]))
@@ -366,8 +389,7 @@ def cmd_inspect(args):
         d = basic(tid)
         if key not in d or key == "problems":
             tdir = d["config"]
-            d = {k: conf_get(tdir, k) for k in conf_keys(tdir)} if key in conf_keys(tdir) \
-                else info(tid, deep=True)
+            d = {k: conf_get(tdir, k) for k in conf_keys(tdir)} if key in conf_keys(tdir) else info(tid, deep=True)
         v = d.get(key, d.get("settings", {}).get(key))
         if v is None:
             return 1
@@ -378,8 +400,11 @@ def cmd_inspect(args):
         json.dump(d, sys.stdout, indent=1)
         print()
         return 0
-    print(c("1", d["label"]) + "  " + (c("32", OK + " ok") if not d["problems"] else
-                                      c("31", NO + " " + "; ".join(d["problems"]))))
+    print(
+        c("1", d["label"])
+        + "  "
+        + (c("32", OK + " ok") if not d["problems"] else c("31", NO + " " + "; ".join(d["problems"])))
+    )
     git = "%s%s" % (d["describe"] or "-", c("33", " (modified)") if d.get("dirty") else "")
     rows = [
         ("id", d["id"]),
@@ -387,17 +412,25 @@ def cmd_inspect(args):
         ("arch", d["arch"] or "-"),
         ("source", d["src"] or "-"),
         ("commit", "%s  %s" % (d["commit"] or "-", git)),
-        ("tracks", "%s (%s)%s" % (d["ref"] or "-", d["upstream"],
-                                  ("  origin " + d["origin"]) if d.get("origin") else "")),
+        (
+            "tracks",
+            "%s (%s)%s" % (d["ref"] or "-", d["upstream"], ("  origin " + d["origin"]) if d.get("origin") else ""),
+        ),
         ("built", "%s%s" % (d["built"] or "no vmlinux", ("  " + d["compiler"]) if d["compiler"] else "")),
         ("boot", "%s  gdb :%s  qmp :%s" % (d["boot"], d["gdb_port"] or "-", d["qmp_port"] or "-")),
         ("config", d["config"] + "/tree.conf"),
         ("data", "%s%s" % (d["data"], ("  " + d["data_size"]) if d.get("data_size") else "  (empty)")),
     ]
     if d["guests"]:
-        rows.append(("guests", ", ".join(
-            ":%s pid %s %s%s" % (g["port"], g["pid"], g["boot"] or "?", " frozen" if g["frozen"] else "")
-            for g in d["guests"])))
+        rows.append(
+            (
+                "guests",
+                ", ".join(
+                    ":%s pid %s %s%s" % (g["port"], g["pid"], g["boot"] or "?", " frozen" if g["frozen"] else "")
+                    for g in d["guests"]
+                ),
+            )
+        )
     else:
         rows.append(("guests", "none running"))
     width = max(len(k) for k, _ in rows) + 3

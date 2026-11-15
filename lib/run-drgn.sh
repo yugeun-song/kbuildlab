@@ -10,7 +10,14 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/common.sh"
 
-PORT=""; PORT_SET=0; QMPPORT=""; QMPPORT_SET=0; LIST=0; FIRST=0; SYMBOLS=1; TCP=0
+PORT=""
+PORT_SET=0
+QMPPORT=""
+QMPPORT_SET=0
+LIST=0
+FIRST=0
+SYMBOLS=1
+TCP=0
 WAIT=0
 declare -a REST=() PASS=()
 _usage() {
@@ -44,18 +51,53 @@ USAGE
 }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help)     _usage; exit 0 ;;
-        --port|-p)     PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
-        --qmp-port)    QMPPORT="${2:?--qmp-port needs a number}"; QMPPORT_SET=1; shift 2 ;;
-        --tcp)         TCP=1; shift ;;
-        --wait)        if [[ "${2:-}" =~ ^[0-9]+$ ]]; then WAIT="$2"; shift 2
-                       else WAIT=300; shift; fi ;;
-        --no-symbols)  SYMBOLS=0; shift ;;
-        --list|-l)     LIST=1; shift ;;
-        --first)       FIRST=1; shift ;;
-        --) shift; PASS=("$@"); break ;;
+        -h | --help)
+            _usage
+            exit 0
+            ;;
+        --port | -p)
+            PORT="${2:?--port needs a number}"
+            PORT_SET=1
+            shift 2
+            ;;
+        --qmp-port)
+            QMPPORT="${2:?--qmp-port needs a number}"
+            QMPPORT_SET=1
+            shift 2
+            ;;
+        --tcp)
+            TCP=1
+            shift
+            ;;
+        --wait) if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+            WAIT="$2"
+            shift 2
+        else
+            WAIT=300
+            shift
+        fi ;;
+        --no-symbols)
+            SYMBOLS=0
+            shift
+            ;;
+        --list | -l)
+            LIST=1
+            shift
+            ;;
+        --first)
+            FIRST=1
+            shift
+            ;;
+        --)
+            shift
+            PASS=("$@")
+            break
+            ;;
         -*) die "drgn: unknown option '$1' (pass drgn arguments after --)" ;;
-        *)  REST+=("$1"); shift ;;
+        *)
+            REST+=("$1")
+            shift
+            ;;
     esac
 done
 
@@ -78,17 +120,20 @@ if [[ $QMPPORT_SET -eq 1 ]]; then
     for _f in "$_sd"/kbl-run-*.env; do
         [[ -r "$_f" ]] || continue
         [[ "$(kbl_state_get "$_f" KBL_QMP_PORT)" == "$QMPPORT" ]] || continue
-        _found="$(kbl_state_get "$_f" KBL_GDB_PORT)"; break
+        _found="$(kbl_state_get "$_f" KBL_GDB_PORT)"
+        break
     done
     [[ -n "$_found" ]] || die "drgn: no run recorded QMP port $QMPPORT.  'kbuildlab drgn --list'
        shows what is live; a guest started with --no-qmp has no QMP port at all."
     if [[ $PORT_SET -eq 1 && "$PORT" != "$_found" ]]; then
         die "drgn: --qmp-port $QMPPORT belongs to the guest on gdb port $_found, not $PORT"
     fi
-    PORT="$_found"; PORT_SET=1
+    PORT="$_found"
+    PORT_SET=1
 fi
 
-kbl_pick_guest drgn "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"; _rc=$?
+kbl_pick_guest drgn "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"
+_rc=$?
 [[ $_rc -eq 2 ]] && exit 0
 [[ $_rc -eq 0 ]] || exit $_rc
 
@@ -158,7 +203,8 @@ _ident="$(_identify)"
 # two socket fds).  Waiting out here is the only place the retry can happen.
 if [[ "$_ident" == 0 && $WAIT -gt 0 ]]; then
     say "waiting      for the guest to publish its vmcoreinfo note (up to ${WAIT}s, Ctrl-C to stop)"
-    _end=$(( SECONDS + WAIT )); _said=0
+    _end=$((SECONDS + WAIT))
+    _said=0
     while [[ $SECONDS -lt $_end ]]; do
         sleep 2
         _ident="$(_identify)"
@@ -168,12 +214,12 @@ if [[ "$_ident" == 0 && $WAIT -gt 0 ]]; then
        it, and it serves one client at a time.  Quit that session first."
             break
         fi
-        if [[ $(( SECONDS % 15 )) -lt 2 && $_said -ne $SECONDS ]]; then
+        if [[ $((SECONDS % 15)) -lt 2 && $_said -ne $SECONDS ]]; then
             _said=$SECONDS
-            say "waiting      still not published ($(( _end - SECONDS ))s left)"
+            say "waiting      still not published ($((_end - SECONDS))s left)"
         fi
     done
-    [[ "$_ident" == 1 ]] && say "waiting      published after $(( WAIT - (_end - SECONDS) ))s"
+    [[ "$_ident" == 1 ]] && say "waiting      published after $((WAIT - (_end - SECONDS)))s"
 fi
 
 if [[ "$_ident" == 0 ]]; then

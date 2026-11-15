@@ -9,7 +9,8 @@
 set -uo pipefail
 
 kbl_repo() {
-    local self; self="$(readlink -f "${BASH_SOURCE[0]}")"
+    local self
+    self="$(readlink -f "${BASH_SOURCE[0]}")"
     (cd -P "$(dirname "$self")/.." && pwd)
 }
 KBL_REPO="${KBL_REPO:-$(kbl_repo)}"
@@ -25,14 +26,18 @@ if _kbl_tty 1; then
 else
     KBL_B="" KBL_D="" KBL_R="" KBL_G="" KBL_Y="" KBL_C="" KBL_0=""
 fi
-if _kbl_tty 2; then KBL_ER=$'\e[1;31m' KBL_EY=$'\e[1;33m' KBL_E0=$'\e[0m'
+if _kbl_tty 2; then
+    KBL_ER=$'\e[1;31m' KBL_EY=$'\e[1;33m' KBL_E0=$'\e[0m'
 else KBL_ER="" KBL_EY="" KBL_E0=""; fi
 case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
-    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) KBL_OK="✓" KBL_NO="✗" ;;
+    *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) KBL_OK="✓" KBL_NO="✗" ;;
     *) KBL_OK="+" KBL_NO="x" ;;
 esac
 
-die()  { printf '%skbuildlab:%s %s\n' "$KBL_ER" "$KBL_E0" "$*" >&2; exit 1; }
+die() {
+    printf '%skbuildlab:%s %s\n' "$KBL_ER" "$KBL_E0" "$*" >&2
+    exit 1
+}
 warn() { printf '%skbuildlab:%s %s\n' "$KBL_EY" "$KBL_E0" "$*" >&2; }
 say() {
     local s="$*"
@@ -42,8 +47,8 @@ say() {
         printf '  %s\n' "$s"
     fi
 }
-ok()   { printf '  %s%s%s %s\n' "$KBL_G" "$KBL_OK" "$KBL_0" "$*"; }
-bad()  { printf '  %s%s%s %s\n' "$KBL_R" "$KBL_NO" "$KBL_0" "$*"; }
+ok() { printf '  %s%s%s %s\n' "$KBL_G" "$KBL_OK" "$KBL_0" "$*"; }
+bad() { printf '  %s%s%s %s\n' "$KBL_R" "$KBL_NO" "$KBL_0" "$*"; }
 head1() { printf '%s%s%s\n' "$KBL_B" "$*" "$KBL_0"; }
 
 # --- host prerequisites ------------------------------------------------------
@@ -61,63 +66,78 @@ kbl_distro() {
     fi
     for w in $id $like; do
         case "$w" in
-            arch|manjaro|endeavouros|cachyos) echo arch; return ;;
-            debian|ubuntu|linuxmint|pop) echo debian; return ;;
-            fedora|rhel|centos|rocky|almalinux) echo fedora; return ;;
-            void) echo void; return ;;
-            suse|opensuse|opensuse-leap|opensuse-tumbleweed|sles) echo suse; return ;;
+            arch | manjaro | endeavouros | cachyos)
+                echo arch
+                return
+                ;;
+            debian | ubuntu | linuxmint | pop)
+                echo debian
+                return
+                ;;
+            fedora | rhel | centos | rocky | almalinux)
+                echo fedora
+                return
+                ;;
+            void)
+                echo void
+                return
+                ;;
+            suse | opensuse | opensuse-leap | opensuse-tumbleweed | sles)
+                echo suse
+                return
+                ;;
         esac
     done
     echo unknown
 }
 
 # " -- install: <command>" for a program, or nothing when the family is unknown.
-kbl_pkg_hint() {   # kbl_pkg_hint PROGRAM
+kbl_pkg_hint() { # kbl_pkg_hint PROGRAM
     local fam pkg="" cmd=""
     fam="$(kbl_distro)"
     case "$fam" in
-        arch)   cmd="pacman -S" ;;
+        arch) cmd="pacman -S" ;;
         debian) cmd="apt install" ;;
         fedora) cmd="dnf install" ;;
-        void)   cmd="xbps-install" ;;
-        suse)   cmd="zypper install" ;;
+        void) cmd="xbps-install" ;;
+        suse) cmd="zypper install" ;;
         *) return 0 ;;
     esac
     case "$fam:$1" in
-        arch:qemu-system-aarch64)   pkg=qemu-system-aarch64 ;;
-        arch:qemu-system-riscv64)   pkg=qemu-system-riscv ;;
-        arch:qemu-system-x86_64)    pkg=qemu-system-x86 ;;
+        arch:qemu-system-aarch64) pkg=qemu-system-aarch64 ;;
+        arch:qemu-system-riscv64) pkg=qemu-system-riscv ;;
+        arch:qemu-system-x86_64) pkg=qemu-system-x86 ;;
         debian:qemu-system-aarch64) pkg=qemu-system-arm ;;
         debian:qemu-system-riscv64) pkg=qemu-system-misc ;;
-        debian:qemu-system-x86_64)  pkg=qemu-system-x86 ;;
+        debian:qemu-system-x86_64) pkg=qemu-system-x86 ;;
         fedora:qemu-system-aarch64) pkg=qemu-system-aarch64 ;;
         fedora:qemu-system-riscv64) pkg=qemu-system-riscv ;;
-        fedora:qemu-system-x86_64)  pkg=qemu-system-x86 ;;
-        void:qemu-system-*)         pkg=qemu ;;
-        suse:qemu-system-aarch64)   pkg=qemu-arm ;;
-        suse:qemu-system-riscv64)   pkg=qemu-extra ;;
-        suse:qemu-system-x86_64)    pkg=qemu-x86 ;;
-        arch:gdb|fedora:gdb|suse:gdb) pkg=gdb ;;
-        debian:gdb|void:gdb)        pkg=gdb-multiarch ;;
-        arch:python3)               pkg=python ;;
-        *:python3)                  pkg=python3 ;;
-        fedora:ss)                  pkg=iproute ;;
-        *:ss)                       pkg=iproute2 ;;
-        *:flock)                    pkg=util-linux ;;
-        *:timeout)                  pkg=coreutils ;;
-        arch:mkimage|fedora:mkimage) pkg=uboot-tools ;;
-        *:mkimage)                  pkg=u-boot-tools ;;
-        *:mcopy)                    pkg=mtools ;;
-        debian:dtc)                 pkg=device-tree-compiler ;;
-        *:dtc)                      pkg=dtc ;;
-        arch:clangd)                pkg=clang ;;
-        debian:clangd)              pkg=clangd ;;
-        fedora:clangd|void:clangd)  pkg=clang-tools-extra ;;
-        suse:clangd)                pkg=clang-tools ;;
-        arch:ovmf|fedora:ovmf|void:ovmf) pkg=edk2-ovmf ;;
-        debian:ovmf)                pkg=ovmf ;;
-        suse:ovmf)                  pkg=qemu-ovmf-x86_64 ;;
-        *:git|*:podman|*:drgn)      pkg="$1" ;;
+        fedora:qemu-system-x86_64) pkg=qemu-system-x86 ;;
+        void:qemu-system-*) pkg=qemu ;;
+        suse:qemu-system-aarch64) pkg=qemu-arm ;;
+        suse:qemu-system-riscv64) pkg=qemu-extra ;;
+        suse:qemu-system-x86_64) pkg=qemu-x86 ;;
+        arch:gdb | fedora:gdb | suse:gdb) pkg=gdb ;;
+        debian:gdb | void:gdb) pkg=gdb-multiarch ;;
+        arch:python3) pkg=python ;;
+        *:python3) pkg=python3 ;;
+        fedora:ss) pkg=iproute ;;
+        *:ss) pkg=iproute2 ;;
+        *:flock) pkg=util-linux ;;
+        *:timeout) pkg=coreutils ;;
+        arch:mkimage | fedora:mkimage) pkg=uboot-tools ;;
+        *:mkimage) pkg=u-boot-tools ;;
+        *:mcopy) pkg=mtools ;;
+        debian:dtc) pkg=device-tree-compiler ;;
+        *:dtc) pkg=dtc ;;
+        arch:clangd) pkg=clang ;;
+        debian:clangd) pkg=clangd ;;
+        fedora:clangd | void:clangd) pkg=clang-tools-extra ;;
+        suse:clangd) pkg=clang-tools ;;
+        arch:ovmf | fedora:ovmf | void:ovmf) pkg=edk2-ovmf ;;
+        debian:ovmf) pkg=ovmf ;;
+        suse:ovmf) pkg=qemu-ovmf-x86_64 ;;
+        *:git | *:podman | *:drgn) pkg="$1" ;;
     esac
     [[ -n "$pkg" ]] && printf ' -- install: %s %s\n' "$cmd" "$pkg"
 }
@@ -128,7 +148,10 @@ kbl_pkg_hint() {   # kbl_pkg_hint PROGRAM
 kbl_container() {
     local c
     for c in ${KBL_CONTAINER:-} podman docker nerdctl; do
-        [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1 && { printf '%s\n' "$c"; return 0; }
+        [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1 && {
+            printf '%s\n' "$c"
+            return 0
+        }
     done
     die "no container runtime found. Need one of: podman, docker, nerdctl
        (or set \$KBL_CONTAINER to the one you use)"
@@ -153,10 +176,11 @@ kbl_assert_mountable() {
         || die "'${1:-}' resolves to the filesystem root; refusing to mount it into a container"
     if [[ "${KBL_ALLOW_SYSTEM_MOUNT:-}" == 1 ]]; then
         warn "mounting '$p' into a container because \$KBL_ALLOW_SYSTEM_MOUNT=1"
-        printf '%s\n' "$p"; return 0
+        printf '%s\n' "$p"
+        return 0
     fi
     for sys in /usr /etc /boot /opt /bin /sbin /lib /lib64 /proc /sys /dev \
-               /var/lib/pacman /var/cache/pacman /var/lib/dpkg /var/lib/rpm /var/db; do
+        /var/lib/pacman /var/cache/pacman /var/lib/dpkg /var/lib/rpm /var/db; do
         [[ "$p" == "$sys" || "$p" == "$sys"/* ]] \
             && die "'$p' is inside $sys, which the system owns; refusing to mount it into a container (set \$KBL_ALLOW_SYSTEM_MOUNT=1 if you mean it)"
     done
@@ -166,9 +190,9 @@ kbl_assert_mountable() {
 kbl_qemu() {
     local arch="$1" bin
     case "$arch" in
-        arm64|aarch64) bin=qemu-system-aarch64 ;;
-        riscv64)       bin=qemu-system-riscv64 ;;
-        x86_64|amd64)  bin=qemu-system-x86_64 ;;
+        arm64 | aarch64) bin=qemu-system-aarch64 ;;
+        riscv64) bin=qemu-system-riscv64 ;;
+        x86_64 | amd64) bin=qemu-system-x86_64 ;;
         *) die "unknown architecture '$arch'" ;;
     esac
     command -v "$bin" >/dev/null 2>&1 || die "$bin not found; install QEMU for $arch"
@@ -177,11 +201,15 @@ kbl_qemu() {
 
 kbl_gdb_python() {
     local err why rc detail
-    err="$("$1" -nx -batch -ex 'python gdb.VERSION' 2>&1 >/dev/null)"; rc=$?
+    err="$("$1" -nx -batch -ex 'python gdb.VERSION' 2>&1 >/dev/null)"
+    rc=$?
     [[ $rc -eq 0 ]] && return 0
     why="$(grep -E '^(Python Exception|Could not load)|not supported' <<<"$err" | head -2)"
     [[ -n "$why" ]] || why="$(grep -m1 '[^[:space:]]' <<<"$err")"
-    detail="$({ "$1" --version 2>/dev/null | head -1; printf '%s\n' "$why"; } | sed '/^[[:space:]]*$/d; s/^/       /')"
+    detail="$({
+        "$1" --version 2>/dev/null | head -1
+        printf '%s\n' "$why"
+    } | sed '/^[[:space:]]*$/d; s/^/       /')"
     warn "skipping $1: 'python gdb.VERSION' exited with status $rc${detail:+
 $detail}"
     return 1
@@ -194,24 +222,32 @@ kbl_gdb() {
        The host gdb is only usable if it was built --enable-targets=all"
     local -a cands bad=()
     case "$arch" in
-        arm64|aarch64) cands=(aarch64-linux-gnu-gdb aarch64-none-linux-gnu-gdb
-                              aarch64-none-elf-gdb gdb-multiarch) ;;
-        riscv64)       cands=(riscv64-linux-gnu-gdb riscv64-unknown-linux-gnu-gdb
-                              riscv64-unknown-elf-gdb gdb-multiarch) ;;
-        x86_64|amd64)  cands=(gdb-multiarch gdb) ;;
+        arm64 | aarch64) cands=(aarch64-linux-gnu-gdb aarch64-none-linux-gnu-gdb
+            aarch64-none-elf-gdb gdb-multiarch) ;;
+        riscv64) cands=(riscv64-linux-gnu-gdb riscv64-unknown-linux-gnu-gdb
+            riscv64-unknown-elf-gdb gdb-multiarch) ;;
+        x86_64 | amd64) cands=(gdb-multiarch gdb) ;;
         *) die "unknown architecture '$arch'" ;;
     esac
     for c in "${cands[@]}"; do
         command -v "$c" >/dev/null 2>&1 || continue
-        kbl_gdb_python "$c" && { printf '%s\n' "$c"; return 0; }
+        kbl_gdb_python "$c" && {
+            printf '%s\n' "$c"
+            return 0
+        }
         bad+=("$c")
     done
     if [[ " ${cands[*]} " == *" gdb "* ]]; then
         hint=""
-    elif command -v gdb >/dev/null 2>&1 &&
-         gdb --configuration 2>/dev/null | grep -q -- '--enable-targets=all'; then
-        kbl_gdb_python gdb && { printf '%s\n' gdb; return 0; }
-        cands+=(gdb); bad+=(gdb); hint=""
+    elif command -v gdb >/dev/null 2>&1 \
+        && gdb --configuration 2>/dev/null | grep -q -- '--enable-targets=all'; then
+        kbl_gdb_python gdb && {
+            printf '%s\n' gdb
+            return 0
+        }
+        cands+=(gdb)
+        bad+=(gdb)
+        hint=""
     fi
     die "no gdb that can debug $arch. Tried: ${cands[*]}${bad[*]:+
        Present but rejected (see above): ${bad[*]}}$hint"
@@ -233,7 +269,7 @@ _KBL_FW_KEYS="NAME URL SRC BUILD IMAGE SYMBOLS VERSION DEFCONFIG FRAGMENTS MAKE_
 
 kbl_firmware_own() { [[ -f "$(kbl_tree_data "$1")/firmware.registered" ]]; }
 
-kbl_tree_firmware() {   # kbl_tree_firmware TREE: sets the _fw_ variables
+kbl_tree_firmware() { # kbl_tree_firmware TREE: sets the _fw_ variables
     local tree="$1" label reg name v k
     label="$(kbl_tree_label "$tree")"
     _fw_arch="$(kbl_tree_arch "$tree")" || exit 1
@@ -242,23 +278,28 @@ kbl_tree_firmware() {   # kbl_tree_firmware TREE: sets the _fw_ variables
        kbuildlab unset $label UBOOT; then kbuildlab firmware $label says which it boots"
     reg="$(kbl_tree_data "$tree")/firmware.registered"
     if [[ -f "$reg" ]]; then
-        _fw_origin=own; _fw_conf="$tree/firmware.conf"
+        _fw_origin=own
+        _fw_conf="$tree/firmware.conf"
         [[ -f "$_fw_conf" ]] || die "$label's own firmware is registered and $_fw_conf is gone
        put it back, or boot the global firmware again: kbuildlab firmware global $label"
-        [[ "$(sha256sum < "$_fw_conf" | cut -c1-64)" == "$(head -1 "$reg")" ]] \
+        [[ "$(sha256sum <"$_fw_conf" | cut -c1-64)" == "$(head -1 "$reg")" ]] \
             || die "$_fw_conf changed since it was registered
        kbuildlab firmware own $label checks and builds it again"
         _fw_src="$(kbl_norm_src "$(kbl_conf_get "$_fw_conf" SRC)")" || die "$_fw_conf: SRC is not an absolute path"
         _fw_build="$(kbl_norm_src "$(kbl_conf_get "$_fw_conf" BUILD)")" || die "$_fw_conf: BUILD is not an absolute path"
-        _fw_stamp="$(kbl_tree_data "$tree")/firmware.stamp"; _fw_log="$(kbl_tree_data "$tree")/firmware.log"
+        _fw_stamp="$(kbl_tree_data "$tree")/firmware.stamp"
+        _fw_log="$(kbl_tree_data "$tree")/firmware.log"
     else
-        _fw_origin=global; _fw_conf="$KBL_REPO/presets/firmware/$_fw_arch.conf"
+        _fw_origin=global
+        _fw_conf="$KBL_REPO/presets/firmware/$_fw_arch.conf"
         [[ -f "$_fw_conf" ]] || die "kbuildlab has no global firmware for $_fw_arch (no $_fw_conf)
        give $label its own: write $tree/firmware.conf, then kbuildlab firmware own $label"
         name="$(kbl_conf_get "$_fw_conf" NAME)"
         [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "$_fw_conf: NAME is '$name'; it names the source's directory"
-        _fw_src="$KBL_DATA_HOME/firmware/$name/src"; _fw_build="$KBL_DATA_HOME/firmware/$name/$_fw_arch"
-        _fw_stamp="$KBL_DATA_HOME/firmware/$name/$_fw_arch.stamp"; _fw_log="$KBL_DATA_HOME/firmware/$name/$_fw_arch.log"
+        _fw_src="$KBL_DATA_HOME/firmware/$name/src"
+        _fw_build="$KBL_DATA_HOME/firmware/$name/$_fw_arch"
+        _fw_stamp="$KBL_DATA_HOME/firmware/$name/$_fw_arch.stamp"
+        _fw_log="$KBL_DATA_HOME/firmware/$name/$_fw_arch.log"
     fi
     for k in $(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\1/p' "$_fw_conf"); do
         [[ " $_KBL_FW_KEYS " == *" $k "* ]] || die "$_fw_conf states $k, which is not a firmware key ($_KBL_FW_KEYS)"
@@ -336,27 +377,30 @@ kbl_trees() {
 kbl_tree_id() { basename "$1"; }
 kbl_tree_data() { printf '%s\n' "$KBL_DATA_HOME/trees/$(basename "$1")"; }
 
-kbl_tree_label() {   # kbl_tree_label TREE
+kbl_tree_label() { # kbl_tree_label TREE
     local id n=12 o clash
     id="$(basename "$1")"
-    while (( n < ${#id} )); do
+    while ((n < ${#id})); do
         clash=0
         for o in $(kbl_trees); do
-            [[ "$o" != "$id" && "${o:0:n}" == "${id:0:n}" ]] && { clash=1; break; }
+            [[ "$o" != "$id" && "${o:0:n}" == "${id:0:n}" ]] && {
+                clash=1
+                break
+            }
         done
-        (( clash )) || break
+        ((clash)) || break
         n=$((n + 1))
     done
     printf '%s\n' "${id:0:n}"
 }
 
-_kbl_labels() {   # _kbl_labels ID...
+_kbl_labels() { # _kbl_labels ID...
     local id out=""
     for id in "$@"; do out+="${out:+ }$(kbl_tree_label "$KBL_TREES/$id")"; done
     printf '%s\n' "$out"
 }
 
-kbl_trees_by_id() {   # kbl_trees_by_id PREFIX
+kbl_trees_by_id() { # kbl_trees_by_id PREFIX
     local want="${1,,}" t
     [[ "$want" =~ ^[0-9a-f]{4,16}$ ]] || return 0
     for t in $(kbl_trees); do [[ "$t" == "$want"* ]] && printf '%s\n' "$t"; done
@@ -366,7 +410,7 @@ kbl_trees_by_id() {   # kbl_trees_by_id PREFIX
 # SRC as one absolute path: a leading ~ expanded, then symlinks, . and ..
 # resolved whether or not it exists yet.  Nothing and status 1 when it is empty
 # or relative.  Every reader of SRC goes through here, so none can disagree.
-kbl_norm_src() {   # kbl_norm_src VALUE
+kbl_norm_src() { # kbl_norm_src VALUE
     local s="${1:-}"
     case "$s" in "~") s="$HOME" ;; "~"/*) s="$HOME/${s#\~/}" ;; esac
     [[ "$s" == /* ]] || return 1
@@ -381,7 +425,8 @@ _kbl_owning_tree() {
     for t in $(kbl_trees); do
         s="$(kbl_norm_src "$(kbl_tree_get "$KBL_TREES/$t" SRC)")" || continue
         if [[ "$p" == "$s" || "$p" == "$s"/* ]] && [[ ${#s} -gt $bestlen ]]; then
-            best="$KBL_TREES/$t"; bestlen=${#s}
+            best="$KBL_TREES/$t"
+            bestlen=${#s}
         fi
     done
     [[ -n "$best" ]] && printf '%s\n' "$best"
@@ -389,12 +434,15 @@ _kbl_owning_tree() {
 
 # The registered tree whose source is DIR's immediate child, when exactly one
 # is: the directory a source was cloned into, such as <tree>/ for <tree>/kernel.
-_kbl_child_tree() {   # _kbl_child_tree DIR
+_kbl_child_tree() { # _kbl_child_tree DIR
     local p t s hit="" n=0
     p="$(readlink -f -- "$1" 2>/dev/null)" && [[ -n "$p" && -d "$p" ]] || return 1
     for t in $(kbl_trees); do
         s="$(kbl_norm_src "$(kbl_tree_get "$KBL_TREES/$t" SRC)")" || continue
-        [[ "$(dirname "$s")" == "$p" ]] && { hit="$KBL_TREES/$t"; n=$((n + 1)); }
+        [[ "$(dirname "$s")" == "$p" ]] && {
+            hit="$KBL_TREES/$t"
+            n=$((n + 1))
+        }
     done
     [[ $n -eq 1 ]] && printf '%s\n' "$hit"
 }
@@ -418,33 +466,52 @@ kbl_tree() {
         if [[ ! -e "$want" ]]; then
             mapfile -t hits < <(kbl_trees_by_id "$want")
             case ${#hits[@]} in
-                1) printf '%s\n' "$KBL_TREES/${hits[0]}"; return 0 ;;
+                1)
+                    printf '%s\n' "$KBL_TREES/${hits[0]}"
+                    return 0
+                    ;;
                 0) _kbl_no_tree "'$want' is neither the ID of a registered tree nor a path" ;;
                 *) die "the ID prefix '$want' matches several trees: $(_kbl_labels "${hits[@]}")" ;;
             esac
         fi
         t="$(readlink -f -- "$want")"
         if [[ "$(dirname "$t")" == "$(readlink -f -- "$KBL_TREES" 2>/dev/null)" ]] && kbl_is_tree "$t"; then
-            printf '%s\n' "$KBL_TREES/$(basename "$t")"; return 0
+            printf '%s\n' "$KBL_TREES/$(basename "$t")"
+            return 0
         fi
-        t="$(_kbl_owning_tree "$want")" && { printf '%s\n' "$t"; return 0; }
-        t="$(_kbl_child_tree "$want")" && { printf '%s\n' "$t"; return 0; }
+        t="$(_kbl_owning_tree "$want")" && {
+            printf '%s\n' "$t"
+            return 0
+        }
+        t="$(_kbl_child_tree "$want")" && {
+            printf '%s\n' "$t"
+            return 0
+        }
         _kbl_no_tree "'$want' is not inside the source of any registered tree"
     fi
-    t="$(_kbl_owning_tree "$PWD")" && { printf '%s\n' "$t"; return 0; }
-    t="$(_kbl_child_tree "$PWD")" && { printf '%s\n' "$t"; return 0; }
+    t="$(_kbl_owning_tree "$PWD")" && {
+        printf '%s\n' "$t"
+        return 0
+    }
+    t="$(_kbl_child_tree "$PWD")" && {
+        printf '%s\n' "$t"
+        return 0
+    }
     mapfile -t all < <(kbl_trees)
     case ${#all[@]} in
         0) die "no trees are registered. Create one: kbuildlab init DIR --arch ARCH,
        or register a kernel source you have: kbuildlab add DIR" ;;
         1) printf '%s\n' "$KBL_TREES/${all[0]}" ;;
-        *) n="$(_kbl_labels "${all[@]}")"; die "several trees are registered -- give one's ID: $n" ;;
+        *)
+            n="$(_kbl_labels "${all[@]}")"
+            die "several trees are registered -- give one's ID: $n"
+            ;;
     esac
 }
 
 # A path from tree.conf: absolute, ~/-relative, or relative to the tree's data
 # directory, where the files a tree's runs produce live.
-kbl_tree_path() {   # kbl_tree_path TREE VALUE
+kbl_tree_path() { # kbl_tree_path TREE VALUE
     local v="$2"
     case "$v" in
         "") return 0 ;;
@@ -466,11 +533,16 @@ kbl_tree_path() {   # kbl_tree_path TREE VALUE
 #   first '#', trailing blanks stripped.
 # kbl_conf_get reads any file in that grammar, such as a boards/<name>.conf.
 kbl_tree_get() { kbl_conf_get "$1/tree.conf" "$2"; }
-kbl_conf_get() {   # kbl_conf_get FILE KEY
+kbl_conf_get() { # kbl_conf_get FILE KEY
     local file="$1" key="$2" v
     v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" | head -1)"
-    if [[ "$v" == \"* ]]; then v="${v#\"}"; v="${v%%\"*}"
-    else v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"; fi
+    if [[ "$v" == \"* ]]; then
+        v="${v#\"}"
+        v="${v%%\"*}"
+    else
+        v="${v%%#*}"
+        v="${v%"${v##*[![:space:]]}"}"
+    fi
     printf '%s\n' "$v"
 }
 
@@ -482,10 +554,11 @@ kbl_tree_keys() {
 
 # The architecture as kbuildlab names it everywhere else: aarch64 is read as arm64.
 kbl_tree_arch() {
-    local a; a="$(kbl_tree_get "$1" ARCH)"
+    local a
+    a="$(kbl_tree_get "$1" ARCH)"
     case "$a" in
-        arm64|aarch64) printf 'arm64\n' ;;
-        riscv64|x86_64) printf '%s\n' "$a" ;;
+        arm64 | aarch64) printf 'arm64\n' ;;
+        riscv64 | x86_64) printf '%s\n' "$a" ;;
         "") die "$1/tree.conf states no ARCH" ;;
         *) die "$1/tree.conf states ARCH=$a, which is not one of arm64, riscv64, x86_64" ;;
     esac
@@ -529,15 +602,24 @@ kbl_statedir() {
 kbl_qemu_gdb_port() {
     local pid="$1" f="/proc/$1/cmdline"
     [[ -r "$f" ]] || return 1
-    local -a argv=(); mapfile -d '' -t argv < "$f" 2>/dev/null || return 1
+    local -a argv=()
+    mapfile -d '' -t argv <"$f" 2>/dev/null || return 1
     [[ ${#argv[@]} -gt 0 ]] || return 1
     [[ "$(basename -- "${argv[0]}")" == qemu-system-* ]] || return 1
     local i
     for ((i = 0; i < ${#argv[@]}; i++)); do
         case "${argv[i]}" in
-            -gdb) local v="${argv[i+1]:-}"
-                  [[ "$v" == tcp:* ]] && { printf '%s\n' "${v##*:}"; return 0; } ;;
-            -s)   printf '1234\n'; return 0 ;;
+            -gdb)
+                local v="${argv[i + 1]:-}"
+                [[ "$v" == tcp:* ]] && {
+                    printf '%s\n' "${v##*:}"
+                    return 0
+                }
+                ;;
+            -s)
+                printf '1234\n'
+                return 0
+                ;;
         esac
     done
     return 1
@@ -546,19 +628,25 @@ kbl_qemu_gdb_port() {
 # The ADDRESS a live qemu's gdbstub is bound to, from its own `-gdb tcp:HOST:PORT`.
 # Empty means it was spelled without a host, which binds every interface.
 kbl_qemu_gdb_bind() {
-    local v; v="$(kbl_qemu_arg "$1" -gdb 2>/dev/null)" || return 0
+    local v
+    v="$(kbl_qemu_arg "$1" -gdb 2>/dev/null)" || return 0
     [[ "$v" == tcp:* ]] || return 0
-    v="${v#tcp:}"; printf '%s\n' "${v%:*}"
+    v="${v#tcp:}"
+    printf '%s\n' "${v%:*}"
 }
 
 # One argv value by option name, for a live qemu (e.g. -machine, -smp).
 kbl_qemu_arg() {
     local pid="$1" want="$2" f="/proc/$1/cmdline"
     [[ -r "$f" ]] || return 1
-    local -a argv=(); mapfile -d '' -t argv < "$f" 2>/dev/null || return 1
+    local -a argv=()
+    mapfile -d '' -t argv <"$f" 2>/dev/null || return 1
     local i
     for ((i = 0; i < ${#argv[@]}; i++)); do
-        [[ "${argv[i]}" == "$want" ]] && { printf '%s\n' "${argv[i+1]:-}"; return 0; }
+        [[ "${argv[i]}" == "$want" ]] && {
+            printf '%s\n' "${argv[i + 1]:-}"
+            return 0
+        }
     done
     return 1
 }
@@ -566,7 +654,8 @@ kbl_qemu_arg() {
 kbl_qemu_has_flag() {
     local pid="$1" want="$2" f="/proc/$1/cmdline" a
     [[ -r "$f" ]] || return 1
-    local -a argv=(); mapfile -d '' -t argv < "$f" 2>/dev/null || return 1
+    local -a argv=()
+    mapfile -d '' -t argv <"$f" 2>/dev/null || return 1
     for a in "${argv[@]}"; do [[ "$a" == "$want" ]] && return 0; done
     return 1
 }
@@ -583,9 +672,9 @@ kbl_qemu_has_flag() {
 kbl_proc_starttime() {
     local f="/proc/$1/stat" line rest
     [[ -r "$f" ]] || return 1
-    read -r line < "$f" || return 1
-    rest="${line##*) }"                                   # ## = LAST ') ', not the first
-    printf '%s\n' "$(awk '{print $20}' <<<"$rest")"      # 22nd overall = 20th after comm
+    read -r line <"$f" || return 1
+    rest="${line##*) }"                             # ## = LAST ') ', not the first
+    printf '%s\n' "$(awk '{print $20}' <<<"$rest")" # 22nd overall = 20th after comm
 }
 
 # Is a debugger already on this gdbstub?  Answered from /proc alone.
@@ -623,7 +712,7 @@ kbl_launcher_alive() {
     [[ -n "$lp" ]] || return 1
     kill -0 "$lp" 2>/dev/null || return 1
     ls="$(sed -n 's/^KBL_LAUNCHER_START=//p' "$f" | head -1)"
-    [[ -n "$ls" ]] || return 0                     # older record: pid is all there is
+    [[ -n "$ls" ]] || return 0 # older record: pid is all there is
     now="$(kbl_proc_starttime "$lp")" || return 0
     [[ "$now" == "$ls" ]]
 }
@@ -632,12 +721,12 @@ kbl_gdb_attached() {
     local port="$1" pid="${2:-}" bind="${3:-}" hexport hexaddr=""
     hexport="$(printf '%04X' "$port")"
     case "$bind" in
-        ""|"0.0.0.0"|"::"|"[::]"|"*") hexaddr="" ;;                 # any address
-        "127.0.0.1"|"localhost")      hexaddr="0100007F" ;;         # LE, as /proc prints it
+        "" | "0.0.0.0" | "::" | "[::]" | "*") hexaddr="" ;; # any address
+        "127.0.0.1" | "localhost") hexaddr="0100007F" ;;    # LE, as /proc prints it
         *) if [[ "$bind" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-               hexaddr="$(printf '%02X%02X%02X%02X' "${BASH_REMATCH[4]}" "${BASH_REMATCH[3]}" \
-                                                    "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}")"
-           fi ;;
+            hexaddr="$(printf '%02X%02X%02X%02X' "${BASH_REMATCH[4]}" "${BASH_REMATCH[3]}" \
+                "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}")"
+        fi ;;
     esac
     local -A own=()
     if [[ -n "$pid" && -r "/proc/$pid/fd" ]]; then
@@ -645,19 +734,22 @@ kbl_gdb_attached() {
         for l in /proc/$pid/fd/*; do
             t="$(readlink -- "$l" 2>/dev/null)" || continue
             [[ "$t" == socket:\[*\] ]] || continue
-            t="${t#socket:[}"; t="${t%]}"
+            t="${t#socket:[}"
+            t="${t%]}"
             own["$t"]=1
         done
     elif [[ -n "$pid" ]]; then
-        printf 'unknown\n'; return 0      # another uid's process; do not guess
+        printf 'unknown\n'
+        return 0 # another uid's process; do not guess
     else
-        printf 'unknown\n'; return 0      # no owning qemu found for this port
+        printf 'unknown\n'
+        return 0 # no owning qemu found for this port
     fi
     local mine=0 queued=0 f line local_a st ino rest
     for f in /proc/net/tcp /proc/net/tcp6; do
         [[ -r "$f" ]] || continue
         while read -r _sl local_a _rem st rest; do
-            [[ "$st" == "01" ]] || continue                 # 01 = ESTABLISHED
+            [[ "$st" == "01" ]] || continue # 01 = ESTABLISHED
             [[ "${local_a##*:}" == "$hexport" ]] || continue
             # tcp6 rows print an IPv4-mapped address as a 32-hex-digit value, so
             # only compare when the widths match; a mismatch there is not evidence
@@ -667,15 +759,19 @@ kbl_gdb_attached() {
             fi
             # inode is the 10th field overall, i.e. the 6th of what is left
             # after sl/local/rem/st have been consumed above.
-            set -- $rest; ino="${6:-}"
+            set -- $rest
+            ino="${6:-}"
             [[ -n "$ino" ]] || continue
             if [[ -n "${own[$ino]:-}" ]]; then mine=$((mine + 1)); else queued=$((queued + 1)); fi
         done < <(tail -n +2 "$f")
     done
-    if   [[ $mine -gt 0 && $queued -gt 0 ]]; then printf 'attached +%d waiting\n' "$queued"
-    elif [[ $mine -gt 0 ]];               then printf 'attached\n'
-    elif [[ $queued -gt 0 ]];             then printf 'waiting\n'
-    else                                       printf -- '-\n'; fi
+    if [[ $mine -gt 0 && $queued -gt 0 ]]; then
+        printf 'attached +%d waiting\n' "$queued"
+    elif [[ $mine -gt 0 ]]; then
+        printf 'attached\n'
+    elif [[ $queued -gt 0 ]]; then
+        printf 'waiting\n'
+    else printf -- '-\n'; fi
 }
 
 # Every live guest that exposes a gdbstub, one record per line, fields separated
@@ -700,14 +796,16 @@ kbl_gdb_attached() {
 # truncated to its first line, which then matches nothing and leaves the operator
 # unable to attach to their own guest by any name.  Refused where it is written,
 # not discovered where it is read.
-kbl_state_safe() {   # kbl_state_safe WHAT VALUE
-    case "$2" in *$'\n'*|*$'\r'*)
-        die "$1 contains a newline, which the run-state file cannot carry: ${2//$'\n'/\\n}" ;;
+kbl_state_safe() { # kbl_state_safe WHAT VALUE
+    case "$2" in *$'\n'* | *$'\r'*)
+        die "$1 contains a newline, which the run-state file cannot carry: ${2//$'\n'/\\n}"
+        ;;
     esac
 }
 
 kbl_instances() {
-    local sd; sd="$(kbl_statedir)" || return 1
+    local sd
+    sd="$(kbl_statedir)" || return 1
     local d pid port start frozen qbin sf tree name boot kaslr ssh
     for d in /proc/[0-9]*; do
         pid="${d#/proc/}"
@@ -716,17 +814,21 @@ kbl_instances() {
         qbin="$(basename -- "$(head -c 4096 "/proc/$pid/cmdline" 2>/dev/null | tr '\0' '\n' | head -1)")"
         kbl_qemu_has_flag "$pid" -S && frozen=1 || frozen=0
         sf="$sd/kbl-run-${port}.env"
-        tree=""; name=""; boot=""; kaslr=""; ssh=""
+        tree=""
+        name=""
+        boot=""
+        kaslr=""
+        ssh=""
         if [[ -r "$sf" ]]; then
             local spid sstart
             spid="$(sed -n 's/^KBL_QEMU_PID=//p' "$sf" | head -1)"
             sstart="$(sed -n 's/^KBL_QEMU_START=//p' "$sf" | head -1)"
             # A file that names a different process is about a run that has ended.
-            if [[ -z "$spid" || ( "$spid" == "$pid" && ( -z "$sstart" || "$sstart" == "$start" ) ) ]]; then
-                tree="$(sed -n 's/^KBL_TREE=//p'     "$sf" | head -1)"
-                boot="$(sed -n 's/^KBL_BOOT=//p'     "$sf" | head -1)"
-                kaslr="$(sed -n 's/^KBL_KASLR=//p'   "$sf" | head -1)"
-                ssh="$(sed -n 's/^KBL_SSH_PORT=//p'  "$sf" | head -1)"
+            if [[ -z "$spid" || ("$spid" == "$pid" && (-z "$sstart" || "$sstart" == "$start")) ]]; then
+                tree="$(sed -n 's/^KBL_TREE=//p' "$sf" | head -1)"
+                boot="$(sed -n 's/^KBL_BOOT=//p' "$sf" | head -1)"
+                kaslr="$(sed -n 's/^KBL_KASLR=//p' "$sf" | head -1)"
+                ssh="$(sed -n 's/^KBL_SSH_PORT=//p' "$sf" | head -1)"
             else
                 sf=""
             fi
@@ -746,7 +848,8 @@ kbl_instances() {
 # process takes the port, and removes one that a guest is still using if the
 # listen check races.
 kbl_prune_state() {
-    local sd; sd="$(kbl_statedir)" || return 0
+    local sd
+    sd="$(kbl_statedir)" || return 0
     local -A live=()
     local rec p
     while IFS=$'\x1f' read -r p _; do [[ -n "$p" ]] && live["$p"]=1; done < <(kbl_instances)
@@ -754,9 +857,11 @@ kbl_prune_state() {
     # Every per-run file is named kbl-<what>-<gdb port>[.<suffix>] in the state
     # directory; run-qemu.sh creates no other.
     for f in "$sd"/kbl-run-*.env "$sd"/kbl-boot-*.img "$sd"/kbl-vars-*.fd \
-             "$sd"/kbl-qmp-*.sock "$sd"/kbl-wsz-*.sock "$sd"/kbl-initrd-*.cpio.gz "$sd"/kbl-tmp-*; do
+        "$sd"/kbl-qmp-*.sock "$sd"/kbl-wsz-*.sock "$sd"/kbl-initrd-*.cpio.gz "$sd"/kbl-tmp-*; do
         [[ -e "$f" ]] || continue
-        fp="${f##*/kbl-}"; fp="${fp#*-}"; fp="${fp%%.*}"
+        fp="${f##*/kbl-}"
+        fp="${fp#*-}"
+        fp="${fp%%.*}"
         [[ "$fp" =~ ^[0-9]+$ ]] || continue
         # Two owners, and only these two.  A live qemu carrying that gdb port, or
         # a `run` that has claimed the port and not started qemu yet (its
@@ -772,7 +877,7 @@ kbl_prune_state() {
         rm -f "$f"
     done
     for f in "$sd"/kbl-ssh-*.claim "$sd"/kbl-qmp-*.claim "$sd"/kbl-persist-*.claim \
-             "$sd"/kbl-sysdisk-*.claim; do
+        "$sd"/kbl-sysdisk-*.claim; do
         [[ -e "$f" ]] || continue
         kbl_launcher_alive "$f" || rm -f "$f"
     done
@@ -783,10 +888,10 @@ kbl_prune_state() {
 # once, here.  Nothing below opens the gdb port: a bare TCP connect pauses a
 # running guest and leaves it paused (qemu 11.1.1, via QMP query-status).
 
-kbl_row_fields() {   # sets the _r_* variables from one kbl_instances line
+kbl_row_fields() { # sets the _r_* variables from one kbl_instances line
     # \x1f, not tab: see kbl_instances -- tab collapses empty middle fields.
     IFS=$'\x1f' read -r _r_port _r_pid _r_start _r_frozen _r_qbin _r_sf \
-                       _r_tree _r_name _r_boot _r_kaslr _r_ssh <<<"$1"
+        _r_tree _r_name _r_boot _r_kaslr _r_ssh <<<"$1"
 }
 
 kbl_uptime_of() { ps -o etime= -p "$1" 2>/dev/null | tr -d ' '; }
@@ -795,18 +900,20 @@ kbl_uptime_of() { ps -o etime= -p "$1" 2>/dev/null | tr -d ' '; }
 # cannot answer -- how the guest was STARTED is not how it is now -- and until
 # there was a QMP monitor the only way to ask was to touch the gdbstub, which
 # pauses a running guest.  Empty when the run recorded no QMP port.
-kbl_qmp_runstate() {   # kbl_qmp_runstate STATEFILE
-    local port; port="$(kbl_state_get "$1" KBL_QMP_PORT 2>/dev/null)"
+kbl_qmp_runstate() { # kbl_qmp_runstate STATEFILE
+    local port
+    port="$(kbl_state_get "$1" KBL_QMP_PORT 2>/dev/null)"
     [[ -n "$port" ]] && command -v python3 >/dev/null 2>&1 || return 0
     python3 "${KBL_REPO}/lib/qmp.py" --port "$port" --timeout 2 query-status 2>/dev/null
 }
 
-kbl_guest_table() {   # kbl_guest_table ROW...
+kbl_guest_table() { # kbl_guest_table ROW...
     printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-10s %-20s %-8s %s\n' \
         '#' port ssh tree boot kaslr started now dbg pid uptime
     local i=0 r
     for r in "$@"; do
-        i=$((i + 1)); kbl_row_fields "$r"
+        i=$((i + 1))
+        kbl_row_fields "$r"
         printf '  %-3s %-6s %-6s %-16s %-7s %-6s %-8s %-10s %-20s %-8s %s\n' \
             "$i" "$_r_port" "${_r_ssh:--}" "${_r_name:-?}" "${_r_boot:-?}" \
             "$(case "$_r_kaslr" in 1) echo on ;; 0) echo off ;; *) echo '?' ;; esac)" \
@@ -856,14 +963,17 @@ kbl_pick_guest() {
                 # things name it: a tree AND --port given together, which is the
                 # assertion that they go together, or the tree's own GDB_PORT.
                 # Anything else is claimed by no name.
-                if [[ $PORT_SET -eq 1 && "$_r_port" == "$PORT" ]]; then :
-                elif [[ -n "$_treeport" && "$_r_port" == "$_treeport" ]]; then :
-                else continue
+                if [[ $PORT_SET -eq 1 && "$_r_port" == "$PORT" ]]; then
+                    :
+                elif [[ -n "$_treeport" && "$_r_port" == "$_treeport" ]]; then
+                    :
+                else
+                    continue
                 fi
                 _r_name="${_r_name:-$(kbl_tree_label "$_want_tree")}"
                 _r="$(printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
-                      "$_r_port" "$_r_pid" "$_r_start" "$_r_frozen" "$_r_qbin" "$_r_sf" \
-                      "$_want_tree" "$_r_name" "$_r_boot" "$_r_kaslr" "$_r_ssh")"
+                    "$_r_port" "$_r_pid" "$_r_start" "$_r_frozen" "$_r_qbin" "$_r_sf" \
+                    "$_want_tree" "$_r_name" "$_r_boot" "$_r_kaslr" "$_r_ssh")"
             fi
         fi
         _cand+=("$_r")
@@ -886,67 +996,77 @@ kbl_pick_guest() {
     fi
 
     case ${#_cand[@]} in
-      0)
-        # A guest IS on the port that was NAMED; it is just not the tree that was
-        # named with it.  Only reachable when --port was given: without it _byport
-        # is every live guest on the host, and taking its first element blamed an
-        # unrelated tree's guest and quoted a --port the caller never typed.
-        if [[ $PORT_SET -eq 1 && ${#_byport[@]} -gt 0 ]]; then
-            kbl_row_fields "${_byport[0]}"
-            if [[ -n "$_r_tree" ]]; then
-                die "$cmd: --port $_r_port is running $(basename "$_r_tree"), not $(basename "$_want_tree")
+        0)
+            # A guest IS on the port that was NAMED; it is just not the tree that was
+            # named with it.  Only reachable when --port was given: without it _byport
+            # is every live guest on the host, and taking its first element blamed an
+            # unrelated tree's guest and quoted a --port the caller never typed.
+            if [[ $PORT_SET -eq 1 && ${#_byport[@]} -gt 0 ]]; then
+                kbl_row_fields "${_byport[0]}"
+                if [[ -n "$_r_tree" ]]; then
+                    die "$cmd: --port $_r_port is running $(basename "$_r_tree"), not $(basename "$_want_tree")
        (recorded in $_r_sf when that port was started)"
-            fi
-            die "$cmd: :$_r_port has a live $_r_qbin (pid $_r_pid) but nothing recorded which
+                fi
+                die "$cmd: :$_r_port has a live $_r_qbin (pid $_r_pid) but nothing recorded which
        tree it is, so it cannot be matched against $(basename "$_want_tree").  Name it:
        kbuildlab $cmd <tree> --port $_r_port"
-        fi
-        if [[ $PORT_SET -eq 1 ]]; then
-            if [[ -n "$(ss -ltnH "sport = :${PORT}" 2>/dev/null)" ]]; then
-                die "$cmd: :$PORT is listening but no readable qemu-system process holds it
+            fi
+            if [[ $PORT_SET -eq 1 ]]; then
+                if [[ -n "$(ss -ltnH "sport = :${PORT}" 2>/dev/null)" ]]; then
+                    die "$cmd: :$PORT is listening but no readable qemu-system process holds it
        (another user's, or not a guest).  Refusing to guess which tree that is."
-            fi
-            die "$cmd: nothing on :$PORT -- no qemu-system process carries -gdb for it,
+                fi
+                die "$cmd: nothing on :$PORT -- no qemu-system process carries -gdb for it,
        and nothing is listening there"
-        fi
-        die "$cmd: no live guest${_want_tree:+ of $(basename "$_want_tree")} -- no qemu-system
-       process carries a gdb port recorded as this tree.  Start one:
-       kbuildlab run ${_want_tree:+$(basename "$_want_tree")}" ;;
-      1) KBL_GUEST_ROW="${_cand[0]}"; return 0 ;;
-      *)
-        if [[ $FIRST -eq 1 ]]; then
-            KBL_GUEST_ROW="${_cand[0]}"; return 0          # kbl_instances sorts by port
-        elif [[ -t 0 && -t 1 ]]; then
-            echo "several live guests${_want_tree:+ of $(basename "$_want_tree")}:"
-            kbl_guest_table "${_cand[@]}"
-            if command -v fzf >/dev/null 2>&1; then
-                _pick="$( { kbl_guest_table "${_cand[@]}"; } | fzf --header-lines=1 --no-multi \
-                            --prompt="$cmd which? " --height=40% --reverse )" || _pick=""
-                [[ -n "$_pick" ]] || die "$cmd: cancelled"
-                _n="$(awk '{print $1}' <<<"$_pick")"
-            else
-                _n=""
-                for _try in 1 2 3; do
-                    read -r -p "  $cmd which? [1-${#_cand[@]}, q to cancel] " _n || _n=q
-                    [[ "$_n" == q || -z "$_n" ]] && die "$cmd: cancelled"
-                    [[ "$_n" =~ ^[0-9]+$ && "$_n" -ge 1 && "$_n" -le ${#_cand[@]} ]] && break
-                    _n=""
-                    echo "  not one of 1-${#_cand[@]}"
-                done
             fi
-            [[ -n "$_n" ]] || die "$cmd: no choice made"
-            KBL_GUEST_ROW="${_cand[$((_n - 1))]}"; return 0
-        else
-            _ports=""
-            for _r in "${_cand[@]}"; do kbl_row_fields "$_r"; _ports="$_ports --port $_r_port"; done
-            die "$cmd: ${#_cand[@]} live instances${_want_tree:+ of $(basename "$_want_tree")} and stdin
+            die "$cmd: no live guest${_want_tree:+ of $(basename "$_want_tree")} -- no qemu-system
+       process carries a gdb port recorded as this tree.  Start one:
+       kbuildlab run ${_want_tree:+$(basename "$_want_tree")}"
+            ;;
+        1)
+            KBL_GUEST_ROW="${_cand[0]}"
+            return 0
+            ;;
+        *)
+            if [[ $FIRST -eq 1 ]]; then
+                KBL_GUEST_ROW="${_cand[0]}"
+                return 0 # kbl_instances sorts by port
+            elif [[ -t 0 && -t 1 ]]; then
+                echo "several live guests${_want_tree:+ of $(basename "$_want_tree")}:"
+                kbl_guest_table "${_cand[@]}"
+                if command -v fzf >/dev/null 2>&1; then
+                    _pick="$({ kbl_guest_table "${_cand[@]}"; } | fzf --header-lines=1 --no-multi \
+                        --prompt="$cmd which? " --height=40% --reverse)" || _pick=""
+                    [[ -n "$_pick" ]] || die "$cmd: cancelled"
+                    _n="$(awk '{print $1}' <<<"$_pick")"
+                else
+                    _n=""
+                    for _try in 1 2 3; do
+                        read -r -p "  $cmd which? [1-${#_cand[@]}, q to cancel] " _n || _n=q
+                        [[ "$_n" == q || -z "$_n" ]] && die "$cmd: cancelled"
+                        [[ "$_n" =~ ^[0-9]+$ && "$_n" -ge 1 && "$_n" -le ${#_cand[@]} ]] && break
+                        _n=""
+                        echo "  not one of 1-${#_cand[@]}"
+                    done
+                fi
+                [[ -n "$_n" ]] || die "$cmd: no choice made"
+                KBL_GUEST_ROW="${_cand[$((_n - 1))]}"
+                return 0
+            else
+                _ports=""
+                for _r in "${_cand[@]}"; do
+                    kbl_row_fields "$_r"
+                    _ports="$_ports --port $_r_port"
+                done
+                die "$cmd: ${#_cand[@]} live instances${_want_tree:+ of $(basename "$_want_tree")} and stdin
        is not a terminal, so the chooser cannot run.  Name one:$_ports"
-        fi ;;
+            fi
+            ;;
     esac
 }
 
 # One KBL_ key out of a run-state file.  Read, never sourced.
-kbl_state_get() {   # kbl_state_get FILE KEY
+kbl_state_get() { # kbl_state_get FILE KEY
     [[ -r "$1" ]] || return 1
     sed -n "s/^$2=//p" "$1" | head -1
 }

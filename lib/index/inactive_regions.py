@@ -54,6 +54,7 @@ _MARK = re.compile(r"^#define KBL_GROUP_(\d+)_(\d+) 1$")
 # conditional groups
 # ---------------------------------------------------------------------------
 
+
 def logical_lines(text: str):
     """(first physical line, last physical line, spliced text), 1-based."""
     lines = text.split("\n")
@@ -92,7 +93,7 @@ def strip_comments(buf: str, in_block: bool) -> tuple[str, bool]:
             j = i + 1
             while j < n and buf[j] != c:
                 j += 2 if buf[j] == "\\" else 1
-            out.append(buf[i:j + 1])
+            out.append(buf[i : j + 1])
             i = j + 1
             continue
         out.append(c)
@@ -101,8 +102,7 @@ def strip_comments(buf: str, in_block: bool) -> tuple[str, bool]:
 
 
 class Group:
-    __slots__ = ("gid", "kind", "expr", "dir_first", "dir_last", "body_first",
-                 "body_last", "parent", "chain")
+    __slots__ = ("gid", "kind", "expr", "dir_first", "dir_last", "body_first", "body_last", "parent", "chain")
 
     def __init__(self, gid, kind, expr, dir_first, dir_last, parent, chain):
         self.gid, self.kind, self.expr = gid, kind, expr
@@ -127,16 +127,16 @@ def scan(text: str) -> tuple[list[Group], set[int]]:
             continue
         directive_lines.update(range(first, last + 1))
         if name in OPENERS:
-            g = Group(len(groups), name, code[m.end():].strip(), first, last,
-                      stack[-1] if stack else None, len(groups))
+            g = Group(
+                len(groups), name, code[m.end() :].strip(), first, last, stack[-1] if stack else None, len(groups)
+            )
             groups.append(g)
             stack.append(g)
         elif stack:
             closed = stack.pop()
             closed.body_last = first - 1
             if name in BRANCHES:
-                g = Group(len(groups), name, code[m.end():].strip(), first, last,
-                          closed.parent, closed.chain)
+                g = Group(len(groups), name, code[m.end() :].strip(), first, last, closed.parent, closed.chain)
                 groups.append(g)
                 stack.append(g)
     total = text.count("\n") + 1
@@ -163,7 +163,7 @@ def guard_of(text: str) -> str | None:
     if not m:
         return None
     name = m.group(m.lastindex or 0)
-    body = "\n".join(text.split("\n")[g.body_first - 1:g.body_last])
+    body = "\n".join(text.split("\n")[g.body_first - 1 : g.body_last])
     return name if re.search(rf"^\s*#\s*define\s+{re.escape(name)}\b", body, re.M) else None
 
 
@@ -250,6 +250,7 @@ def layout_of(path: str, cache: dict) -> Layout | None:
 # the command clang is actually given
 # ---------------------------------------------------------------------------
 
+
 class View:
     """How an entry of the database reaches clang: its command already names
     the target and holds only flags clang takes, so the view drops what a
@@ -278,15 +279,22 @@ class View:
 def _vfs(workdir: str, mapping: dict[str, str]) -> str:
     fd, path = tempfile.mkstemp(suffix=".yaml", dir=workdir)
     with os.fdopen(fd, "w") as f:
-        json.dump({"version": 0, "case-sensitive": "true", "use-external-names": "false",
-                   "roots": [{"type": "file", "name": k, "external-contents": v}
-                             for k, v in mapping.items()]}, f)
+        json.dump(
+            {
+                "version": 0,
+                "case-sensitive": "true",
+                "use-external-names": "false",
+                "roots": [{"type": "file", "name": k, "external-contents": v} for k, v in mapping.items()],
+            },
+            f,
+        )
     return path
 
 
 # ---------------------------------------------------------------------------
 # settle: make a header's conditionals see what the build saw
 # ---------------------------------------------------------------------------
+
 
 def _closure(names: set[str], state: dict[str, str]) -> set[str]:
     seen, todo = set(), list(names)
@@ -315,9 +323,14 @@ def _trace(job):
     depend on to its definition or None, and `lines` counts what it compiles.
     """
     argv, source, cwd, wanted, vfs = job
-    proc = subprocess.Popen(argv + ["-ivfsoverlay", vfs, "-E", "-dD", source], cwd=cwd,
-                            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            errors="replace")
+    proc = subprocess.Popen(
+        argv + ["-ivfsoverlay", vfs, "-E", "-dD", source],
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        errors="replace",
+    )
     state: dict[str, str] = {}
     entries: dict[str, list[dict]] = {}
     # A header can reach itself again before it is left -- linux/linkage.h
@@ -397,9 +410,14 @@ def _preamble(job):
     """
     argv, header, cwd, names, workdir, empty = job
     vfs = _vfs(workdir, {header: empty})
-    proc = subprocess.Popen(argv + ["-ivfsoverlay", vfs, "-E", "-dD", "-x", "c", os.devnull],
-                            cwd=cwd, text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, errors="replace")
+    proc = subprocess.Popen(
+        argv + ["-ivfsoverlay", vfs, "-E", "-dD", "-x", "c", os.devnull],
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        errors="replace",
+    )
     have: dict[str, str] = {}
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -497,9 +515,18 @@ class Memo:
                 os.unlink(os.path.join(self.dir, name))
 
 
-def settle(view: View, cache: str, sources: dict[str, dict], headers: list[dict],
-           chosen: dict[str, str], floor: str | None,
-           entry_args, jobs: int, verbose: bool, reads=None) -> dict[str, int]:
+def settle(
+    view: View,
+    cache: str,
+    sources: dict[str, dict],
+    headers: list[dict],
+    chosen: dict[str, str],
+    floor: str | None,
+    entry_args,
+    jobs: int,
+    verbose: bool,
+    reads=None,
+) -> dict[str, int]:
     """Give each header entry the macro state its context source has on entry.
 
     chosen maps a header to the source whose command it borrowed.  Entries are
@@ -513,16 +540,26 @@ def settle(view: View, cache: str, sources: dict[str, dict], headers: list[dict]
     os.makedirs(workdir)
     memo = Memo(os.path.join(cache, "memo"))
     try:
-        done = _settle(view, workdir, sources, headers, chosen, floor,
-                       entry_args, jobs, verbose, memo, reads or (lambda source: None))
+        done = _settle(
+            view,
+            workdir,
+            sources,
+            headers,
+            chosen,
+            floor,
+            entry_args,
+            jobs,
+            verbose,
+            memo,
+            reads or (lambda source: None),
+        )
         memo.prune()
         return done
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _settle(view, workdir, sources, headers, chosen, floor,
-            entry_args, jobs, verbose, memo, reads):
+def _settle(view, workdir, sources, headers, chosen, floor, entry_args, jobs, verbose, memo, reads):
     ksrc = view.ksrc
     per_source: dict[str, dict] = {}
     texts_of: dict[int, list[tuple[str, str]]] = {}
@@ -540,8 +577,13 @@ def _settle(view, workdir, sources, headers, chosen, floor,
             continue
         traced += 1
         lines = {g.gid: g.body_last - g.body_first + 1 for g in groups}
-        per_source.setdefault(src, {})[fid] = (rel, tested_names(groups), len(groups), lines,
-                                               guard_of(text) is not None)
+        per_source.setdefault(src, {})[fid] = (
+            rel,
+            tested_names(groups),
+            len(groups),
+            lines,
+            guard_of(text) is not None,
+        )
         texts_of[fid] = (e["file"], text)
 
     stamps: dict[str, list | None] = {}
@@ -552,8 +594,9 @@ def _settle(view, workdir, sources, headers, chosen, floor,
         s = sources[src]
         argv = view.flags(entry_args(s), s["file"])
         read = reads(src)
-        stamps[src] = None if read is None else Memo.stamp(
-            set(read) | {s["file"]} | {texts_of[fid][0] for fid in wanted}, known)
+        stamps[src] = (
+            None if read is None else Memo.stamp(set(read) | {s["file"]} | {texts_of[fid][0] for fid in wanted}, known)
+        )
         key = memo.key("trace", argv, sorted(w[0] for w in wanted.values()), stamps[src])
         found = memo.get(key) if stamps[src] is not None else None
         if found is not None:
@@ -622,21 +665,26 @@ def _settle(view, workdir, sources, headers, chosen, floor,
         e["command"] = shlex.join(args[:-3] + flags + args[-3:])
         written += 1
     if verbose:
-        print(f"    {len(target)} headers traced through {len(per_source)} sources "
-              f"({retraced} preprocessed, the rest unchanged since last time); "
-              f"{written} needed macros defined, {held} macro(s) its preamble defines stay, "
-              f"{traced - len(target)} are never reached by their source"
-              + (f"; {unfinished} clang run(s) did not finish and are not kept" if unfinished else ""))
-    empty = {os.path.relpath(headers[fid]["file"], ksrc): src
-             for src, wanted in per_source.items() for fid, w in wanted.items()
-             if w[0] not in target or not target[w[0]][1]}
-    return {"traced": len(target), "corrected": written, "unreached": traced - len(target),
-            "empty": empty}
+        print(
+            f"    {len(target)} headers traced through {len(per_source)} sources "
+            f"({retraced} preprocessed, the rest unchanged since last time); "
+            f"{written} needed macros defined, {held} macro(s) its preamble defines stay, "
+            f"{traced - len(target)} are never reached by their source"
+            + (f"; {unfinished} clang run(s) did not finish and are not kept" if unfinished else "")
+        )
+    empty = {
+        os.path.relpath(headers[fid]["file"], ksrc): src
+        for src, wanted in per_source.items()
+        for fid, w in wanted.items()
+        if w[0] not in target or not target[w[0]][1]
+    }
+    return {"traced": len(target), "corrected": written, "unreached": traced - len(target), "empty": empty}
 
 
 # ---------------------------------------------------------------------------
 # collect: what the build compiler compiled, unit by unit
 # ---------------------------------------------------------------------------
+
 
 def unit_argv(command: str) -> list[str]:
     """A unit's build command, turned into one that prints what it compiled."""
@@ -661,8 +709,7 @@ def read_unit(job):
     """Per file the unit entered: the live groups of each distinct pass."""
     key, argv, cwd = job
     root = cwd.rstrip("/") + "/"
-    proc = subprocess.Popen(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, errors="replace")
+    proc = subprocess.Popen(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, errors="replace")
     passes: dict[str, list[set[int]]] = {}
     stack: list[tuple[str, set[int]]] = []
     renamed: set[str] = set()
@@ -717,8 +764,11 @@ def collector_code() -> str:
     """The source that decides a unit's readings, which is all a kept reading
     has to be recomputed for."""
     import inspect
-    return "".join(inspect.getsource(x) for x in (
-        logical_lines, strip_comments, Group, scan, Layout, layout_of, unit_argv, read_unit))
+
+    return "".join(
+        inspect.getsource(x)
+        for x in (logical_lines, strip_comments, Group, scan, Layout, layout_of, unit_argv, read_unit)
+    )
 
 
 def collect() -> None:
@@ -739,8 +789,7 @@ def _unit_key(n: int) -> tuple[list[str], str | None]:
     u = units[n]
     argv = unit_argv(u["command"])
     read = reads(u)
-    return argv, None if read is None else memo.key(
-        "reading", argv, Memo.stamp(set(read) | {u["file"]}, known))
+    return argv, None if read is None else memo.key("reading", argv, Memo.stamp(set(read) | {u["file"]}, known))
 
 
 def unit_keys(units: list[dict], memo: Memo, jobs: int, reads) -> list[tuple[list[str], str | None]]:
@@ -755,8 +804,7 @@ def unit_keys(units: list[dict], memo: Memo, jobs: int, reads) -> list[tuple[lis
         return pool.map(_unit_key, range(len(units)), chunksize=16)
 
 
-def readings(shell: list[str], ksrc: str, units: list[dict], memo: Memo, jobs: int,
-             reads, take, progress=None) -> list:
+def readings(shell: list[str], ksrc: str, units: list[dict], memo: Memo, jobs: int, reads, take, progress=None) -> list:
     """Hand take(n, record) each unit's per-file readings and the files it read
     outside the tree; return the units the build compiler refused.
 
@@ -774,8 +822,12 @@ def readings(shell: list[str], ksrc: str, units: list[dict], memo: Memo, jobs: i
     failed = []
     if not todo:
         return failed
-    proc = subprocess.Popen(shell + ["python3", os.path.abspath(__file__), "collect"],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(
+        shell + ["python3", os.path.abspath(__file__), "collect"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     assert proc.stdin is not None and proc.stdout is not None
     try:
         proc.stdin.write(json.dumps({"cwd": ksrc, "jobs": jobs, "units": todo}))
@@ -853,8 +905,7 @@ class Readings:
     def of(self, rel: str) -> list[tuple[tuple, int, int]]:
         """(live groups, units reading it so, a unit that did) per reading."""
         fi = self.index[rel]
-        return [(key, self.count[fi][rid], self.first[fi][rid])
-                for key, rid in self.seen[fi].items()]
+        return [(key, self.count[fi][rid], self.first[fi][rid]) for key, rid in self.seen[fi].items()]
 
     def best(self, rel: str, lay: Layout) -> int:
         fi = self.index[rel]
@@ -903,8 +954,7 @@ _INTEGER = re.compile(r"(-?)(0[xX][0-9a-fA-F]+|[0-9]+)[uUlL]*")
 
 def _split(expr: str) -> tuple[set[str], set[str]]:
     """Names an expression asks whether they are defined, and those it expands."""
-    return ({a or b for a, b in _DEFINED.findall(expr)},
-            set(_IDENT.findall(_DEFINED.sub(" ", expr))))
+    return ({a or b for a, b in _DEFINED.findall(expr)}, set(_IDENT.findall(_DEFINED.sub(" ", expr))))
 
 
 def _file_questions(path: str):
@@ -980,8 +1030,11 @@ def questions(paths, jobs: int = 1) -> tuple[set[str], dict[str, set[str]]]:
         closure |= d | e
         todo += e - done
         done |= e
-    return closure, {op: args for op, args in asked.items() if op in closure
-                     and op not in wrapped and all(_IDENT.fullmatch(a) for a in args)}
+    return closure, {
+        op: args
+        for op, args in asked.items()
+        if op in closure and op not in wrapped and all(_IDENT.fullmatch(a) for a in args)
+    }
 
 
 def _squash(expr: str) -> str:
@@ -1012,7 +1065,7 @@ def kept_names(paths, kept: list[str]) -> list[str]:
             for g in groups:
                 if not depends_on(groups, g, marks, names):
                     continue
-                for line in lines[g.body_first - 1:g.body_last]:
+                for line in lines[g.body_first - 1 : g.body_last]:
                     m = re.match(r"[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)", line)
                     if m and m.group(1) not in names:
                         names.add(m.group(1))
@@ -1043,8 +1096,15 @@ def question_text(ops: dict[str, set[str]]) -> tuple[str, list[tuple[str, str]]]
     pairs = [(op, arg) for op in sorted(ops) for arg in sorted(ops[op])]
     lines = []
     for n, (op, arg) in enumerate(pairs):
-        lines += [f"#if defined({op})", f"#if {op}({arg})", f"#define KBL_ANSWER_{n} 1",
-                  "#else", f"#define KBL_ANSWER_{n} 0", "#endif", "#endif"]
+        lines += [
+            f"#if defined({op})",
+            f"#if {op}({arg})",
+            f"#define KBL_ANSWER_{n} 1",
+            "#else",
+            f"#define KBL_ANSWER_{n} 0",
+            "#endif",
+            "#endif",
+        ]
     return "\n".join(lines) + "\n", pairs
 
 
@@ -1073,8 +1133,13 @@ def _same(a: str | None, b: str | None) -> bool:
     return ia == ib if ia is not None and ib is not None else a.strip() == b.strip()
 
 
-def identity(build: tuple[str, str], clang: tuple[str, str], closure: set[str],
-             pairs: list[tuple[str, str]], own: set[tuple[str, str]]) -> tuple[list[str], dict]:
+def identity(
+    build: tuple[str, str],
+    clang: tuple[str, str],
+    closure: set[str],
+    pairs: list[tuple[str, str]],
+    own: set[tuple[str, str]],
+) -> tuple[list[str], dict]:
     """Command-line macros holding the build compiler's answers where clang's differ.
 
     build and clang are each compiler's (predefined macros, answers) output for
@@ -1095,8 +1160,7 @@ def identity(build: tuple[str, str], clang: tuple[str, str], closure: set[str],
             flags.append(f"-D{name}={bpre[name]}")
         meta["macros"].append(name)
     for op in sorted({op for op, _ in pairs}):
-        mine = [(f"KBL_ANSWER_{n}", arg, (o, arg) in own)
-                for n, (o, arg) in enumerate(pairs) if o == op]
+        mine = [(f"KBL_ANSWER_{n}", arg, (o, arg) in own) for n, (o, arg) in enumerate(pairs) if o == op]
         if any(k not in cans or (k not in bans and not theirs) for k, _, theirs in mine):
             continue
         table, differs = {}, False
@@ -1125,12 +1189,14 @@ def ask() -> None:
         r = subprocess.run(argv, input=text, capture_output=True, text=True, errors="replace")
         return r.stdout if r.returncode == 0 else None
 
-    drivers = {d: [(run([d, "-dumpmachine"]) or "").strip(),
-                   (run([d, "-print-file-name=include"]) or "").strip()]
-               for d in spec["drivers"]}
-    answers = [[run(argv + ["-E", "-dM", "-x", "c", os.devnull]),
-                run(argv + ["-E", "-dM", "-x", "c", "-"], spec["questions"])]
-               for argv in spec["flag_sets"]]
+    drivers = {
+        d: [(run([d, "-dumpmachine"]) or "").strip(), (run([d, "-print-file-name=include"]) or "").strip()]
+        for d in spec["drivers"]
+    }
+    answers = [
+        [run(argv + ["-E", "-dM", "-x", "c", os.devnull]), run(argv + ["-E", "-dM", "-x", "c", "-"], spec["questions"])]
+        for argv in spec["flag_sets"]
+    ]
     json.dump({"drivers": drivers, "answers": answers}, sys.stdout)
 
 

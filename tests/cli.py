@@ -14,12 +14,13 @@ sys.path.insert(0, os.path.join(repo, "lib"))
 import cli  # noqa: E402
 
 SHELL = [os.path.join(repo, "bin", "kbuildlab")] + [
-    os.path.join(repo, "lib", f) for f in sorted(os.listdir(os.path.join(repo, "lib"))) if f.endswith(".sh")]
+    os.path.join(repo, "lib", f) for f in sorted(os.listdir(os.path.join(repo, "lib"))) if f.endswith(".sh")
+]
 SCRIPTS = {"run": "run-qemu.sh", "attach": "run-gdb.sh", "drgn": "run-drgn.sh", "resume": "resume.sh"}
 EXTRA = {"containers": ["_containers_clean"]}
-OPT = re.compile(r'(?:^[ \t]*|\bin[ \t]+)(-{1,2}[A-Za-z][-A-Za-z0-9]*(?:\|-{1,2}[A-Za-z][-A-Za-z0-9]*)*)\)',
-                 re.M)
-TEST = re.compile(r'==\s*(-{1,2}[A-Za-z][-A-Za-z0-9]*)')
+NAME = r"-{1,2}[A-Za-z][-A-Za-z0-9]*"
+OPT = re.compile(r"(?:^[ \t]*|\bin[ \t]+)(%s(?:[ \t]*\|[ \t]*%s)*)\)" % (NAME, NAME), re.M)
+TEST = re.compile(r"==\s*(-{1,2}[A-Za-z][-A-Za-z0-9]*)")
 IGNORED = {"-h", "--help"}
 
 failed = 0
@@ -36,21 +37,21 @@ def source():
 
 
 def function(src, name):
-    m = re.search(r'^%s\(\) \{\n(.*?)^\}' % re.escape(name), src, re.S | re.M)
+    m = re.search(r"^%s\(\) \{\n(.*?)^\}" % re.escape(name), src, re.S | re.M)
     return m.group(1) if m else None
 
 
 def arg_loop(path):
     s = open(path, encoding="utf-8").read()
-    m = re.search(r'while \[\[ \$# -gt 0 \]\]; do\s*\n\s*case "\$1" in\n(.*?)\n\s*esac', s, re.S)
-    return m.group(1) if m else ""
+    m = re.search(r'while \[\[ \$# -gt 0 \]\]; do\s*\n([ \t]*)case "\$1" in\n(.*?)\n\1esac', s, re.S)
+    return m.group(2) if m else ""
 
 
 def options(text):
     text = re.sub(r'"[^"\n]*"', '""', "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#")))
     found = set()
     for m in OPT.finditer(text):
-        found.update(m.group(1).split("|"))
+        found.update(n.strip() for n in m.group(1).split("|"))
     found.update(TEST.findall(text))
     return found - IGNORED
 
@@ -71,20 +72,21 @@ for c in cli.COMMANDS:
             parsed |= options(function(src, extra) or "")
     described = {n for o in c.opts for n in o.names}
     if parsed != described:
-        fail("%s: parsed %s, described %s" % (c.name, sorted(parsed - described) or "-",
-                                              sorted(described - parsed) or "-"))
+        fail(
+            "%s: parsed %s, described %s"
+            % (c.name, sorted(parsed - described) or "-", sorted(described - parsed) or "-")
+        )
 
-dispatch = re.search(r'^\{\ncmd=.*?^esac\nexit', src, re.S | re.M).group(0)
+dispatch = re.search(r"^\{\n[ \t]+cmd=.*?^\}", src, re.S | re.M).group(0)
 dispatched = set()
-for m in re.finditer(r'^\s{4}([a-z][a-z|]*)\)\s+cmd_', dispatch, re.M):
-    dispatched.update(m.group(1).split("|"))
+for m in re.finditer(r"^[ \t]+([a-z][a-z |]*)\)[ \t]+cmd_", dispatch, re.M):
+    dispatched.update(n.strip() for n in m.group(1).split("|"))
 described = {n for c in cli.COMMANDS for n in [c.name] + c.aliases} - {"help"}
 if dispatched != described:
-    fail("dispatch %s vs cli.py %s" % (sorted(dispatched - described) or "-",
-                                       sorted(described - dispatched) or "-"))
+    fail("dispatch %s vs cli.py %s" % (sorted(dispatched - described) or "-", sorted(described - dispatched) or "-"))
 usage = function(src, "usage") or ""
 for c in cli.COMMANDS:
-    if not re.search(r'kbuildlab %s\b' % re.escape(c.name), usage):
+    if not re.search(r"kbuildlab %s\b" % re.escape(c.name), usage):
         fail("usage does not mention kbuildlab %s" % c.name)
 
 for c in cli.COMMANDS:

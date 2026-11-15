@@ -13,7 +13,11 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/common.sh"
 
-PORT=""; PORT_SET=0; LIST=0; FIRST=0; FORCE=0
+PORT=""
+PORT_SET=0
+LIST=0
+FIRST=0
+FORCE=0
 declare -a REST=()
 _usage() {
     cat <<USAGE
@@ -33,13 +37,32 @@ USAGE
 }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help) _usage; exit 0 ;;
-        --port|-p) PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
-        --list|-l) LIST=1; shift ;;
-        --first)   FIRST=1; shift ;;
-        --force)   FORCE=1; shift ;;
+        -h | --help)
+            _usage
+            exit 0
+            ;;
+        --port | -p)
+            PORT="${2:?--port needs a number}"
+            PORT_SET=1
+            shift 2
+            ;;
+        --list | -l)
+            LIST=1
+            shift
+            ;;
+        --first)
+            FIRST=1
+            shift
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
         -*) die "resume: unknown option '$1'" ;;
-        *)  REST+=("$1"); shift ;;
+        *)
+            REST+=("$1")
+            shift
+            ;;
     esac
 done
 
@@ -50,7 +73,8 @@ elif [[ $PORT_SET -eq 0 ]]; then
     _want_tree="$(kbl_tree "" 2>/dev/null)" || _want_tree=""
 fi
 
-kbl_pick_guest resume "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"; _rc=$?
+kbl_pick_guest resume "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"
+_rc=$?
 [[ $_rc -eq 2 ]] && exit 0
 [[ $_rc -eq 0 ]] || exit $_rc
 
@@ -67,11 +91,15 @@ dbg="$(kbl_gdb_attached "$PORT" "$_r_pid" "$(kbl_qemu_gdb_bind "$_r_pid")")"
 say "guest        ${_r_name:-?} on :$PORT -- runstate ${state:-unknown}, debugger $dbg"
 
 case "$state" in
-    running) say "resume       nothing to do; it is already running"; exit 0 ;;
+    running)
+        say "resume       nothing to do; it is already running"
+        exit 0
+        ;;
     prelaunch)
         die "resume: this guest has never been started -- it is frozen at its reset
        vector by 'run' itself, which is what --run or a debugger's first continue
-       is for.  Resuming it here would skip the stop you asked for." ;;
+       is for.  Resuming it here would skip the stop you asked for."
+        ;;
 esac
 
 case "$dbg" in
@@ -79,7 +107,8 @@ case "$dbg" in
         [[ $FORCE -eq 1 ]] || die "resume: :$PORT still has a debugger attached, so this guest is
        paused on purpose.  Resuming behind it leaves that debugger believing it
        holds a stopped guest.  Continue or detach there instead, or --force."
-        warn "resume: resuming under an attached debugger (--force); it will disagree" ;;
+        warn "resume: resuming under an attached debugger (--force); it will disagree"
+        ;;
 esac
 
 out="$(python3 "${KBL_REPO}/lib/qmp.py" --port "$qmpport" --timeout 5 cont 2>&1)" \

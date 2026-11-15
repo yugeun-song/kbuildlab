@@ -10,7 +10,14 @@ KBL_REPO="$(cd -P "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${KBL_REPO}/lib/common.sh"
 
-PORT=""; PORT_SET=0; BOOTBREAK=1; STOP=""; STOP_AT=""; LIST=0; FIRST=0; JSON=0
+PORT=""
+PORT_SET=0
+BOOTBREAK=1
+STOP=""
+STOP_AT=""
+LIST=0
+FIRST=0
+JSON=0
 FW_RELOCATED=0
 declare -a REST=() PASS=()
 _usage() {
@@ -41,26 +48,61 @@ USAGE
 }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -h|--help)            _usage; exit 0 ;;
-        --port|-p)            PORT="${2:?--port needs a number}"; PORT_SET=1; shift 2 ;;
-        --list|-l)            LIST=1; shift ;;
-        --first)              FIRST=1; shift ;;
-        --json)               JSON=1; shift ;;
-        --no-bootbreak|--raw) BOOTBREAK=0; shift ;;   # attach raw (no run-to-_text)
-        --bootbreak)          BOOTBREAK=1; shift ;;
-        --stop)               STOP="${2:?--stop needs text|firmware|start_kernel}"; shift 2 ;;
-        --) shift; PASS=("$@"); break ;;
+        -h | --help)
+            _usage
+            exit 0
+            ;;
+        --port | -p)
+            PORT="${2:?--port needs a number}"
+            PORT_SET=1
+            shift 2
+            ;;
+        --list | -l)
+            LIST=1
+            shift
+            ;;
+        --first)
+            FIRST=1
+            shift
+            ;;
+        --json)
+            JSON=1
+            shift
+            ;;
+        --no-bootbreak | --raw)
+            BOOTBREAK=0
+            shift
+            ;; # attach raw (no run-to-_text)
+        --bootbreak)
+            BOOTBREAK=1
+            shift
+            ;;
+        --stop)
+            STOP="${2:?--stop needs text|firmware|start_kernel}"
+            shift 2
+            ;;
+        --)
+            shift
+            PASS=("$@")
+            break
+            ;;
         -*) die "attach: unknown option '$1' (pass gdb arguments after --)" ;;
-        *)  REST+=("$1"); shift ;;
+        *)
+            REST+=("$1")
+            shift
+            ;;
     esac
 done
 # Stop point: text (default, head.S _text) | firmware (raw, land at firmware
 # _start) | start_kernel (past _text, run on to start_kernel).
 case "$STOP" in
-    ""|text|_text)             : ;;
-    firmware|_start|raw|fw)    BOOTBREAK=0 ;;
-    relocated)                 BOOTBREAK=0; FW_RELOCATED=1 ;;
-    start_kernel|start-kernel) STOP_AT="start_kernel" ;;
+    "" | text | _text) : ;;
+    firmware | _start | raw | fw) BOOTBREAK=0 ;;
+    relocated)
+        BOOTBREAK=0
+        FW_RELOCATED=1
+        ;;
+    start_kernel | start-kernel) STOP_AT="start_kernel" ;;
     *) die "attach --stop: unknown '$STOP' (text|firmware|relocated|start_kernel)" ;;
 esac
 
@@ -114,7 +156,8 @@ fi
 # 2 means --list printed its table and there is nothing to attach to.  Not a
 # command substitution: kbl_pick_guest prompts on this terminal and dies on this
 # script, and a subshell would take both away.
-kbl_pick_guest attach "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"; _rc=$?
+kbl_pick_guest attach "$_want_tree" "$PORT" "$PORT_SET" "$FIRST" "$LIST"
+_rc=$?
 [[ $_rc -eq 2 ]] && exit 0
 [[ $_rc -eq 0 ]] || exit $_rc
 
@@ -182,11 +225,14 @@ fi
 # describes the tree's DEFAULT boot mode and this port may run another, so it is
 # held back and applied below only if no run state says better.  GDBTOOLS_AUTO
 # arms the session, which is what this launcher is for, unless stated otherwise.
-_op_entry="${GDBTOOLS_ENTRY_PA:-}"   # an operator pin; it outranks everything below
-_tree_entry=""                       # what tree.conf states, applied only as a fallback
+_op_entry="${GDBTOOLS_ENTRY_PA:-}" # an operator pin; it outranks everything below
+_tree_entry=""                     # what tree.conf states, applied only as a fallback
 while IFS= read -r k; do
     v="$(kbl_tree_get "$tree" "$k")"
-    [[ "$k" == GDBTOOLS_ENTRY_PA ]] && { _tree_entry="$v"; continue; }
+    [[ "$k" == GDBTOOLS_ENTRY_PA ]] && {
+        _tree_entry="$v"
+        continue
+    }
     [[ -n "${!k+x}" ]] || export "$k=$v"
 done < <(kbl_tree_keys "$tree" | grep -E '^GDBTOOLS_[A-Z0-9_]*$')
 [[ -n "${GDBTOOLS_AUTO:-}" ]] || export GDBTOOLS_AUTO=1
@@ -199,7 +245,7 @@ done < <(kbl_tree_keys "$tree" | grep -E '^GDBTOOLS_[A-Z0-9_]*$')
 # breakpoints given their physical twins.  The environment and tree.conf win,
 # and an empty value there (GDBTOOLS_PANELS=) turns that behaviour off.
 for _kv in SAFEMEM=auto PWNDBG_GUARDS=1 "PANELS=kgdb flow msysreg" EXPLORE_PAGES=off \
-           SAFERENDER=auto SHADOW=1 KASLR_APPLY=auto CROSSING=1 ADOPT=1; do
+    SAFERENDER=auto SHADOW=1 KASLR_APPLY=auto CROSSING=1 ADOPT=1; do
     _k="GDBTOOLS_${_kv%%=*}"
     [[ -n "${!_k+x}" ]] || export "$_k=${_kv#*=}"
 done
@@ -214,14 +260,14 @@ done
 # session ends up loading u-boot symbols into a guest that never ran u-boot.
 # Blank means there is no usable state, exactly as for a guest started elsewhere.
 _st="${_r_sf:-}"
-FWSYM=""   # firmware ELF symbols (u-boot) for the pre-kernel stages
-_bmode=""  # boot mode this port is actually running; empty when nothing recorded it
-_kaslr=""  # whether it was booted with KASLR on; only the run state knows
+FWSYM=""  # firmware ELF symbols (u-boot) for the pre-kernel stages
+_bmode="" # boot mode this port is actually running; empty when nothing recorded it
+_kaslr="" # whether it was booted with KASLR on; only the run state knows
 if [[ -r "$_st" ]]; then
     _bmode="$(sed -n 's/^KBL_BOOT=//p' "$_st" | head -1)"
     _bla="$(sed -n 's/^KBL_LOADADDR=//p' "$_st" | head -1)"
     _kaslr="$(sed -n 's/^KBL_KASLR=//p' "$_st" | head -1)"
-    if [[ ( "$_bmode" == uboot || "$_bmode" == uefi ) && -n "$_bla" ]]; then
+    if [[ ("$_bmode" == uboot || "$_bmode" == uefi) && -n "$_bla" ]]; then
         # `_bla` is the image base -- where the firmware lands _text.  gdbtools shifts
         # it to the ELF entry (startup_64) itself when the two differ (newer x86), so
         # hand over the image base as-is and let the symbol offset be applied there,
@@ -234,13 +280,18 @@ if [[ -r "$_st" ]]; then
         # address ranges do not overlap, so both resolve.
         if [[ "$_bmode" == uboot ]]; then
             _ub="$(sed -n 's/^KBL_FIRMWARE=//p' "$_st" | head -1)"
-            _fwof="$( (kbl_tree_firmware "$tree"; printf '%s\n%s\n' "$_fw_image" "$_fw_symbols") 2>/dev/null)" || _fwof=""
+            _fwof="$( (
+                kbl_tree_firmware "$tree"
+                printf '%s\n%s\n' "$_fw_image" "$_fw_symbols"
+            ) 2>/dev/null)" || _fwof=""
             if [[ -n "$_ub" && "$_ub" == "$(head -1 <<<"$_fwof")" ]]; then
                 FWSYM="$(tail -n +2 <<<"$_fwof")"
                 if [[ -z "$FWSYM" || ! -f "$FWSYM" ]]; then
-                    FWSYM=""; say "firmware     no symbols: its settings name no SYMBOLS file that exists"
+                    FWSYM=""
+                    say "firmware     no symbols: its settings name no SYMBOLS file that exists"
                 elif [[ "$_ub" -nt "$_st" ]]; then
-                    FWSYM=""; say "firmware     no symbols: $_ub was built again after this guest started"
+                    FWSYM=""
+                    say "firmware     no symbols: $_ub was built again after this guest started"
                 fi
             else
                 say "firmware     no symbols: this guest boots ${_ub:-a firmware its run did not record}, not the tree's"
@@ -253,7 +304,10 @@ if [[ -r "$_st" ]]; then
             if [[ -n "$FWSYM" && $BOOTBREAK -eq 1 ]] && command -v readelf >/dev/null 2>&1; then
                 while read -r _t _off _va _pa _fsz _msz _rest; do
                     [[ "$_t" == LOAD ]] || continue
-                    (( _bla >= _va && _bla < _va + _msz )) && { FWSYM=""; break; }
+                    ((_bla >= _va && _bla < _va + _msz)) && {
+                        FWSYM=""
+                        break
+                    }
                 done < <(readelf -lW "$FWSYM" 2>/dev/null)
             fi
         fi
@@ -265,7 +319,8 @@ fi
 # extended-remote session that attaches that one can stop the kernel.  pwndbg,
 # which the init file loads, aborts gdb 18.1 on the switch to an inferior that has
 # no thread yet, so that session skips the init file and keeps gdbtools.
-_board=""; _binf=""
+_board=""
+_binf=""
 if [[ -r "$_st" ]]; then
     _board="$(sed -n 's/^KBL_BOARD=//p' "$_st" | head -1)"
     [[ -n "$_board" && -r "$KBL_REPO/boards/$_board.conf" ]] \
@@ -278,7 +333,8 @@ fi
 # only evidence left.  It describes the tree's DEFAULT mode, so it holds only while
 # that is what is running.
 if [[ -z "${GDBTOOLS_ENTRY_PA:-}" && -n "$_tree_entry" ]]; then
-    _sboot="$(kbl_tree_get "$tree" BOOT)"; [[ -z "$_sboot" ]] && _sboot=direct
+    _sboot="$(kbl_tree_get "$tree" BOOT)"
+    [[ -z "$_sboot" ]] && _sboot=direct
     [[ "${_bmode:-$_sboot}" == "$_sboot" ]] && export GDBTOOLS_ENTRY_PA="$_tree_entry"
 fi
 
@@ -301,17 +357,25 @@ if [[ -z "$_kaslr" ]]; then
     # let a path like /srv/vm/nokaslr-disk.img answer a question it has nothing to
     # do with.  A firmware chain has no -append at all, which is why the run state
     # records the command line and is consulted first, above.
-    _qpid="${_r_pid:-}"; _app=""
+    _qpid="${_r_pid:-}"
+    _app=""
     if [[ -n "$_qpid" && -r "/proc/$_qpid/cmdline" ]]; then
-        mapfile -d '' -t _argv < "/proc/$_qpid/cmdline" 2>/dev/null || _argv=()
+        mapfile -d '' -t _argv <"/proc/$_qpid/cmdline" 2>/dev/null || _argv=()
         for ((_i = 0; _i < ${#_argv[@]}; _i++)); do
-            [[ "${_argv[_i]}" == "-append" ]] && { _app="${_argv[_i+1]:-}"; break; }
+            [[ "${_argv[_i]}" == "-append" ]] && {
+                _app="${_argv[_i + 1]:-}"
+                break
+            }
         done
     fi
-    if   [[ " $_app " == *" nokaslr "* ]]; then _kaslr=0
-    elif [[ " $_app " == *" kaslr "*   ]]; then _kaslr=1
-    elif grep -qx '# CONFIG_RANDOMIZE_BASE is not set' "$src/.config" 2>/dev/null; then _kaslr=0
-    else _kaslr=1
+    if [[ " $_app " == *" nokaslr "* ]]; then
+        _kaslr=0
+    elif [[ " $_app " == *" kaslr "* ]]; then
+        _kaslr=1
+    elif grep -qx '# CONFIG_RANDOMIZE_BASE is not set' "$src/.config" 2>/dev/null; then
+        _kaslr=0
+    else
+        _kaslr=1
     fi
 fi
 
@@ -330,7 +394,8 @@ fi
 # and, on x86, the boot protocol's decompressor address for a direct boot, when
 # nothing states them; both are also stated here, so a gdbtools older than
 # GDBTOOLS_BOOT gets them too.
-_eboot="${_bmode:-$(kbl_tree_get "$tree" BOOT)}"; _eboot="${_eboot:-direct}"
+_eboot="${_bmode:-$(kbl_tree_get "$tree" BOOT)}"
+_eboot="${_eboot:-direct}"
 [[ -n "${GDBTOOLS_BOOT:-}" ]] || export GDBTOOLS_BOOT="$_eboot"
 
 # x86 KASLR recovery reads the decompressor's vmlinux; hand its path over so
@@ -371,7 +436,7 @@ fi
 # directory gdb trusts; this source is trusted for this session, and nothing is
 # added to any init file.
 declare -a IEX=("set pagination off" "add-auto-load-safe-path $src" "cd $src"
-                "set logging file $PWD/gdb.txt")
+    "set logging file $PWD/gdb.txt")
 declare -a ARGS=(-q)
 if [[ -n "$_binf" ]]; then
     ARGS+=(-nx)
@@ -388,16 +453,19 @@ _gbind=""
 [[ -n "$_st" && -r "$_st" ]] && _gbind="$(sed -n 's/^KBL_GDB_BIND=//p' "$_st" | head -1)"
 if [[ -z "$_gbind" && -n "${_r_pid:-}" ]]; then
     _gdev="$(kbl_qemu_arg "$_r_pid" -gdb 2>/dev/null)"
-    [[ "$_gdev" == tcp:* ]] && { _gbind="${_gdev#tcp:}"; _gbind="${_gbind%:*}"; }
+    [[ "$_gdev" == tcp:* ]] && {
+        _gbind="${_gdev#tcp:}"
+        _gbind="${_gbind%:*}"
+    }
 fi
-case "$_gbind" in ""|"0.0.0.0"|"::"|"[::]") _gbind="localhost" ;; esac
+case "$_gbind" in "" | "0.0.0.0" | "::" | "[::]") _gbind="localhost" ;; esac
 if [[ -n "$_binf" ]]; then
     # vmlinux goes into that inferior only: a copy in the other one puts a second
     # location at every address, qemu's breakpoints stop every CPU, and the thread
     # stepping over its own location hit the twin and stopped there again.
     ARGS+=(-ex "target extended-remote ${_gbind}:${PORT}" -ex "add-inferior"
-           -ex "inferior $_binf" -ex "attach $_binf" -ex "file $vmlinux"
-           -ex "set schedule-multiple on")
+        -ex "inferior $_binf" -ex "attach $_binf" -ex "file $vmlinux"
+        -ex "set schedule-multiple on")
 else
     ARGS+=("$vmlinux" -ex "target remote ${_gbind}:${PORT}")
 fi
@@ -416,7 +484,10 @@ fi
 # (e.g. attaching to an already-booted guest, where running to _text never
 # returns). x86 lands at the decompressor entry; add `kearly kaslr auto` there.
 _bootbreak=0
-[[ $BOOTBREAK -eq 1 && -n "$tool" ]] && { ARGS+=(-ex "kearly bootbreak"); _bootbreak=1; }
+[[ $BOOTBREAK -eq 1 && -n "$tool" ]] && {
+    ARGS+=(-ex "kearly bootbreak")
+    _bootbreak=1
+}
 # The firmware symbols above sit where u-boot is LINKED: 0 on arm64, RAM base +
 # text_offset on riscv64, the very address its booti later moves the kernel to.  It
 # relocates itself to the top of DRAM, so they never describe the running firmware
@@ -447,23 +518,26 @@ _bootbreak=0
 # that name exists here, it is a path" is a guess, and a wrong one: `-ex version`
 # in a directory that happens to contain a file called `version` would be
 # rewritten into an absolute path and stop being a gdb command.
-_relabs() {   # _relabs VALUE -> absolute if it names a file here, else unchanged
+_relabs() { # _relabs VALUE -> absolute if it names a file here, else unchanged
     [[ "$1" != /* && -e "$PWD/$1" ]] && printf '%s\n' "$PWD/$1" || printf '%s\n' "$1"
 }
 for ((_i = 0; _i < ${#PASS[@]}; _i++)); do
     case "${PASS[_i]}" in
         # OPTION VALUE forms
-        -x|--command|-s|--symbols|-e|--exec|-c|--core|-d|--directory|--se|--se=*)
+        -x | --command | -s | --symbols | -e | --exec | -c | --core | -d | --directory | --se | --se=*)
             [[ "${PASS[_i]}" == --se=* ]] \
                 && PASS[_i]="--se=$(_relabs "${PASS[_i]#--se=}")" \
-                || { [[ -n "${PASS[_i+1]:-}" ]] && PASS[_i+1]="$(_relabs "${PASS[_i+1]}")"; } ;;
+                || { [[ -n "${PASS[_i + 1]:-}" ]] && PASS[_i + 1]="$(_relabs "${PASS[_i + 1]}")"; }
+            ;;
         # OPTION=VALUE forms
-        --command=*|--symbols=*|--exec=*|--core=*|--directory=*)
-            _o="${PASS[_i]%%=*}"; PASS[_i]="$_o=$(_relabs "${PASS[_i]#*=}")" ;;
+        --command=* | --symbols=* | --exec=* | --core=* | --directory=*)
+            _o="${PASS[_i]%%=*}"
+            PASS[_i]="$_o=$(_relabs "${PASS[_i]#*=}")"
+            ;;
         # A bare first argument is the symbol file; every later one is gdb's own
         # positional grammar and is left alone.
         -*) : ;;
-        *)  [[ $_i -eq 0 ]] && PASS[_i]="$(_relabs "${PASS[_i]}")" ;;
+        *) [[ $_i -eq 0 ]] && PASS[_i]="$(_relabs "${PASS[_i]}")" ;;
     esac
 done
 ARGS+=("${PASS[@]+"${PASS[@]}"}")

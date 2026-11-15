@@ -4,8 +4,11 @@
 # ---------------------------------------------------------------- helpers
 # The command prefix that runs a program in the active image with WORKDIR as
 # its working directory, left in _KBL_RUN; RUN-OPTIONs go to `run` itself.
-_container_run() {   # _container_run WORKDIR [RUN-OPTION...]
-    local c wd img p q; c="$(kbl_container)"; wd="$1"; shift
+_container_run() { # _container_run WORKDIR [RUN-OPTION...]
+    local c wd img p q
+    c="$(kbl_container)"
+    wd="$1"
+    shift
     # A tree that pins IMAGE= builds in that one; everything else in $KBL_IMAGE.
     # The caller sets _KBL_ACTIVE_IMAGE because only a caller holding a tree can
     # know which, and _in_container is also called with no tree in hand.
@@ -39,60 +42,68 @@ _container_run() {   # _container_run WORKDIR [RUN-OPTION...]
     if [[ -n "${_KBL_ACTIVE_TREE:-}" ]]; then
         p="$(kbl_tree_src "$_KBL_ACTIVE_TREE")" || exit 1
         rw+=("$p")
-        q="$(kbl_tree_data "$_KBL_ACTIVE_TREE")"; mkdir -p "$q" && rw+=("$q")
+        q="$(kbl_tree_data "$_KBL_ACTIVE_TREE")"
+        mkdir -p "$q" && rw+=("$q")
         ro+=("$_KBL_ACTIVE_TREE")
         if [[ -r "$p/.git/objects/info/alternates" ]]; then
-            while IFS= read -r q; do [[ -d "$q" ]] && ro+=("$q"); done < "$p/.git/objects/info/alternates"
+            while IFS= read -r q; do [[ -d "$q" ]] && ro+=("$q"); done <"$p/.git/objects/info/alternates"
         fi
     fi
     rw+=("$wd")
     # A destination the caller mounts itself (the tags view overlays the source)
     # is not mounted a second time, under either spelling.
-    local -a args=("$@"); local i
+    local -a args=("$@")
+    local i
     for ((i = 0; i < ${#args[@]}; i++)); do
-        [[ "${args[i]}" == -v ]] && { q="${args[i+1]#*:}"; taken+=("${q%%:*}"); }
+        [[ "${args[i]}" == -v ]] && {
+            q="${args[i + 1]#*:}"
+            taken+=("${q%%:*}")
+        }
     done
-    _kbl_covered() {   # is $1 inside something already mounted?
+    _kbl_covered() { # is $1 inside something already mounted?
         local m
         for m in "${taken[@]+"${taken[@]}"}"; do [[ "$1" == "$m" || "$1" == "$m"/* ]] && return 0; done
         return 1
     }
-    _kbl_mount() {   # _kbl_mount PATH rw|ro
+    _kbl_mount() { # _kbl_mount PATH rw|ro
         local given real d opt=""
         given="$(realpath -m -s -- "$1")"
         if [[ "$2" == rw ]]; then
             real="$(kbl_assert_mountable "$1")" || exit 1
         else
-            real="$(readlink -f -- "$1" 2>/dev/null)"; opt=":ro"
+            real="$(readlink -f -- "$1" 2>/dev/null)"
+            opt=":ro"
             [[ -n "$real" && "$real" != / ]] || die "'$1' does not resolve to a path that can be mounted"
         fi
         _kbl_covered "$given" && return 0
         for d in "$real" "$given"; do
             _kbl_covered "$d" && continue
-            mounts+=(-v "$real:$d$opt"); taken+=("$d")
+            mounts+=(-v "$real:$d$opt")
+            taken+=("$d")
         done
     }
     for p in "${rw[@]}"; do _kbl_mount "$p" rw; done
     for p in "${ro[@]}"; do _kbl_mount "$p" ro; done
     _KBL_RUN=("$c" run --rm --label "kbuildlab.run=${KBL_RUN_ID:-$$}" "${_logopt[@]+"${_logopt[@]}"}"
-              -e KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-kbuildlab}"
-              "$@" "${_idopt[@]+"${_idopt[@]}"}" "${mounts[@]}" -w "$wd" "$img")
+        -e KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-kbuildlab}"
+        "$@" "${_idopt[@]+"${_idopt[@]}"}" "${mounts[@]}" -w "$wd" "$img")
 }
 
-_in_container() {   # _in_container WORKDIR CMD...
-    local wd="$1"; shift
+_in_container() { # _in_container WORKDIR CMD...
+    local wd="$1"
+    shift
     _container_run "$wd" || exit 1
     "${_KBL_RUN[@]}" "$@"
 }
 
 _cross() {
     case "$1" in
-        arm64|aarch64) echo "aarch64-linux-gnu-" ;;
-        riscv64)       echo "riscv64-linux-gnu-" ;;
-        x86_64)        echo "" ;;
+        arm64 | aarch64) echo "aarch64-linux-gnu-" ;;
+        riscv64) echo "riscv64-linux-gnu-" ;;
+        x86_64) echo "" ;;
     esac
 }
-_karch() { case "$1" in arm64|aarch64) echo arm64 ;; riscv64) echo riscv ;; x86_64) echo x86_64 ;; esac; }
+_karch() { case "$1" in arm64 | aarch64) echo arm64 ;; riscv64) echo riscv ;; x86_64) echo x86_64 ;; esac }
 
 # Which image, and which compiler inside it, a tree builds with.
 #
@@ -105,8 +116,12 @@ _karch() { case "$1" in arm64|aarch64) echo arm64 ;; riscv64) echo riscv ;; x86_
 # described rather than in an environment variable someone has to remember.
 #
 # Unset means the image default -- the unversioned gcc/g++ the image symlinks.
-_tree_image() { local v; v="$(kbl_tree_get "$1" IMAGE)"; printf '%s\n' "${v:-$KBL_IMAGE}"; }
-_tree_gcc()   { kbl_tree_get "$1" GCC; }
+_tree_image() {
+    local v
+    v="$(kbl_tree_get "$1" IMAGE)"
+    printf '%s\n' "${v:-$KBL_IMAGE}"
+}
+_tree_gcc() { kbl_tree_get "$1" GCC; }
 
 # The make arguments that select it, one per line, or nothing when the tree
 # names no version.  Only the compiler is versioned: CROSS_COMPILE still
@@ -142,12 +157,14 @@ _tree_gcc()   { kbl_tree_get "$1" GCC; }
 # read back cut short by make 4.3 and later, so each build finds every command
 # changed and compiles everything again.  Later kernels fixed make-cmd with a
 # $(pound); given on the command line, that definition fixes this kernel too.
-_cc_args() {   # _cc_args TREE ARCH
-    local g pre hf kf mk; g="$(_tree_gcc "$1")"
-    kf="$(kbl_tree_get "$1" KCFLAGS)"; hf="$(kbl_tree_get "$1" HOSTCC_FLAGS)"
+_cc_args() { # _cc_args TREE ARCH
+    local g pre hf kf mk
+    g="$(_tree_gcc "$1")"
+    kf="$(kbl_tree_get "$1" KCFLAGS)"
+    hf="$(kbl_tree_get "$1" HOSTCC_FLAGS)"
     mk="$(kbl_tree_src "$1")/Makefile"
     if grep -q -- '-fno-var-tracking-assignments' "$mk" 2>/dev/null \
-       && [[ " $kf " != *" -fvar-tracking-assignments "* ]]; then
+        && [[ " $kf " != *" -fvar-tracking-assignments "* ]]; then
         kf="${kf:+$kf }-fvar-tracking-assignments"
     fi
     if [[ -f "$mk" ]] && ! grep -q -- '-fno-PIE' "$mk" && [[ " $kf " != *" -fno-PIE "* ]]; then
@@ -164,7 +181,8 @@ _cc_args() {   # _cc_args TREE ARCH
         printf '%s\n' "HOSTCC=gcc $hf"
     fi
     [[ -n "$kf" ]] && printf '%s\n' "KCFLAGS=$kf"
-    local inc; inc="$(kbl_tree_src "$1")/scripts/Kbuild.include"
+    local inc
+    inc="$(kbl_tree_src "$1")/scripts/Kbuild.include"
     if grep -qF 'subst \#,\\\#,' "$inc" 2>/dev/null && ! grep -q '^pound' "$inc"; then
         printf '%s\n' 'pound=#' \
             'make-cmd=$(call escsq,$(subst $(pound),$$(pound),$(subst $$,$$$$,$(cmd_$(1)))))'
@@ -173,30 +191,35 @@ _cc_args() {   # _cc_args TREE ARCH
 }
 
 # The make command line for a tree's arch and compiler, left in _KBL_MAKE.
-_kmake_args() {   # _kmake_args TREE
-    local arch; arch="$(kbl_tree_arch "$1")" || exit 1
-    local -a cc=(); mapfile -t cc < <(_cc_args "$1" "$arch")
+_kmake_args() { # _kmake_args TREE
+    local arch
+    arch="$(kbl_tree_arch "$1")" || exit 1
+    local -a cc=()
+    mapfile -t cc < <(_cc_args "$1" "$arch")
     _KBL_MAKE=(make ARCH="$(_karch "$arch")" CROSS_COMPILE="$(_cross "$arch")" "${cc[@]+"${cc[@]}"}")
 }
 
 # That make, run in the tree's image with its source as the working directory.
-_kmake() {   # _kmake TREE MAKE-ARG...
-    local tree="$1" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE; shift
+_kmake() { # _kmake TREE MAKE-ARG...
+    local tree="$1" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE
+    shift
     src="$(kbl_tree_src "$tree")" || exit 1
-    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"; _KBL_ACTIVE_TREE="$tree"
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    _KBL_ACTIVE_TREE="$tree"
     _kmake_args "$tree"
     _in_container "$src" "${_KBL_MAKE[@]}" "$@"
 }
 
 # ---------------------------------------------------------------- sync
 cmd_sync() {
-    local tree; tree="$(kbl_tree "${1:-}")" || exit 1
+    local tree
+    tree="$(kbl_tree "${1:-}")" || exit 1
     local ver url src
     ver="$(kbl_tree_get "$tree" VERSION)"
     [[ -n "$ver" ]] || die "$tree/tree.conf states no VERSION"
     case "$(kbl_tree_get "$tree" UPSTREAM)" in
         mainline) url="$MAINLINE_URL" ;;
-        *)        url="$STABLE_URL" ;;
+        *) url="$STABLE_URL" ;;
     esac
     src="$(kbl_tree_src "$tree")" || exit 1
 
@@ -239,7 +262,7 @@ cmd_sync() {
         local before after
         before="$(git -C "$src" rev-parse HEAD)"
         if [[ $shallow -eq 1 ]] && ! git -C "$src" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null \
-           && ! git -C "$src" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
+            && ! git -C "$src" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
             # A depth-1 fetch cuts history at the new tip, so ancestry cannot be
             # shown; HEAD moves only if it is exactly what the last fetch brought.
             [[ -n "$tracked" && "$before" == "$tracked" ]] \
@@ -250,7 +273,8 @@ cmd_sync() {
             git -C "$src" merge --ff-only FETCH_HEAD || die "not a fast-forward -- the tree has local commits"
         fi
         after="$(git -C "$src" rev-parse HEAD)"
-        if [[ "$before" == "$after" ]]; then say "up to date   $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"
+        if [[ "$before" == "$after" ]]; then
+            say "up to date   $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"
         else say "advanced     $(git -C "$src" describe --tags 2>/dev/null || echo "$after")"; fi
     fi
 }
@@ -260,12 +284,23 @@ cmd_config() {
     local tree preset=0
     local -a rest=()
     while [[ $# -gt 0 ]]; do
-        case "$1" in --preset) preset=1; shift ;; *) rest+=("$1"); shift ;; esac
+        case "$1" in --preset)
+            preset=1
+            shift
+            ;;
+        *)
+            rest+=("$1")
+            shift
+            ;;
+        esac
     done
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
-    local arch src; arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
+    local arch src
+    arch="$(kbl_tree_arch "$tree")" || exit 1
+    src="$(kbl_tree_src "$tree")" || exit 1
     [[ -d "$src" ]] || die "no kernel source at $src -- run: kbuildlab sync $(kbl_tree_label "$tree")"
-    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
 
     local -a frags=() soft=()
     [[ -f "$tree/config-fragment" ]] && frags+=("$tree/config-fragment")
@@ -274,8 +309,8 @@ cmd_config() {
         # (e.g. riscv dropped compile-time PREEMPT_NONE and reworked ftrace). Use
         # presets/arch/<arch>-mainline.config when it exists and UPSTREAM=mainline.
         local archpreset="${KBL_REPO}/presets/arch/${arch}.config"
-        if [[ "$(kbl_tree_get "$tree" UPSTREAM)" == "mainline" \
-              && -f "${KBL_REPO}/presets/arch/${arch}-mainline.config" ]]; then
+        if [[ "$(kbl_tree_get "$tree" UPSTREAM)" == "mainline" &&
+        -f "${KBL_REPO}/presets/arch/${arch}-mainline.config" ]]; then
             archpreset="${KBL_REPO}/presets/arch/${arch}-mainline.config"
         fi
         soft=("${KBL_REPO}"/presets/soft/*.config)
@@ -283,7 +318,8 @@ cmd_config() {
             && soft+=("${KBL_REPO}/presets/arch/${arch}.soft.config")
         # The bus the tree's system disk sits on (tree.conf STORAGE) decides which
         # drivers must be built in to mount the root file system.
-        local storage; storage="$(kbl_tree_get "$tree" STORAGE)"
+        local storage
+        storage="$(kbl_tree_get "$tree" STORAGE)"
         local -a stfrag=()
         if [[ -n "$storage" ]]; then
             [[ -f "${KBL_REPO}/presets/storage/${storage}.config" ]] \
@@ -336,17 +372,17 @@ cmd_config() {
 }
 
 # A kernel's VERSION.PATCHLEVEL as one number, read from its own Makefile.
-_kversion() {   # _kversion SRC
+_kversion() { # _kversion SRC
     awk '/^VERSION *=/ {v = $3} /^PATCHLEVEL *=/ {p = $3} END {if (v != "") print v * 1000 + p}' \
         "$1/Makefile"
 }
 
 # Whether a kernel predates the one the hard presets were verified on, which
 # presets/common.config names in its own header.
-_older_than_preset() {   # _older_than_preset SRC
+_older_than_preset() { # _older_than_preset SRC
     local ref kv
     ref="$(sed -n 's/.*[Vv]erified against Linux \([0-9]*\)\.\([0-9]*\).*/\1 \2/p' \
-             "${KBL_REPO}/presets/common.config" | head -1 | awk '{print $1 * 1000 + $2}')"
+        "${KBL_REPO}/presets/common.config" | head -1 | awk '{print $1 * 1000 + $2}')"
     [[ -n "$ref" ]] || die "presets/common.config does not say which kernel it was verified against"
     kv="$(_kversion "$1")"
     [[ -n "$kv" && "$kv" -lt "$ref" ]]
@@ -360,11 +396,11 @@ _kbl_jobs() {
 }
 
 _built_rec() { printf '%s\n' "$(kbl_tree_data "$1")/built-from"; }
-_keep_dir()  { printf '%s\n' "$(kbl_tree_data "$1")/.build-keep"; }
-_src_head()  { git -C "$1" rev-parse --verify --quiet HEAD 2>/dev/null; }
-_stamp()     { printf '%s\n' "$(kbl_tree_data "$1")/$2.stamp"; }
+_keep_dir() { printf '%s\n' "$(kbl_tree_data "$1")/.build-keep"; }
+_src_head() { git -C "$1" rev-parse --verify --quiet HEAD 2>/dev/null; }
+_stamp() { printf '%s\n' "$(kbl_tree_data "$1")/$2.stamp"; }
 
-_build_inputs() {   # _build_inputs TREE
+_build_inputs() { # _build_inputs TREE
     local tree="$1" src c d e
     src="$(kbl_tree_src "$tree")" || return 1
     c="$(kbl_container)" || return 1
@@ -372,7 +408,7 @@ _build_inputs() {   # _build_inputs TREE
     printf 'edits %s\n' "$(git -C "$src" status --porcelain=v1 -z --no-renames --untracked-files=normal 2>/dev/null \
         | while IFS= read -r -d '' e; do printf '%s %s\n' "$e" "$(stat -c '%s %Y' -- "$src/${e:3}" 2>/dev/null)"; done \
         | sha1sum | cut -c1-40)"
-    printf 'config %s\n' "$(sha1sum < "$src/.config" 2>/dev/null | cut -c1-40)"
+    printf 'config %s\n' "$(sha1sum <"$src/.config" 2>/dev/null | cut -c1-40)"
     printf 'tree %s\n' "$(cat "$tree/tree.conf" "$tree/config-fragment" 2>/dev/null | sha1sum | cut -c1-40)"
     printf 'image %s\n' "$("$c" image inspect --format '{{.Id}}' "$(_tree_image "$tree")" 2>/dev/null)"
     _ext_dirs "$tree"
@@ -384,17 +420,18 @@ _build_inputs() {   # _build_inputs TREE
         | LC_ALL=C sort -z | xargs -0 sha1sum | sha1sum | cut -c1-40)"
 }
 
-_build_current() {   # _build_current TREE
+_build_current() { # _build_current TREE
     local tree="$1" src rel rec
-    rec="$(_stamp "$tree" build)"; [[ -s "$rec" ]] || return 1
+    rec="$(_stamp "$tree" build)"
+    [[ -s "$rec" ]] || return 1
     src="$(kbl_tree_src "$tree")" || return 1
     rel="$(kbl_tree_get "$tree" KERNEL_IMAGE_REL)"
-    [[ -f "$src/vmlinux" && ( -z "$rel" || -f "$src/$rel" ) ]] || return 1
+    [[ -f "$src/vmlinux" && (-z "$rel" || -f "$src/$rel") ]] || return 1
     [[ ! -s "$src/modules.order" || -f "$(kbl_tree_data "$tree")/modules.cpio.gz" ]] || return 1
     [[ "$(_build_inputs "$tree")" == "$(cat "$rec")" ]]
 }
 
-_build_moved() {   # _build_moved TREE
+_build_moved() { # _build_moved TREE
     local head
     head="$(_src_head "$(kbl_tree_src "$1")")"
     [[ -z "$head" || "$(cat "$(_built_rec "$1")" 2>/dev/null)" != "$head" ]]
@@ -403,9 +440,10 @@ _build_moved() {   # _build_moved TREE
 _built_with() { printf '%s\n' "$(kbl_tree_data "$1")/built-with"; }
 
 # What every object depends on and kbuild does not track.
-_build_identity() {   # _build_identity TREE
+_build_identity() { # _build_identity TREE
     local tree="$1" arch a cc="" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"
-    arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
+    arch="$(kbl_tree_arch "$tree")" || exit 1
+    src="$(kbl_tree_src "$tree")" || exit 1
     _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     _kmake_args "$tree"
     for a in "${_KBL_MAKE[@]}"; do [[ "$a" == CC=* ]] && cc="${a#CC=}"; done
@@ -413,15 +451,16 @@ _build_identity() {   # _build_identity TREE
     printf 'arch %s\n%s\n' "$arch" "$a"
 }
 
-_kmake_logged() {   # _kmake_logged TREE LOG MAKE-ARG...
-    local tree="$1" log="$2"; shift 2
+_kmake_logged() { # _kmake_logged TREE LOG MAKE-ARG...
+    local tree="$1" log="$2"
+    shift 2
     _kmake "$tree" "$@" 2>&1 | tee "$log"
     return "${PIPESTATUS[0]}"
 }
 
 # The middle of the ladder: what the failed build names for as long as that makes
 # progress, then what lies beside it.  A set discarded before did not help.
-_build_retry_failed() {   # _build_retry_failed TREE JOBS LOG
+_build_retry_failed() { # _build_retry_failed TREE JOBS LOG
     local tree="$1" jobs="$2" log="$3" src what=failed key
     local -a gone=()
     local -A tried=()
@@ -441,44 +480,63 @@ _build_retry_failed() {   # _build_retry_failed TREE JOBS LOG
     done
 }
 
-_build_moved_why() {   # _build_moved_why TREE
+_build_moved_why() { # _build_moved_why TREE
     local was now
     now="$(_src_head "$(kbl_tree_src "$1")")"
     was="$(cat "$(_built_rec "$1")" 2>/dev/null)"
-    if [[ -z "$now" ]]; then printf 'its source is no git checkout, so nothing shows it unchanged\n'
-    elif [[ -z "$was" ]]; then printf 'no good build of it is recorded\n'
+    if [[ -z "$now" ]]; then
+        printf 'its source is no git checkout, so nothing shows it unchanged\n'
+    elif [[ -z "$was" ]]; then
+        printf 'no good build of it is recorded\n'
     else printf 'its source moved from %s to %s since its last good build\n' "${was:0:12}" "${now:0:12}"; fi
 }
 
-_unkeep() {   # _unkeep TREE
+_unkeep() { # _unkeep TREE
     local src keep f
     local -a back=()
-    src="$(kbl_tree_src "$1")" || exit 1; keep="$(_keep_dir "$1")"
+    src="$(kbl_tree_src "$1")" || exit 1
+    keep="$(_keep_dir "$1")"
     [[ -d "$keep" ]] || return 0
     while IFS= read -r -d '' f; do
         [[ -e "$src/$f" ]] && continue
-        mv -f -- "$keep/$f" "$src/$f" || { warn "cannot put $f back into $src from $keep"; return 1; }
+        mv -f -- "$keep/$f" "$src/$f" || {
+            warn "cannot put $f back into $src from $keep"
+            return 1
+        }
         back+=("$f")
     done < <(find "$keep" -mindepth 1 -maxdepth 1 -type f -printf '%f\0')
     [[ ${#back[@]} -gt 0 ]] && say "restored     ${back[*]} into $src"
     rm -rf -- "$keep"
 }
 
-_wipe_build() {   # _wipe_build TREE
+_wipe_build() { # _wipe_build TREE
     local tree="$1" src keep f
-    src="$(kbl_tree_src "$tree")" || exit 1; keep="$(_keep_dir "$tree")"
+    src="$(kbl_tree_src "$tree")" || exit 1
+    keep="$(_keep_dir "$tree")"
     local -a files=(.config)
     command -v python3 >/dev/null 2>&1 \
         && mapfile -t -O 1 files < <(python3 "${KBL_REPO}/lib/index/tagview.py" outputs)
-    if ! { rm -rf -- "$keep" && mkdir -p "$keep"; }; then warn "cannot write $keep"; return 1; fi
+    if ! { rm -rf -- "$keep" && mkdir -p "$keep"; }; then
+        warn "cannot write $keep"
+        return 1
+    fi
     for f in "${files[@]}"; do
         [[ -f "$src/$f" && ! -L "$src/$f" ]] || continue
-        cp --reflink=auto -p -- "$src/$f" "$keep/$f" || { warn "cannot keep $src/$f aside"; return 1; }
+        cp --reflink=auto -p -- "$src/$f" "$keep/$f" || {
+            warn "cannot keep $src/$f aside"
+            return 1
+        }
     done
     say "wiping       $(kbl_tree_label "$tree"): make mrproper, with .config and the indexes kept aside"
-    _kmake "$tree" mrproper || { warn "make mrproper failed (above)"; return 1; }
+    _kmake "$tree" mrproper || {
+        warn "make mrproper failed (above)"
+        return 1
+    }
     _unkeep "$tree" || return 1
-    _kmake "$tree" olddefconfig >/dev/null || { warn "olddefconfig failed after the wipe"; return 1; }
+    _kmake "$tree" olddefconfig >/dev/null || {
+        warn "olddefconfig failed after the wipe"
+        return 1
+    }
 }
 
 cmd_build() {
@@ -486,21 +544,38 @@ cmd_build() {
     local -a mkargs=()
     local -a rest=()
     while [[ $# -gt 0 ]]; do
-        if [[ "$1" == "--" ]]; then shift; mkargs=("$@"); break; fi
-        if [[ "$1" == --ext-only ]]; then extonly=1; shift; continue; fi
-        if [[ "$1" == --fresh ]]; then fresh=1; shift; continue; fi
-        rest+=("$1"); shift
+        if [[ "$1" == "--" ]]; then
+            shift
+            mkargs=("$@")
+            break
+        fi
+        if [[ "$1" == --ext-only ]]; then
+            extonly=1
+            shift
+            continue
+        fi
+        if [[ "$1" == --fresh ]]; then
+            fresh=1
+            shift
+            continue
+        fi
+        rest+=("$1")
+        shift
     done
     [[ $fresh -eq 1 && $extonly -eq 1 ]] && die "build: --ext-only builds against the last build, which --fresh wipes"
     [[ $fresh -eq 1 && ${#mkargs[@]} -gt 0 ]] && die "build: --fresh builds the whole tree, so it takes no make arguments"
     tree="$(kbl_tree "${rest[0]:-}")" || exit 1
     local arch src jobs name moved=0 wiped=0 why=""
-    arch="$(kbl_tree_arch "$tree")" || exit 1; src="$(kbl_tree_src "$tree")" || exit 1
+    arch="$(kbl_tree_arch "$tree")" || exit 1
+    src="$(kbl_tree_src "$tree")" || exit 1
     name="$(kbl_tree_label "$tree")"
     _unkeep "$tree" || exit 1
     [[ -f "$src/.config" ]] || die "no .config in $src -- run: kbuildlab config $name --preset"
     jobs="$(_kbl_jobs)" || exit 1
-    if _build_moved "$tree"; then moved=1; why="$(_build_moved_why "$tree")"; fi
+    if _build_moved "$tree"; then
+        moved=1
+        why="$(_build_moved_why "$tree")"
+    fi
     local inputs=""
     if [[ $extonly -eq 0 && ${#mkargs[@]} -eq 0 ]]; then
         rm -f "$(_stamp "$tree" build)"
@@ -512,8 +587,8 @@ cmd_build() {
         mkdir -p "$(kbl_tree_data "$tree")" || die "cannot write $(kbl_tree_data "$tree")"
         if [[ ${#mkargs[@]} -eq 0 ]]; then
             identity="$(_build_identity "$tree")"
-            if [[ $fresh -eq 0 && -f "$src/vmlinux" && -n "$identity" && -s "$(_built_with "$tree")" \
-                  && "$identity" != "$(cat "$(_built_with "$tree")")" ]]; then
+            if [[ $fresh -eq 0 && -f "$src/vmlinux" && -n "$identity" && -s "$(_built_with "$tree")" &&
+            "$identity" != "$(cat "$(_built_with "$tree")")" ]]; then
                 say "discarding   the build of $name: its compiler or architecture changed, which kbuild does not track"
                 fresh=1
             fi
@@ -541,8 +616,8 @@ cmd_build() {
         fi
         [[ -f "$src/vmlinux" ]] || die "build reported success but produced no vmlinux"
         if [[ ${#mkargs[@]} -eq 0 ]]; then
-            _src_head "$src" > "$(_built_rec "$tree")"
-            [[ -z "$identity" ]] || printf '%s\n' "$identity" > "$(_built_with "$tree")"
+            _src_head "$src" >"$(_built_rec "$tree")"
+            [[ -z "$identity" ]] || printf '%s\n' "$identity" >"$(_built_with "$tree")"
             local -a gone=()
             mapfile -t gone < <(python3 "${KBL_REPO}/lib/index/build_outputs.py" stale "$src")
             [[ ${#gone[@]} -eq 0 ]] \
@@ -566,14 +641,15 @@ cmd_build() {
     done
     _stage_modules "$tree" || return 1
     if [[ -n "$inputs" && "$(_build_inputs "$tree")" == "$inputs" ]]; then
-        mkdir -p "$(kbl_tree_data "$tree")" && printf '%s\n' "$inputs" > "$(_stamp "$tree" build)"
+        mkdir -p "$(kbl_tree_data "$tree")" && printf '%s\n' "$inputs" >"$(_stamp "$tree" build)"
     fi
     return 0
 }
 
 _ext_dirs() {
     local d
-    local -a dirs=(); read -r -a dirs <<<"$(kbl_tree_get "$1" EXT_MODULES)"
+    local -a dirs=()
+    read -r -a dirs <<<"$(kbl_tree_get "$1" EXT_MODULES)"
     _KBL_EXT=()
     for d in ${dirs[@]+"${dirs[@]}"}; do
         d="$(kbl_tree_path "$1" "$d")"
@@ -584,9 +660,11 @@ _ext_dirs() {
 }
 
 _ext_make() {
-    local tree="$1" dir="$2" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE; shift 2
+    local tree="$1" dir="$2" src _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE
+    shift 2
     src="$(kbl_tree_src "$tree")" || exit 1
-    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"; _KBL_ACTIVE_TREE="$tree"
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    _KBL_ACTIVE_TREE="$tree"
     _kmake_args "$tree"
     _in_container "$dir" "${_KBL_MAKE[@]}" -C "$src" M="$dir" "$@"
 }
@@ -600,22 +678,34 @@ _ext_make() {
 # lib/modules and that script are named, never a directory the rootfs already
 # has: the kernel replaces a path whose type differs, so a rootfs whose /lib
 # is a symlink would lose it.
-_stage_modules() {   # _stage_modules TREE
+_stage_modules() { # _stage_modules TREE
     local tree="$1" src out rec stage hook=etc/init.d/S10kbuildlab-coldplug
-    src="$(kbl_tree_src "$tree")" || exit 1; out="$(kbl_tree_data "$tree")/modules.cpio.gz"
+    src="$(kbl_tree_src "$tree")" || exit 1
+    out="$(kbl_tree_data "$tree")/modules.cpio.gz"
     rec="$(kbl_tree_data "$tree")/modules.ext"
-    mkdir -p "$(dirname "$out")" || { warn "modules: cannot write $(dirname "$out")"; return 1; }
+    mkdir -p "$(dirname "$out")" || {
+        warn "modules: cannot write $(dirname "$out")"
+        return 1
+    }
     _ext_dirs "$tree"
-    local exts; exts="$(printf '%s\n' ${_KBL_EXT[@]+"${_KBL_EXT[@]}"})"
-    if [[ ! -s "$src/modules.order" && -z "$exts" ]]; then rm -f "$out" "$rec"; return 0; fi
-    [[ -f "$out" && ! "$src/modules.order" -nt "$out" && "$(cat "$rec" 2>/dev/null)" == "$exts" \
-       && -z "$(find "$src" ${_KBL_EXT[@]+"${_KBL_EXT[@]}"} -name '*.ko' -newer "$out" -print -quit)" ]] \
+    local exts
+    exts="$(printf '%s\n' ${_KBL_EXT[@]+"${_KBL_EXT[@]}"})"
+    if [[ ! -s "$src/modules.order" && -z "$exts" ]]; then
+        rm -f "$out" "$rec"
+        return 0
+    fi
+    [[ -f "$out" && ! "$src/modules.order" -nt "$out" && "$(cat "$rec" 2>/dev/null)" == "$exts" &&
+    -z "$(find "$src" ${_KBL_EXT[@]+"${_KBL_EXT[@]}"} -name '*.ko' -newer "$out" -print -quit)" ]] \
         && return 0
     stage="$(kbl_tree_data "$tree")/.modules-stage"
-    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"; _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
+    local _KBL_ACTIVE_IMAGE _KBL_ACTIVE_TREE="$tree"
+    _KBL_ACTIVE_IMAGE="$(_tree_image "$tree")"
     rm -rf "$stage" && mkdir -p "$stage/$(dirname "$hook")" \
-        || { warn "modules: cannot write $stage"; return 1; }
-    cat > "$stage/$hook" <<'EOF'
+        || {
+            warn "modules: cannot write $stage"
+            return 1
+        }
+    cat >"$stage/$hook" <<'EOF'
 #!/bin/sh
 [ "$1" = start ] || exit 0
 printf 'Loading modules for the devices present: '
@@ -635,14 +725,16 @@ EOF
         warn "modules: modules_install failed (above); the guest gets none of this build's modules"
     elif [[ -z "$(find "$stage/lib/modules" -name '*.ko*' -print -quit 2>/dev/null)" ]]; then
         warn "modules: modules_install wrote no module into $stage, though $src/modules.order
-       lists $(grep -c . "$src/modules.order"); the guest gets none of this build's modules"; rc=1
+       lists $(grep -c . "$src/modules.order"); the guest gets none of this build's modules"
+        rc=1
     elif _in_container "$stage" sh -c "find lib/modules $hook | cpio -o -H newc -R 0:0 --quiet | \$(command -v pigz || echo gzip) -9" \
-           > "$out.tmp"; then
+        >"$out.tmp"; then
         mv -f "$out.tmp" "$out"
-        if [[ -n "$exts" ]]; then printf '%s\n' "$exts" > "$rec"; else rm -f "$rec"; fi
+        if [[ -n "$exts" ]]; then printf '%s\n' "$exts" >"$rec"; else rm -f "$rec"; fi
         say "modules      $out ($(find "$stage/lib/modules" -name '*.ko*' | wc -l) for the guest, $(du -h "$out" | cut -f1))"
     else
-        warn "modules: the archive could not be written (above); the guest gets none of this build's modules"; rc=1
+        warn "modules: the archive could not be written (above); the guest gets none of this build's modules"
+        rc=1
     fi
     rm -f "$out.tmp"
     rm -rf "$stage"

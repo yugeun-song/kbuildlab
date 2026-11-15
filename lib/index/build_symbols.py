@@ -64,15 +64,26 @@ def elf_symbols(path: str) -> dict[str, tuple[str, bool]]:
     symbols: dict[str, tuple[str, bool]] = {}
     for line in out.stdout.splitlines():
         p = line.split()
-        if len(p) >= 8 and p[0].endswith(":") and p[-2] != "UND" and p[3] not in ("SECTION", "FILE") and NAME.match(p[-1]):
+        if (
+            len(p) >= 8
+            and p[0].endswith(":")
+            and p[-2] != "UND"
+            and p[3] not in ("SECTION", "FILE")
+            and NAME.match(p[-1])
+        ):
             symbols[p[-1]] = (p[3], p[4] == "LOCAL")
     return symbols
 
 
 def line_table_files(path: str, comp_dir: str | None) -> dict[int, str]:
     """The first unit's file table, tree-relative; DWARF 4 and 5 lay it out alike."""
-    proc = subprocess.Popen(["readelf", "--debug-dump=rawline", path], stdout=subprocess.PIPE, text=True,
-                            stderr=subprocess.DEVNULL, errors="replace")
+    proc = subprocess.Popen(
+        ["readelf", "--debug-dump=rawline", path],
+        stdout=subprocess.PIPE,
+        text=True,
+        stderr=subprocess.DEVNULL,
+        errors="replace",
+    )
     dirs: dict[int, str] = {}
     files: dict[int, tuple[int, str]] = {}
     table = None
@@ -111,8 +122,9 @@ def line_table_files(path: str, comp_dir: str | None) -> dict[int, str]:
 
 def declared_lines(path: str) -> dict[str, tuple[str, int]]:
     """Where a C object's debug info declares each definition at file scope."""
-    out = subprocess.run(["readelf", "--debug-dump=info", "--dwarf-depth=2", path], capture_output=True, text=True,
-                         errors="replace")
+    out = subprocess.run(
+        ["readelf", "--debug-dump=info", "--dwarf-depth=2", path], capture_output=True, text=True, errors="replace"
+    )
     dies: dict[str, dict[str, str]] = {}
     order: list[str] = []
     die = None
@@ -142,8 +154,15 @@ def declared_lines(path: str) -> dict[str, tuple[str, int]]:
         value = a[2].rsplit("): ", 1)[-1] if a[2].startswith("(indirect") else a[2]
         if a[1] == "DW_AT_comp_dir" and "unit" in die:
             comp_dir = value
-        elif a[1] in ("DW_AT_name", "DW_AT_linkage_name", "DW_AT_decl_file", "DW_AT_decl_line", "DW_AT_declaration",
-                      "DW_AT_specification", "DW_AT_abstract_origin"):
+        elif a[1] in (
+            "DW_AT_name",
+            "DW_AT_linkage_name",
+            "DW_AT_decl_file",
+            "DW_AT_decl_line",
+            "DW_AT_declaration",
+            "DW_AT_specification",
+            "DW_AT_abstract_origin",
+        ):
             die[a[1][6:]] = value
     table = None
     found: dict[str, tuple[str, int]] = {}
@@ -202,7 +221,7 @@ def assembler_definitions(text: str, symbols) -> list[tuple[str, str, int, str]]
                     break
                 if lab[1] in symbols:
                     out.append((lab[1], place, number, "symbol"))
-                statement = statement[lab.end():]
+                statement = statement[lab.end() :]
             if body is not None:
                 if MACRO_END.match(statement):
                     macros[body[0]] = (body[1], body[2])
@@ -283,13 +302,18 @@ def c_unit(unit: dict) -> list[list]:
     if not wanted:
         return []
     declared = declared_lines(path)
-    out = [[name, rel, lineno, symbol_kind(wanted[name][0]), wanted[name][1]]
-           for name, (rel, lineno) in declared.items() if name in wanted and rel in listed]
+    out = [
+        [name, rel, lineno, symbol_kind(wanted[name][0]), wanted[name][1]]
+        for name, (rel, lineno) in declared.items()
+        if name in wanted and rel in listed
+    ]
     # Inline assembler makes symbols the debug info does not know (ASM_EXPORT).
     undeclared = wanted.keys() - declared.keys()
     if undeclared:
-        out += [[name, source, lineno, symbol_kind(wanted[name][0]), wanted[name][1]]
-                for name, lineno in first_spelled(undeclared, unit["file"]).items()]
+        out += [
+            [name, source, lineno, symbol_kind(wanted[name][0]), wanted[name][1]]
+            for name, lineno in first_spelled(undeclared, unit["file"]).items()
+        ]
     return out
 
 
@@ -366,9 +390,13 @@ def main() -> int:
     for key in keys:
         with open(os.path.join(state, f"files.{key}"), errors="surrogateescape") as f:
             listed.update(os.path.normpath(x) for x in f.read().split("\n") if x)
-    units = [u for u in tagview.recorded_units(root)
-             if u["target"].endswith(".o") and os.path.relpath(u["file"], root) in listed
-             and os.path.exists(os.path.join(root, u["target"]))]
+    units = [
+        u
+        for u in tagview.recorded_units(root)
+        if u["target"].endswith(".o")
+        and os.path.relpath(u["file"], root) in listed
+        and os.path.exists(os.path.join(root, u["target"]))
+    ]
 
     path = os.path.join(state, MEMO)
     code = code_key()
@@ -413,9 +441,11 @@ def main() -> int:
     with open("tags.kbl-tmp", "wb") as f:
         f.write(b"".join(sorted([line + b"\n" for line in ctags_lines] + new)))
     os.replace("tags.kbl-tmp", "tags")
-    print(f"symbols: {len(units)} objects ({len(units) - len(todo)} carried over), "
-          f"{len(new)} definitions ctags did not see added" + (f", {len(failed)} objects unread" if failed else ""),
-          flush=True)
+    print(
+        f"symbols: {len(units)} objects ({len(units) - len(todo)} carried over), "
+        f"{len(new)} definitions ctags did not see added" + (f", {len(failed)} objects unread" if failed else ""),
+        flush=True,
+    )
     for error in failed[:5]:
         print(f"symbols: unread {error}", file=sys.stderr)
     return 1 if todo and len(failed) == len(todo) else 0

@@ -6,21 +6,37 @@ cmd_doctor() {
     local rc=0 c v a q g t w
     head1 "kbuildlab doctor  ($(kbl_distro))"
     say "repo         ${KBL_REPO}"
-    if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
+    if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
         ok "bash $BASH_VERSION"
-    else bad "bash $BASH_VERSION -- 4.4 or newer is needed"; rc=1; fi
+    else
+        bad "bash $BASH_VERSION -- 4.4 or newer is needed"
+        rc=1
+    fi
     v="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
     if [[ -n "$v" ]] && python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' 2>/dev/null; then
         ok "python3 $v"
-    else bad "python3 ${v:-missing} -- 3.12 or newer is needed$(kbl_pkg_hint python3)"; rc=1; fi
+    else
+        bad "python3 ${v:-missing} -- 3.12 or newer is needed$(kbl_pkg_hint python3)"
+        rc=1
+    fi
     for t in git ss flock timeout; do
-        if command -v "$t" >/dev/null 2>&1; then ok "$t"; else bad "$t missing$(kbl_pkg_hint "$t")"; rc=1; fi
+        if command -v "$t" >/dev/null 2>&1; then ok "$t"; else
+            bad "$t missing$(kbl_pkg_hint "$t")"
+            rc=1
+        fi
     done
     if c="$(kbl_container 2>/dev/null)"; then
         ok "container    $c"
-        if "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1; then ok "image        $KBL_IMAGE"
-        else bad "image        $KBL_IMAGE is not built -- kbuildlab image"; rc=1; fi
-    else bad "container    none of podman, docker, nerdctl$(kbl_pkg_hint podman)"; rc=1; fi
+        if "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1; then
+            ok "image        $KBL_IMAGE"
+        else
+            bad "image        $KBL_IMAGE is not built -- kbuildlab image"
+            rc=1
+        fi
+    else
+        bad "container    none of podman, docker, nerdctl$(kbl_pkg_hint podman)"
+        rc=1
+    fi
     # The floors are what kbuildlab passes to qemu: riscv's sv39/sv48/sv57 CPU
     # properties (CPU_PAGING) arrived in 8.0, and virtio-sound-pci, which
     # --emulate attaches, in 8.2.
@@ -29,26 +45,42 @@ cmd_doctor() {
         case "$a" in arm64) q=qemu-system-aarch64 ;; *) q="qemu-system-$a" ;; esac
         if command -v "$q" >/dev/null 2>&1; then
             v="$("$q" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
-            if [[ -z "$v" ]]; then bad "$q -- its version could not be read"; rc=1
+            if [[ -z "$v" ]]; then
+                bad "$q -- its version could not be read"
+                rc=1
             elif [[ "$a" == riscv64 ]] && ! _vge "$v" 8.0; then
-                bad "$q $v -- 8.0 or newer is needed (the sv48/sv57 CPU properties)"; rc=1
-            elif ! _vge "$v" 8.2; then ok "$q $v ${KBL_D}(--emulate needs 8.2: virtio-sound-pci)${KBL_0}"
+                bad "$q $v -- 8.0 or newer is needed (the sv48/sv57 CPU properties)"
+                rc=1
+            elif ! _vge "$v" 8.2; then
+                ok "$q $v ${KBL_D}(--emulate needs 8.2: virtio-sound-pci)${KBL_0}"
             else ok "$q $v"; fi
-        else bad "$q missing$(kbl_pkg_hint "$q")"; rc=1; fi
-        if g="$(kbl_gdb "$a" 2>/dev/null)"; then ok "gdb for $a: $g"
-        else bad "gdb for $a: none with a working Python$(kbl_pkg_hint gdb)"; rc=1; fi
+        else
+            bad "$q missing$(kbl_pkg_hint "$q")"
+            rc=1
+        fi
+        if g="$(kbl_gdb "$a" 2>/dev/null)"; then
+            ok "gdb for $a: $g"
+        else
+            bad "gdb for $a: none with a working Python$(kbl_pkg_hint gdb)"
+            rc=1
+        fi
     done
     for t in mkimage mcopy dtc clangd drgn; do
-        if command -v "$t" >/dev/null 2>&1; then ok "$t"
+        if command -v "$t" >/dev/null 2>&1; then
+            ok "$t"
         else printf '  %s-%s %s (optional)%s\n' "$KBL_D" "$KBL_0" "$t" "$(kbl_pkg_hint "$t")"; fi
     done
-    if [[ -r /dev/kvm && -w /dev/kvm ]]; then ok "kvm (x86 guests can use it)"
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+        ok "kvm (x86 guests can use it)"
     else printf '  %s-%s kvm not accessible; x86 guests run under TCG\n' "$KBL_D" "$KBL_0"; fi
     say "registry     $KBL_TREES"
-    local -a ids=(); mapfile -t ids < <(kbl_trees)
-    if [[ ${#ids[@]} -gt 0 ]]; then say "trees        $(_kbl_labels "${ids[@]}")"
+    local -a ids=()
+    mapfile -t ids < <(kbl_trees)
+    if [[ ${#ids[@]} -gt 0 ]]; then
+        say "trees        $(_kbl_labels "${ids[@]}")"
     else say "trees        (none)"; fi
-    if w="$(kbl_workspace_opt)"; then say "workspace    $w"
+    if w="$(kbl_workspace_opt)"; then
+        say "workspace    $w"
     else say "workspace    not recorded (the lab/ record and init --restore need it: kbuildlab init --workspace DIR)"; fi
     [[ $rc -eq 0 ]] || warn "something above is missing; install it and re-run"
     return $rc
@@ -61,8 +93,14 @@ cmd_image() {
     local c file tag
     c="$(kbl_container)"
     case "${1:-}" in
-        ""|default|latest) file="${KBL_REPO}/containers/Containerfile";        tag="$KBL_IMAGE" ;;
-        legacy)            file="${KBL_REPO}/containers/Containerfile.legacy";  tag="$KBL_LEGACY_IMAGE" ;;
+        "" | default | latest)
+            file="${KBL_REPO}/containers/Containerfile"
+            tag="$KBL_IMAGE"
+            ;;
+        legacy)
+            file="${KBL_REPO}/containers/Containerfile.legacy"
+            tag="$KBL_LEGACY_IMAGE"
+            ;;
         *) die "image: unknown variant '$1' (known: legacy)" ;;
     esac
     [[ -r "$file" ]] || die "image: no Containerfile at $file"
@@ -82,21 +120,22 @@ cmd_image() {
 # image sets none of them, so any of these seen INSIDE means the runtime is passing
 # the host environment through and a build would depend on the shell it started from.
 _KBL_BUILD_ENV=(CC CXX CPP LD AR NM OBJCOPY OBJDUMP HOSTCC HOSTCXX
-                CFLAGS CXXFLAGS CPPFLAGS LDFLAGS KCFLAGS KBUILD_CFLAGS
-                MAKEFLAGS ARCH CROSS_COMPILE LD_LIBRARY_PATH LD_PRELOAD
-                PKG_CONFIG_PATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH
-                SOURCE_DATE_EPOCH CCACHE_DIR)
+    CFLAGS CXXFLAGS CPPFLAGS LDFLAGS KCFLAGS KBUILD_CFLAGS
+    MAKEFLAGS ARCH CROSS_COMPILE LD_LIBRARY_PATH LD_PRELOAD
+    PKG_CONFIG_PATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH
+    SOURCE_DATE_EPOCH CCACHE_DIR)
 
 # Every image this workspace can use: the two defaults, plus whatever a tree
 # names for itself.  status and clean both read this, so a tree that pins its
 # own image is not invisible to either.
 _kbl_image_tags() {
-    { printf '%s\n' "$KBL_IMAGE" "$KBL_LEGACY_IMAGE"
-      local t tr
-      for t in $(kbl_trees 2>/dev/null); do
-          tr="$(kbl_tree "$t" 2>/dev/null)" || continue
-          _tree_image "$tr"
-      done
+    {
+        printf '%s\n' "$KBL_IMAGE" "$KBL_LEGACY_IMAGE"
+        local t tr
+        for t in $(kbl_trees 2>/dev/null); do
+            tr="$(kbl_tree "$t" 2>/dev/null)" || continue
+            _tree_image "$tr"
+        done
     } | awk 'NF && !seen[$0]++'
 }
 
@@ -108,7 +147,8 @@ _kbl_image_tags() {
 _cc_fingerprint() { sed -n 's/.*(\(.*\)) *\([0-9][0-9.]*\).*/\1 \2/p' <<<"${1:-}" | head -1; }
 
 _containers_status() {
-    local c rc=0; c="$(kbl_container)" || return 1
+    local c rc=0
+    c="$(kbl_container)" || return 1
     echo "kbuildlab containers"
     say "runtime      $c $("$c" --version 2>/dev/null | head -1)"
     if [[ "$(basename "$c")" == podman ]]; then
@@ -116,15 +156,16 @@ _containers_status() {
     fi
     # A daemon is a process, not a unit: report what is actually running rather than
     # what systemd would start, so this works the same for a rootless runtime.
-    local d; d="$(pgrep -a -x dockerd 2>/dev/null | head -1)"
+    local d
+    d="$(pgrep -a -x dockerd 2>/dev/null | head -1)"
     say "daemon       ${d:-none running (nothing to start or stop)}"
 
     local tag id sz
     while read -r tag; do
         if id="$("$c" image inspect "$tag" --format '{{.Id}}' 2>/dev/null)"; then
             sz="$("$c" image inspect "$tag" --format '{{.Size}}' 2>/dev/null)"
-            id="${id#sha256:}"                  # docker prefixes the digest, podman does not
-            printf '  %-12s %s  %s  %s MiB\n' "image" "$tag" "${id:0:12}" "$(( ${sz:-0} / 1048576 ))"
+            id="${id#sha256:}" # docker prefixes the digest, podman does not
+            printf '  %-12s %s  %s  %s MiB\n' "image" "$tag" "${id:0:12}" "$((${sz:-0} / 1048576))"
         else
             printf '  %-12s %s  (not built)\n' "image" "$tag"
         fi
@@ -133,7 +174,7 @@ _containers_status() {
     local n=0
     while read -r tag; do
         [[ -n "$tag" ]] || continue
-        n=$(( n + $("$c" ps -aq --filter "ancestor=$tag" 2>/dev/null | wc -l) ))
+        n=$((n + $("$c" ps -aq --filter "ancestor=$tag" 2>/dev/null | wc -l)))
     done < <(_kbl_image_tags)
     say "containers   $n from kbuildlab images (kbuildlab runs with --rm, so this is normally 0)"
     say "untagged     $("$c" images -q -f dangling=true 2>/dev/null | wc -l) image(s) on this host, from any project"
@@ -141,7 +182,8 @@ _containers_status() {
     # Does the host environment reach a build?  Ask the container, do not assume.
     local leaked="" v
     if "$c" image inspect "$KBL_IMAGE" >/dev/null 2>&1; then
-        local inside; inside="$("$c" run --rm "$KBL_IMAGE" env 2>/dev/null)"
+        local inside
+        inside="$("$c" run --rm "$KBL_IMAGE" env 2>/dev/null)"
         for v in "${_KBL_BUILD_ENV[@]}"; do
             grep -q "^${v}=" <<<"$inside" && leaked="$leaked $v"
         done
@@ -174,15 +216,19 @@ _containers_status() {
             "${KBL_REPO}/containers/Containerfile" 2>/dev/null | head -1)"
         for a in x86_64 arm64 riscv64; do
             pre="$(_cross "$a")"
-            local ban maj; ban="$(grep -m1 "^${pre}|" <<<"$banners" | cut -d'|' -f2-)"
+            local ban maj
+            ban="$(grep -m1 "^${pre}|" <<<"$banners" | cut -d'|' -f2-)"
             printf '  %-12s %-8s %s\n' "compiler" "$a" "$ban"
             # The Containerfile can move ahead of the image built from it, and nothing
             # else would say so.  The version comes from the fingerprint rather than
             # the last field: a banner can end in a datestamp ("gcc (GCC) 16.2.1 20260810").
-            maj="$(_cc_fingerprint "$ban")"; maj="${maj##* }"; maj="${maj%%.*}"
+            maj="$(_cc_fingerprint "$ban")"
+            maj="${maj##* }"
+            maj="${maj%%.*}"
             if [[ -n "$pinned" && -n "$maj" && "$maj" != "$pinned" ]]; then
                 printf '  %-12s %s has gcc %s but containers/Containerfile pins gcc-%s -- rebuild with `kbuildlab image`\n' \
-                    "STALE" "$a" "$maj" "$pinned"; rc=1
+                    "STALE" "$a" "$maj" "$pinned"
+                rc=1
             fi
         done
     else
@@ -204,14 +250,20 @@ _containers_status() {
         tr="$(kbl_tree "$t" 2>/dev/null)" || continue
         timg="$(_tree_image "$tr")"
         tprog="$(_cross "$(kbl_tree_arch "$tr" 2>/dev/null)")gcc"
-        local g; g="$(_tree_gcc "$tr")"; [[ -n "$g" ]] && tprog="${tprog}-${g}"
-        _treeimg["$t"]="$timg"; _treeprog["$t"]="$tprog"
+        local g
+        g="$(_tree_gcc "$tr")"
+        [[ -n "$g" ]] && tprog="${tprog}-${g}"
+        _treeimg["$t"]="$timg"
+        _treeprog["$t"]="$tprog"
         case " ${_progs[$timg]:-} " in *" $tprog "*) : ;; *) _progs["$timg"]="${_progs[$timg]:-} $tprog" ;; esac
     done
     declare -A _seen=()
     for timg in "${!_progs[@]}"; do
         "$c" image inspect "$timg" >/dev/null 2>&1 || {
-            printf '  %-12s %s is named by a tree but is not built (kbuildlab image)\n' "MISSING" "$timg"; rc=1; continue; }
+            printf '  %-12s %s is named by a tree but is not built (kbuildlab image)\n' "MISSING" "$timg"
+            rc=1
+            continue
+        }
         probe="$("$c" run --rm "$timg" sh -c '
             for p in '"${_progs[$timg]}"'; do printf "%s|%s\n" "$p" "$($p --version 2>/dev/null | head -1)"; done' 2>/dev/null)"
         while IFS= read -r line; do _seen["$timg|${line%%|*}"]="${line#*|}"; done <<<"$probe"
@@ -226,7 +278,9 @@ _containers_status() {
         # compare is also a tree whose GCC= is never checked at all.
         if [[ -z "${_seen["${_treeimg[$t]}|${_treeprog[$t]}"]:-}" ]]; then
             printf '  %-12s %s asks for %s in %s, which is not there\n' \
-                "NO CC" "$t" "${_treeprog[$t]}" "${_treeimg[$t]}"; rc=1; continue
+                "NO CC" "$t" "${_treeprog[$t]}" "${_treeimg[$t]}"
+            rc=1
+            continue
         fi
         if [[ -z "$rec" ]]; then
             # CC_VERSION_TEXT arrived in 4.19.  An older tree records no
@@ -239,21 +293,26 @@ _containers_status() {
                 "unchecked" "$t"
             continue
         fi
-        local now; now="${_seen["${_treeimg[$t]}|${_treeprog[$t]}"]:-}"
+        local now
+        now="${_seen["${_treeimg[$t]}|${_treeprog[$t]}"]:-}"
         if [[ -z "$now" ]]; then
             printf '  %-12s %s asks for %s in %s, which is not there\n' \
-                "NO CC" "$t" "${_treeprog[$t]}" "${_treeimg[$t]}"; rc=1; continue
+                "NO CC" "$t" "${_treeprog[$t]}" "${_treeimg[$t]}"
+            rc=1
+            continue
         fi
         if [[ "$(_cc_fingerprint "$rec")" != "$(_cc_fingerprint "$now")" ]]; then
             printf '  %-12s %s built by "%s", %s now has "%s" -- rebuilding mixes toolchains (make mrproper first)\n' \
-                "MIXED" "$t" "$rec" "${_treeimg[$t]}" "$now"; rc=1
+                "MIXED" "$t" "$rec" "${_treeimg[$t]}" "$now"
+            rc=1
         else
             printf '  %-12s %-18s %s  (%s)\n' "toolchain" "$t" "$now" "${_treeimg[$t]}"
         fi
     done
 
     # Host-side collisions the package manager would notice.
-    local pn; pn="$(ls /etc/containers/*.pacnew 2>/dev/null | tr '\n' ' ')"
+    local pn
+    pn="$(ls /etc/containers/*.pacnew 2>/dev/null | tr '\n' ' ')"
     say "pacman       ${pn:+unmerged config: $pn}${pn:-no .pacnew under /etc/containers}"
     [[ -n "$pn" ]] && rc=1
     if [[ "$(basename "$c")" == podman ]]; then
@@ -261,7 +320,10 @@ _containers_status() {
         local who="${USER:-$(id -un)}"
         grep -q "^${who}:" /etc/subuid 2>/dev/null && grep -q "^${who}:" /etc/subgid 2>/dev/null \
             && say "subid        ${who} has subuid and subgid ranges (rootless is set up)" \
-            || { say "subid        ${who} has NO subuid/subgid range -- rootless podman cannot map users"; rc=1; }
+            || {
+                say "subid        ${who} has NO subuid/subgid range -- rootless podman cannot map users"
+                rc=1
+            }
     fi
     # What a build mounts writable: each tree's source and data directory, put
     # through the same guard _container_run applies rather than described.
@@ -272,10 +334,14 @@ _containers_status() {
             [[ -n "$p" && -e "$p" ]] || continue
             if ! kbl_assert_mountable "$p" >/dev/null 2>&1; then
                 say "REFUSED      $t: $p -- the mount guard refuses it, so a build of $t would not start"
-                refused=1; rc=1
+                refused=1
+                rc=1
             fi
             root_owned="$(find "$p" -maxdepth 4 -user root -print -quit 2>/dev/null)"
-            [[ -n "$root_owned" ]] && { say "ROOT-OWNED   $root_owned -- a rootful run left it; chown it back"; rc=1; }
+            [[ -n "$root_owned" ]] && {
+                say "ROOT-OWNED   $root_owned -- a rootful run left it; chown it back"
+                rc=1
+            }
         done
     done
     [[ $refused -eq 0 ]] && say "mounts       the sources and data directories of $nt tree(s) pass the mount guard"
@@ -288,7 +354,7 @@ _containers_clean() {
     c="$(kbl_container)" || return 1
     for a in "$@"; do
         case "$a" in
-            --images)   drop_images=1 ;;
+            --images) drop_images=1 ;;
             --dangling) drop_dangling=1 ;;
             *) die "containers clean: unknown option '$a' (known: --images, --dangling)" ;;
         esac
@@ -301,10 +367,10 @@ _containers_clean() {
         # there instead and leave it alone.
         while read -r id; do
             [[ -n "$id" ]] || continue
-            "$c" rm "$id" >/dev/null 2>&1 && n=$((n+1))
+            "$c" rm "$id" >/dev/null 2>&1 && n=$((n + 1))
         done < <("$c" ps -aq --filter "ancestor=$tag" --filter "status=exited" \
-                                --filter "status=created" 2>/dev/null)
-        busy=$(( busy + $("$c" ps -q --filter "ancestor=$tag" 2>/dev/null | wc -l) ))
+            --filter "status=created" 2>/dev/null)
+        busy=$((busy + $("$c" ps -q --filter "ancestor=$tag" 2>/dev/null | wc -l)))
     done < <(_kbl_image_tags)
     say "containers   removed $n stopped container(s) made from kbuildlab images"
     [[ $busy -gt 0 ]] && say "running      $busy left alone -- stop them yourself if they are not wanted"
@@ -313,7 +379,7 @@ _containers_clean() {
         # ours; it is opt-in for that reason and says what it took.
         while read -r id; do
             [[ -n "$id" ]] || continue
-            "$c" rmi "$id" >/dev/null 2>&1 && d=$((d+1))
+            "$c" rmi "$id" >/dev/null 2>&1 && d=$((d + 1))
         done < <("$c" images -q -f dangling=true 2>/dev/null)
         say "untagged     removed $d (every untagged image on this host, not only kbuildlab's)"
     fi
@@ -326,9 +392,10 @@ _containers_clean() {
         while read -r tag; do
             [[ -n "$tag" ]] || continue
             case "${tag##*/}" in
-                kbuildlab:*|kbuildlab-*:*)
-                    "$c" rmi "$tag" >/dev/null 2>&1 && say "image        removed $tag" ;;
-                *)  say "kept         $tag is named by a tree but was not built here" ;;
+                kbuildlab:* | kbuildlab-*:*)
+                    "$c" rmi "$tag" >/dev/null 2>&1 && say "image        removed $tag"
+                    ;;
+                *) say "kept         $tag is named by a tree but was not built here" ;;
             esac
         done < <(_kbl_image_tags)
         say "rebuild      kbuildlab image"
@@ -342,8 +409,14 @@ _containers_clean() {
 
 cmd_containers() {
     case "${1:-status}" in
-        status|"") shift || true; _containers_status "$@" ;;
-        clean)     shift;         _containers_clean  "$@" ;;
+        status | "")
+            shift || true
+            _containers_status "$@"
+            ;;
+        clean)
+            shift
+            _containers_clean "$@"
+            ;;
         *) die "containers: unknown subcommand '$1' (known: status, clean)" ;;
     esac
 }

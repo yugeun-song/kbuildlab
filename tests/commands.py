@@ -3,6 +3,7 @@
 call ends with kbuildlab's own message and a failing status, never with a shell
 error, and leaves nothing half-made.  Runs against a registry of its own in a
 temporary directory; nothing is built, booted or fetched."""
+
 import os
 import re
 import subprocess
@@ -12,8 +13,10 @@ import tempfile
 here = os.path.dirname(os.path.abspath(__file__))
 repo = os.path.dirname(here)
 KBL = os.path.join(repo, "bin", "kbuildlab")
-SHELL_ERROR = re.compile(r"unbound variable|syntax error|command not found|bad substitution|"
-                         r"No such file or directory|ambiguous redirect|integer expression|Traceback")
+SHELL_ERROR = re.compile(
+    r"unbound variable|syntax error|command not found|bad substitution|"
+    r"No such file or directory|ambiguous redirect|integer expression|Traceback"
+)
 ARM, RISCV, X86, OLD = "a" * 16, "b" * 16, "c" * 16, "d" * 16
 
 failed = 0
@@ -38,7 +41,10 @@ def expect(env, args, status, *words, stdin=None):
         why.append("a shell error (%s)" % m.group(0))
     if why:
         failed += 1
-        print("FAIL kbuildlab %s: %s\n     %s" % (" ".join(args), ", ".join(why), out.strip().replace("\n", "\n     ")[:600]))
+        print(
+            "FAIL kbuildlab %s: %s\n     %s"
+            % (" ".join(args), ", ".join(why), out.strip().replace("\n", "\n     ")[:600])
+        )
 
 
 def tree(root, tid, arch, extra=""):
@@ -53,15 +59,25 @@ def tree(root, tid, arch, extra=""):
 def main():
     global failed, checked
     with tempfile.TemporaryDirectory() as root:
-        env = dict(os.environ, XDG_CONFIG_HOME=os.path.join(root, "config"), XDG_DATA_HOME=os.path.join(root, "data"),
-                   KBL_STATE_DIR=root, KBL_LAB=os.path.join(root, "lab"), NO_COLOR="1", EDITOR="", VISUAL="")
+        env = dict(
+            os.environ,
+            XDG_CONFIG_HOME=os.path.join(root, "config"),
+            XDG_DATA_HOME=os.path.join(root, "data"),
+            KBL_STATE_DIR=root,
+            KBL_LAB=os.path.join(root, "lab"),
+            NO_COLOR="1",
+            EDITOR="",
+            VISUAL="",
+        )
         env.pop("KBL_WORKSPACE", None)
         arm = tree(root, ARM, "arm64", "BOOT=uboot\nMACHINE=virt\nCONSOLE=ttyAMA0\nGDB_PORT=1\nQMP_PORT=2\n")
         tree(root, RISCV, "riscv64", "BOOT=direct\n")
         tree(root, X86, "x86_64", "BOOT=uefi\n")
         old = tree(root, OLD, "arm64", "BOOT=uboot\nUBOOT=/nowhere/u-boot.bin\n")
         blob = os.path.join(root, "t.dtb")
-        subprocess.run(["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", blob, "-"], input=b"/dts-v1/;\n/ { a = <1>; };\n", check=True)
+        subprocess.run(
+            ["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", blob, "-"], input=b"/dts-v1/;\n/ { a = <1>; };\n", check=True
+        )
         junk = os.path.join(root, "junk.bin")
         with open(junk, "wb") as f:
             f.write(b"\xd0\x0d\xfe\xed" + os.urandom(64))
@@ -87,7 +103,9 @@ def main():
         expect(env, ["dt", X86], 0, "none for", "uefi")
         expect(env, ["dt", X86, "--json"], 0, '"device_tree": null')
         checked += 1
-        if not subprocess.run([KBL, "dt", X86, "--json"], env=env, capture_output=True, text=True).stdout.startswith("{"):
+        if not subprocess.run([KBL, "dt", X86, "--json"], env=env, capture_output=True, text=True).stdout.startswith(
+            "{"
+        ):
             failed += 1
             print("FAIL dt --json prints something before its JSON")
         expect(env, ["dt", "check", X86], 0, "none")
@@ -101,7 +119,9 @@ def main():
         expect(env, ["dt", "diff", ARM], 1, "did not hand over its device tree")
         expect(env, ["dt", "check", ARM], 1, "did not hand over its device tree")
         expect(env, ["dt", OLD], 1, "states UBOOT, which is no longer read")
-        left = [n for n in os.listdir(os.path.join(root, "data", "kbuildlab", "trees", ARM, "dt", "uboot")) if n != ".lock"]
+        left = [
+            n for n in os.listdir(os.path.join(root, "data", "kbuildlab", "trees", ARM, "dt", "uboot")) if n != ".lock"
+        ]
         expect(env, ["dt", "detach", ARM], 0, "nothing was attached")
         checked += 1
         if left:
@@ -124,16 +144,18 @@ def main():
         expect(env, ["firmware", "global", ARM], 0, "already boots the global firmware")
         expect(env, ["firmware", "own", ARM], 1, "has no", "firmware.conf")
         conf = os.path.join(arm, "firmware.conf")
-        for body, word in (("SRC=/x\nBUILD=/y\n", "states no IMAGE"),
-                           ("BUILD=/y\nIMAGE=u-boot.bin\n", "states no SRC"),
-                           ("SRC=/x\nBUILD=/y\nIMAGE=u-boot.bin\nNAME=u-boot\n", "states NAME"),
-                           ("SRC=/x\nBUILD=/y\nIMAGE=u-boot.bin\nTYPO=1\n", "not a firmware key"),
-                           ("SRC=relative\nBUILD=/y\nIMAGE=u-boot.bin\n", "SRC is not an absolute path"),
-                           ("SRC=/x\nBUILD=/y\nIMAGE=/abs/u-boot.bin\n", "IMAGE is"),
-                           ("SRC=/x\nBUILD=/y\nIMAGE=../u-boot.bin\n", "IMAGE is"),
-                           ("SRC=/x\nBUILD=/y\nIMAGE=u-boot.bin\nSYMBOLS=/abs\n", "SYMBOLS is"),
-                           ("SRC=%s\nBUILD=%s\nIMAGE=u-boot.bin\n" % (root, root), "BUILD is SRC"),
-                           ("SRC=%s/none\nBUILD=%s/b\nIMAGE=u-boot.bin\n" % (root, root), "is no git checkout")):
+        for body, word in (
+            ("SRC=/x\nBUILD=/y\n", "states no IMAGE"),
+            ("BUILD=/y\nIMAGE=u-boot.bin\n", "states no SRC"),
+            ("SRC=/x\nBUILD=/y\nIMAGE=u-boot.bin\nNAME=u-boot\n", "states NAME"),
+            ("SRC=/x\nBUILD=/y\nIMAGE=u-boot.bin\nTYPO=1\n", "not a firmware key"),
+            ("SRC=relative\nBUILD=/y\nIMAGE=u-boot.bin\n", "SRC is not an absolute path"),
+            ("SRC=/x\nBUILD=/y\nIMAGE=/abs/u-boot.bin\n", "IMAGE is"),
+            ("SRC=/x\nBUILD=/y\nIMAGE=../u-boot.bin\n", "IMAGE is"),
+            ("SRC=/x\nBUILD=/y\nIMAGE=u-boot.bin\nSYMBOLS=/abs\n", "SYMBOLS is"),
+            ("SRC=%s\nBUILD=%s\nIMAGE=u-boot.bin\n" % (root, root), "BUILD is SRC"),
+            ("SRC=%s/none\nBUILD=%s/b\nIMAGE=u-boot.bin\n" % (root, root), "is no git checkout"),
+        ):
             with open(conf, "w") as f:
                 f.write(body)
             expect(env, ["firmware", "own", ARM], 1, word)
@@ -152,8 +174,12 @@ def main():
         expect(env, ["firmware", "global", ARM], 0, "boots kbuildlab's global firmware again")
         expect(env, ["firmware", ARM], 0, "global firmware for arm64")
 
-        for bad, word in ((junk, "is not a well-formed one"), (empty, "is empty"),
-                          (os.path.join(root, "missing.dts"), "no readable file"), (root, "no readable file")):
+        for bad, word in (
+            (junk, "is not a well-formed one"),
+            (empty, "is empty"),
+            (os.path.join(root, "missing.dts"), "no readable file"),
+            (root, "no readable file"),
+        ):
             expect(env, ["dt", "apply", X86, "--boot", "direct", bad], 1)
     print("%d refusals checked, %s" % (checked, "all as they should be" if not failed else "%d failed" % failed))
     return 1 if failed else 0

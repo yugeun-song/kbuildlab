@@ -12,17 +12,17 @@ import re
 # Kconfig
 # ---------------------------------------------------------------------------
 
-_TYPES = ("bool", "tristate", "string", "hex", "int",
-          "def_bool", "def_tristate")
+_TYPES = ("bool", "tristate", "string", "hex", "int", "def_bool", "def_tristate")
 
 _CONFIG_START = re.compile(r"^\s*(menuconfig|config)\s+([A-Za-z0-9_]+)\s*$")
-_BLOCK_END = re.compile(r"^(config|menuconfig|menu|endmenu|choice|endchoice|"
-                        r"if|endif|source|comment|mainmenu)\b")
+_BLOCK_END = re.compile(
+    r"^(config|menuconfig|menu|endmenu|choice|endchoice|"
+    r"if|endif|source|comment|mainmenu)\b"
+)
 
 
 class KconfigSymbol:
-    __slots__ = ("name", "where", "type", "prompt", "depends", "selects",
-                 "defaults", "help", "ranges")
+    __slots__ = ("name", "where", "type", "prompt", "depends", "selects", "defaults", "help", "ranges")
 
     def __init__(self, name: str, where: str):
         self.name = name
@@ -141,6 +141,7 @@ def index_kconfig(ksrc: str) -> dict[str, list[KconfigSymbol]]:
 # attributes this clang cannot parse
 # ---------------------------------------------------------------------------
 
+
 def clang_handles_forward_counted_by(clang: str = "clang") -> bool:
     """Does this clang accept counted_by naming a member declared later?
 
@@ -152,12 +153,12 @@ def clang_handles_forward_counted_by(clang: str = "clang") -> bool:
     kind of gap a later clang closes.
     """
     import subprocess, tempfile
+
     fd, src = tempfile.mkstemp(suffix=".c", prefix="counted_by_probe_")
     with os.fdopen(fd, "w") as f:
         f.write("struct s { char *p __attribute__((counted_by(n))); int n; };\n")
     try:
-        r = subprocess.run([clang, "-fsyntax-only", src],
-                           capture_output=True, text=True)
+        r = subprocess.run([clang, "-fsyntax-only", src], capture_output=True, text=True)
         return r.returncode == 0
     except OSError:
         return True

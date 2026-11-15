@@ -20,8 +20,6 @@ import sys
 import drgn
 
 
-
-
 def _fnptr_target(type_):
     """The function type a pointer points to, or None."""
     t = type_
@@ -86,19 +84,21 @@ def dump(prog, name):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="ops.py", description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        prog="ops.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("names", nargs="*", help="global objects to resolve")
-    ap.add_argument("--grep", metavar="RE",
-                    help="list matching global symbols instead of resolving")
-    ap.add_argument("--limit", type=int, default=0,
-                    help="with --grep, also resolve the first N matches")
+    ap.add_argument("--grep", metavar="RE", help="list matching global symbols instead of resolving")
+    ap.add_argument("--limit", type=int, default=0, help="with --grep, also resolve the first N matches")
     args = ap.parse_args()
 
     prog = drgn.get_default_prog()
     if not (prog.flags & drgn.ProgramFlags.IS_LINUX_KERNEL):
-        print("ops.py: this program is not an identified Linux kernel -- the guest "
-              "has not published its vmcoreinfo note yet", file=sys.stderr)
+        print(
+            "ops.py: this program is not an identified Linux kernel -- the guest "
+            "has not published its vmcoreinfo note yet",
+            file=sys.stderr,
+        )
         return 1
 
     names = list(args.names)

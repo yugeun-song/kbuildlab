@@ -37,10 +37,11 @@ STATE = "view.json"
 PUBLISHED = "published.json"
 # What each indexer writes at the top of the tree: all a run stages, publishes
 # and, when that indexer fails, withdraws.
-INDEXES = {"ctags": ("tags",),
-           "cscope": ("cscope.files", "cscope.out", "cscope.out.in", "cscope.out.po",
-                      "cscope.in.out", "cscope.po.out"),
-           "gtags": ("GTAGS", "GRTAGS", "GPATH")}
+INDEXES = {
+    "ctags": ("tags",),
+    "cscope": ("cscope.files", "cscope.out", "cscope.out.in", "cscope.out.po", "cscope.in.out", "cscope.po.out"),
+    "gtags": ("GTAGS", "GRTAGS", "GPATH"),
+}
 OUTPUTS = {name for names in INDEXES.values() for name in names}
 
 
@@ -91,10 +92,8 @@ def recorded_units(ksrc: str) -> list[dict]:
             words = clangd.entry_args({"command": command})
             if "-P" in words:
                 command = shlex.join(a for a in words if a != "-P")
-            units.append({"directory": ksrc, "file": src, "command": command, "cmd": path,
-                          "target": m["target"]})
-    compilers = {clangd.entry_args(u)[0] for u in units
-                 if u["target"].endswith(".o") and u["file"].endswith(".c")}
+            units.append({"directory": ksrc, "file": src, "command": command, "cmd": path, "target": m["target"]})
+    compilers = {clangd.entry_args(u)[0] for u in units if u["target"].endswith(".o") and u["file"].endswith(".c")}
     return [u for u in units if clangd.entry_args(u)[0] in compilers]
 
 
@@ -112,8 +111,12 @@ def forced_closure(shell: list[str], ksrc: str, units: list[dict]) -> set[str]:
         forced = tuple(argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-include")
         lang = "assembler-with-cpp" if u["file"].endswith(".S") else "c"
         probes.setdefault((argv[0], forced, lang), argv + ["-M", "-x", lang, os.devnull])
-    r = subprocess.run(shell + ["python3", os.path.abspath(__file__), "probe"],
-                       input=json.dumps(list(probes.values())), capture_output=True, text=True)
+    r = subprocess.run(
+        shell + ["python3", os.path.abspath(__file__), "probe"],
+        input=json.dumps(list(probes.values())),
+        capture_output=True,
+        text=True,
+    )
     if r.returncode:
         raise SystemExit(f"the build image could not list the forced includes:\n{r.stderr[-1500:]}")
     out: set[str] = set()
@@ -195,7 +198,7 @@ def address() -> None:
             k = pattern_end(rest)
             if k < 0 or not rest[k:].startswith(b';"'):
                 continue
-            body = rest[2:k - 1]
+            body = rest[2 : k - 1]
             slashes = len(body[:-1]) - len(body[:-1].rstrip(b"\\"))
             whole = body.endswith(b"$") and slashes % 2 == 0
             nos = matching_lines(order, unescape(body[:-1] if whole else body), whole)
@@ -294,9 +297,11 @@ def cmd_build(args) -> int:
         print(f"    no compile recorded in {ksrc}: nothing to read the view from")
         return 2
     jobs = clangd.auto_jobs(cap=args.jobs or None, job_mb=clangd.PREPROCESS_MB)
-    memo = Memo(os.path.join(args.view, "readings"),
-                None if args.fresh else os.path.join(clangd.cache_dir(tree), "readings"),
-                ir.collector_code())
+    memo = Memo(
+        os.path.join(args.view, "readings"),
+        None if args.fresh else os.path.join(clangd.cache_dir(tree), "readings"),
+        ir.collector_code(),
+    )
     got = ir.Readings(units)
 
     def reads(u):
@@ -349,8 +354,7 @@ def cmd_build(args) -> int:
             want[rel] = None
         else:
             want[rel] = None
-    masks = ((os.path.join(ksrc, rel), set().union(*(set(k) for k, _, _ in got.of(rel))))
-             for rel in to_mask)
+    masks = ((os.path.join(ksrc, rel), set().union(*(set(k) for k, _, _ in got.of(rel)))) for rel in to_mask)
     with cf.ProcessPoolExecutor(jobs) as ex:
         for rel, (view, blanked) in zip(to_mask, ex.map(masked, masks, chunksize=16)):
             if view is not None:
@@ -376,20 +380,30 @@ def cmd_build(args) -> int:
             pass
     save_json(os.path.join(args.view, STATE), sorted(keep))
     published = load(os.path.join(args.view, PUBLISHED), None)
-    foreign = None if published is None else [
-        n for n, (size, mtime) in published.items() if stamp(os.path.join(ksrc, n)) != [size, mtime]]
+    foreign = (
+        None
+        if published is None
+        else [n for n, (size, mtime) in published.items() if stamp(os.path.join(ksrc, n)) != [size, mtime]]
+    )
     if foreign is None or foreign:
         for rel in keep:
             os.utime(os.path.join(up, rel))
-        print(f"    {' '.join(sorted(foreign)) if foreign else 'no index'} from the last run over "
-              f"the view is in the tree: every copy counts as changed")
+        print(
+            f"    {' '.join(sorted(foreign)) if foreign else 'no index'} from the last run over "
+            f"the view is in the tree: every copy counts as changed"
+        )
 
-    print(f"    {len(units)} compiles read ({memo.hits} carried over"
-          + (f", {len(failed)} refused: their files are left as they are" if failed else "")
-          + (f", {blind} without a dependency list" if blind else "") + ")")
+    print(
+        f"    {len(units)} compiles read ({memo.hits} carried over"
+        + (f", {len(failed)} refused: their files are left as they are" if failed else "")
+        + (f", {blind} without a dependency list" if blind else "")
+        + ")"
+    )
     print(f"    {len(names)} files listed, {len(compiled & names)} of them read by the build")
-    print(f"    {n_mask} files with {n_lines} lines this config does not compile blanked, "
-          f"{n_blank} files this build never reads emptied")
+    print(
+        f"    {n_mask} files with {n_lines} lines this config does not compile blanked, "
+        f"{n_blank} files this build never reads emptied"
+    )
     print(f"    {written} copies written, {removed} removed, {len(keep)} in {up}")
     for u, err in failed[:10]:
         last = err.strip().splitlines()[-1] if err.strip() else "no output"
@@ -417,8 +431,9 @@ def cmd_stage(args) -> int:
         path = os.path.join(ksrc, name)
         if os.path.islink(path) or not os.path.isfile(path) or os.path.exists(os.path.join(up, name)):
             continue
-        if subprocess.run(["cp", "--reflink=auto", "--preserve=mode,timestamps", path,
-                           os.path.join(up, name)]).returncode:
+        if subprocess.run(
+            ["cp", "--reflink=auto", "--preserve=mode,timestamps", path, os.path.join(up, name)]
+        ).returncode:
             shutil.copyfile(path, os.path.join(up, name))
             shutil.copystat(path, os.path.join(up, name))
     return 0
@@ -434,8 +449,10 @@ def cmd_harvest(args) -> int:
         try:
             started = os.stat(os.path.join(args.view, "state", "started")).st_mtime_ns
         except OSError:
-            raise SystemExit(f"tagview.py: {args.view}/state/started is missing, so nothing "
-                             f"tells this run's indexes from older files; none was kept")
+            raise SystemExit(
+                f"tagview.py: {args.view}/state/started is missing, so nothing "
+                f"tells this run's indexes from older files; none was kept"
+            )
     published, stray, gone = [], [], []
     for d, dirs, files in os.walk(up, topdown=False):
         for name in files + [x for x in dirs if os.path.islink(os.path.join(d, x))]:
@@ -445,9 +462,15 @@ def cmd_harvest(args) -> int:
                 if os.path.isfile(os.path.join(ksrc, rel)):
                     continue
                 gone.append(rel)
-            elif (args.keep and d == up and rel in OUTPUTS and not is_whiteout(path)
-                    and not os.path.islink(path) and os.path.isfile(path)
-                    and os.stat(path).st_mtime_ns >= started):
+            elif (
+                args.keep
+                and d == up
+                and rel in OUTPUTS
+                and not is_whiteout(path)
+                and not os.path.islink(path)
+                and os.path.isfile(path)
+                and os.stat(path).st_mtime_ns >= started
+            ):
                 publish(path, os.path.join(ksrc, rel))
                 published.append(rel)
             elif not is_whiteout(path) and (d != up or rel not in OUTPUTS):
@@ -465,11 +488,9 @@ def cmd_harvest(args) -> int:
     if published:
         print(f"    into the tree: {' '.join(sorted(published))}")
     if gone:
-        print(f"    dropped the copies of {len(gone)} file(s) the tree no longer has: "
-              f"{' '.join(sorted(gone)[:5])}")
+        print(f"    dropped the copies of {len(gone)} file(s) the tree no longer has: {' '.join(sorted(gone)[:5])}")
     if stray:
-        print(f"    dropped {len(stray)} file(s) the run left that are no index: "
-              f"{' '.join(sorted(stray)[:5])}")
+        print(f"    dropped {len(stray)} file(s) the run left that are no index: {' '.join(sorted(stray)[:5])}")
     return 0
 
 
@@ -501,22 +522,26 @@ def main() -> int:
         names = INDEXES[sys.argv[2]] if len(sys.argv) > 2 else sorted(OUTPUTS)
         print("\n".join(names))
         return 0
-    ap = argparse.ArgumentParser(description="the tree as its build compiled it, for ctags, "
-                                             "cscope and gtags")
+    ap = argparse.ArgumentParser(description="the tree as its build compiled it, for ctags, cscope and gtags")
     ap.add_argument("--tree", required=True, metavar="DIR")
-    ap.add_argument("--view", required=True, metavar="DIR",
-                    help="the tree's view directory, as kbuildlab chose it")
+    ap.add_argument("--view", required=True, metavar="DIR", help="the tree's view directory, as kbuildlab chose it")
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build", help="write the view the indexers read")
-    b.add_argument("--build-shell", required=True, metavar="CMD",
-                   help="the command prefix that runs a program in the tree's build image, "
-                        "with the kernel source as its working directory and stdin attached")
+    b.add_argument(
+        "--build-shell",
+        required=True,
+        metavar="CMD",
+        help="the command prefix that runs a program in the tree's build image, "
+        "with the kernel source as its working directory and stdin attached",
+    )
     b.add_argument("-j", "--jobs", type=int, default=0)
-    b.add_argument("--fresh", action="store_true",
-                   help="read every unit again, borrowing no reading from the clangd index")
+    b.add_argument(
+        "--fresh", action="store_true", help="read every unit again, borrowing no reading from the clangd index"
+    )
     b.set_defaults(func=cmd_build)
-    sg = sub.add_parser("stage", help="put the tree's indexes in the layer, so a run "
-                                       "updates them there rather than copying them up")
+    sg = sub.add_parser(
+        "stage", help="put the tree's indexes in the layer, so a run updates them there rather than copying them up"
+    )
     sg.set_defaults(func=cmd_stage)
     fg = sub.add_parser("forget", help="remove the indexes a run over the view put in the tree")
     fg.set_defaults(func=cmd_forget)

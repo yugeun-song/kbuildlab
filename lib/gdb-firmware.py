@@ -18,10 +18,10 @@ def _spans(path):
             raise gdb.GdbError("%s is not an ELF file" % path)
         wide, order = head[4] == 2, "<" if head[5] == 1 else ">"
         if wide:
-            phoff, = struct.unpack_from(order + "Q", head, 32)
+            (phoff,) = struct.unpack_from(order + "Q", head, 32)
             phentsize, phnum = struct.unpack_from(order + "HH", head, 54)
         else:
-            phoff, = struct.unpack_from(order + "I", head, 28)
+            (phoff,) = struct.unpack_from(order + "I", head, 28)
             phentsize, phnum = struct.unpack_from(order + "HH", head, 42)
         out = []
         for i in range(phnum):
@@ -30,11 +30,11 @@ def _spans(path):
             if struct.unpack_from(order + "I", ph, 0)[0] != 1:
                 continue
             if wide:
-                vaddr, = struct.unpack_from(order + "Q", ph, 16)
-                memsz, = struct.unpack_from(order + "Q", ph, 40)
+                (vaddr,) = struct.unpack_from(order + "Q", ph, 16)
+                (memsz,) = struct.unpack_from(order + "Q", ph, 40)
             else:
-                vaddr, = struct.unpack_from(order + "I", ph, 8)
-                memsz, = struct.unpack_from(order + "I", ph, 20)
+                (vaddr,) = struct.unpack_from(order + "I", ph, 8)
+                (memsz,) = struct.unpack_from(order + "I", ph, 20)
             out.append((vaddr, memsz))
     if not out:
         raise gdb.GdbError("%s has no loadable segment" % path)
@@ -65,11 +65,15 @@ def _offset_of(pc):
 def _place(offset):
     if offset in _Firmware.offsets:
         return
-    gdb.execute('add-symbol-file "%s" -o %#x' % (_Firmware.path.replace("\\", "\\\\").replace('"', '\\"'), offset),
-                to_string=True)
+    gdb.execute(
+        'add-symbol-file "%s" -o %#x' % (_Firmware.path.replace("\\", "\\\\").replace('"', '\\"'), offset),
+        to_string=True,
+    )
     _Firmware.offsets.append(offset)
-    gdb.write("firmware symbols placed at %s: %s\n"
-              % ("its link address + %#x as well" % offset if offset else "its link address", _Firmware.path))
+    gdb.write(
+        "firmware symbols placed at %s: %s\n"
+        % ("its link address + %#x as well" % offset if offset else "its link address", _Firmware.path)
+    )
 
 
 def _follow(event=None):
@@ -85,8 +89,8 @@ def _follow(event=None):
 
 class Symbols(gdb.Command):
     """fw-symbols ELF: read the firmware's symbols from ELF at its link address, and
-again where the firmware has moved itself (gd->reloc_off) once it runs there.
-The first copy stays: the image it describes is still in memory."""
+    again where the firmware has moved itself (gd->reloc_off) once it runs there.
+    The first copy stays: the image it describes is still in memory."""
 
     def __init__(self):
         super().__init__("fw-symbols", gdb.COMMAND_FILES, gdb.COMPLETE_FILENAME)
@@ -96,8 +100,10 @@ The first copy stays: the image it describes is still in memory."""
         if not path:
             if _Firmware.path is None:
                 raise gdb.GdbError("fw-symbols ELF")
-            gdb.write("firmware symbols: %s at its link address%s\n" % (
-                _Firmware.path, "".join(" and + %#x" % o for o in _Firmware.offsets if o)))
+            gdb.write(
+                "firmware symbols: %s at its link address%s\n"
+                % (_Firmware.path, "".join(" and + %#x" % o for o in _Firmware.offsets if o))
+            )
             return
         if _Firmware.path is not None and _Firmware.path != path:
             raise gdb.GdbError("fw-symbols: already following %s" % _Firmware.path)
@@ -109,7 +115,7 @@ The first copy stays: the image it describes is still in memory."""
 
 class Relocated(gdb.Command):
     """fw-relocated: run the firmware until it has moved itself and stop at
-board_init_r, the first function it runs there, with its symbols in place."""
+    board_init_r, the first function it runs there, with its symbols in place."""
 
     def __init__(self):
         super().__init__("fw-relocated", gdb.COMMAND_RUNNING)
@@ -125,8 +131,10 @@ board_init_r, the first function it runs there, with its symbols in place."""
             try:
                 gdb.parse_and_eval("&" + name if name != "gd" else "sizeof(*gd)")
             except gdb.error:
-                raise gdb.GdbError("fw-relocated: %s names no %s; it does not move itself the way this follows"
-                                   % (_Firmware.path, name))
+                raise gdb.GdbError(
+                    "fw-relocated: %s names no %s; it does not move itself the way this follows"
+                    % (_Firmware.path, name)
+                )
         gdb.execute("thbreak relocate_code")
         gdb.execute("continue")
         off = _reloc_off()

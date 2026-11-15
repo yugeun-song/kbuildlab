@@ -9,6 +9,7 @@ an overlay from what `kbuildlab dt --json` reports, so nothing here knows a
 machine.  Refuses a tree that already has a device tree of its own.  The guest is
 driven as tests/guest.py drives it, and the same environment variables apply.
 """
+
 import base64
 import importlib.util
 import json
@@ -35,7 +36,14 @@ checked = 0
 def check(ok, what, detail=""):
     global failed, checked
     checked += 1
-    print("%s %s%s" % ("ok  " if ok else "FAIL", what, ("\n     " + str(detail).replace("\n", "\n     ")) if detail and not ok else ""))
+    print(
+        "%s %s%s"
+        % (
+            "ok  " if ok else "FAIL",
+            what,
+            ("\n     " + str(detail).replace("\n", "\n     ")) if detail and not ok else "",
+        )
+    )
     if not ok:
         failed += 1
     return ok
@@ -43,13 +51,19 @@ def check(ok, what, detail=""):
 
 def kbl(*args, timeout=600, stdout_only=False):
     env = dict(os.environ, NO_COLOR="1", VISUAL="", EDITOR="")
-    r = subprocess.run(os.environ.get("KBL_GUEST_PREFIX", "").split() + [KBL, *args], env=env,
-                       capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    r = subprocess.run(
+        os.environ.get("KBL_GUEST_PREFIX", "").split() + [KBL, *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        stdin=subprocess.DEVNULL,
+    )
     return r.returncode, r.stdout if stdout_only and r.returncode == 0 else r.stdout + r.stderr
 
 
 def cells(value, count):
-    return " ".join("0x%x" % ((value >> (32 * (count - 1 - i))) & 0xffffffff) for i in range(count))
+    return " ".join("0x%x" % ((value >> (32 * (count - 1 - i))) & 0xFFFFFFFF) for i in range(count))
 
 
 def main(argv):
@@ -67,7 +81,10 @@ def main(argv):
         return 2
     d = state["directory"]
     if state["in_force"] == "custom" or os.path.exists(os.path.join(d, "custom.dts")):
-        print("dt-guest.py: %s has a device tree of its own in %s; this test would replace it" % (tree, d), file=sys.stderr)
+        print(
+            "dt-guest.py: %s has a device tree of its own in %s; this test would replace it" % (tree, d),
+            file=sys.stderr,
+        )
         return 2
     s = state["structure"]
     memory = next((m for m in s["memory"] if m["reg"] and m["status"] in (None, "okay")), None)
@@ -85,12 +102,18 @@ def main(argv):
             with open(overlay, "w") as f:
                 f.write("/dts-v1/;\n/plugin/;\n&{%s} { reg = <%s>; };\n" % (memory["path"], reg))
             rc, out = kbl("dt", "apply", tree, overlay)
-            if not check(rc == 0 and "attached" in out, "an overlay that halves %s is built and attached" % memory["path"], out):
+            if not check(
+                rc == 0 and "attached" in out, "an overlay that halves %s is built and attached" % memory["path"], out
+            ):
                 return 1
         rc, out = kbl("dt", "check", tree)
         check(rc == 0, "dt check holds before the boot", out)
         rc, out = kbl("dt", "diff", tree)
-        check(rc == 0 and out.count("\n") == 1 and memory["path"] + " reg" in out, "it differs from the base in that reg alone", out)
+        check(
+            rc == 0 and out.count("\n") == 1 and memory["path"] + " reg" in out,
+            "it differs from the base in that reg alone",
+            out,
+        )
         custom = fdt.load(os.path.join(d, "custom.dtb"))
 
         source = os.path.join(d, "custom.dts")
@@ -99,12 +122,20 @@ def main(argv):
         with open(source, "a") as f:
             f.write("\n")
         rc, out = kbl("run", tree, "--run", *options, timeout=120)
-        check(rc != 0 and "changed since" in out, "a source edited after its build is refused before the guest starts", out)
+        check(
+            rc != 0 and "changed since" in out,
+            "a source edited after its build is refused before the guest starts",
+            out,
+        )
         with open(source, "w") as f:
             f.write(kept)
         smp = str(s["cpus"]["count"] + 1)
         rc, out = kbl("run", tree, "--run", "--smp", smp, *options, timeout=120)
-        check(rc != 0 and "is not the one" in out, "a machine with %s CPUs, which the tree was not built for, is refused" % smp, out)
+        check(
+            rc != 0 and "is not the one" in out,
+            "a machine with %s CPUs, which the tree was not built for, is refused" % smp,
+            out,
+        )
 
         g = guest.Guest(tree, options, float(os.environ.get("KBL_GUEST_TIMEOUT", "900")))
         try:
@@ -126,14 +157,23 @@ def main(argv):
         lost = fdt.carried(custom, got)
         check(lost == [], "the kernel's /sys/firmware/fdt carries the attached tree whole", "\n".join(lost))
         node = got.node(memory["path"])
-        check(node is not None and fdt.ranges(node) == [tuple(r) for r in ranges], "its %s is the halved one" % memory["path"])
+        check(
+            node is not None and fdt.ranges(node) == [tuple(r) for r in ranges],
+            "its %s is the halved one" % memory["path"],
+        )
         kb = int(re.search(r"MemTotal:\s+(\d+)", total).group(1))
-        check(half * 0.8 < kb * 1024 <= half, "MemTotal is %d kB: within the %d MiB the tree states, not the %d MiB of the machine"
-              % (kb, half >> 20, whole >> 20))
+        check(
+            half * 0.8 < kb * 1024 <= half,
+            "MemTotal is %d kB: within the %d MiB the tree states, not the %d MiB of the machine"
+            % (kb, half >> 20, whole >> 20),
+        )
         booted = os.path.join(d, "booted.dtb")
         if check(os.path.isfile(booted), "the launcher kept what the kernel was handed (booted.dtb)"):
-            check(fdt.diff(fdt.load(booted), got) == [], "booted.dtb is what the guest's own /sys/firmware/fdt holds",
-                  "\n".join(fdt.diff(fdt.load(booted), got)))
+            check(
+                fdt.diff(fdt.load(booted), got) == [],
+                "booted.dtb is what the guest's own /sys/firmware/fdt holds",
+                "\n".join(fdt.diff(fdt.load(booted), got)),
+            )
         check("was handed" in g.text and "as it is" in g.text, "the launcher says the tree was handed on as it is")
         rc, out = kbl("dt", "check", tree)
         check(rc == 0 and "handed the kernel this tree as it is" in out, "dt check holds after the boot", out)
@@ -143,8 +183,13 @@ def main(argv):
         check(rc == 0 and json.loads(out)["in_force"] != "custom", "detached, the base is in force again", out)
     finally:
         rc, out = kbl("dt", "reset", tree, "--yes")
-        check(rc == 0 and not os.path.exists(os.path.join(d, "custom.dts")) and not os.path.exists(os.path.join(d, "attached")),
-              "reset leaves the tree as it was found", out)
+        check(
+            rc == 0
+            and not os.path.exists(os.path.join(d, "custom.dts"))
+            and not os.path.exists(os.path.join(d, "attached")),
+            "reset leaves the tree as it was found",
+            out,
+        )
     print("%d checks, %s" % (checked, "all hold" if not failed else "%d failed" % failed))
     return 1 if failed else 0
 

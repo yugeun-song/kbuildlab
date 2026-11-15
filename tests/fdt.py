@@ -7,6 +7,7 @@
 
 Blobs are compiled here with dtc; fdtget reads them back as the reference.
 """
+
 import os
 import random
 import shutil
@@ -122,8 +123,9 @@ OVERLAY = r"""
 
 
 def dtc(source, out, *opts):
-    r = subprocess.run(["dtc", "-q", "-I", "dts", "-O", "dtb", *opts, "-o", out, "-"],
-                       input=source.encode(), capture_output=True)
+    r = subprocess.run(
+        ["dtc", "-q", "-I", "dts", "-O", "dtb", *opts, "-o", out, "-"], input=source.encode(), capture_output=True
+    )
     if r.returncode != 0:
         raise SystemExit("dtc failed on a test source: " + r.stderr.decode())
     with open(out, "rb") as f:
@@ -159,13 +161,13 @@ def with_nops(blob):
     off_struct, off_strings = struct.unpack_from(">II", data, 8)
     pos = off_struct
     while True:
-        token, = struct.unpack_from(">I", data, pos)
+        (token,) = struct.unpack_from(">I", data, pos)
         if token == fdt.PROP:
             length, name_off = struct.unpack_from(">II", data, pos + 4)
             end = data.index(b"\0", off_strings + name_off)
             size = 12 + ((length + 3) & ~3)
-            if bytes(data[off_strings + name_off:end]) == b"kaslr-seed":
-                data[pos:pos + size] = struct.pack(">I", fdt.NOP) * (size // 4)
+            if bytes(data[off_strings + name_off : end]) == b"kaslr-seed":
+                data[pos : pos + size] = struct.pack(">I", fdt.NOP) * (size // 4)
                 return bytes(data)
             pos += size
         elif token == fdt.BEGIN_NODE:
@@ -187,44 +189,81 @@ def unit(tmp):
 
     t = fdt.parse(rich)
     check(mine(t) == reference(rich_path), "the parsed tree is what fdtget reads, property for property")
-    check(t.reserve == [(0x80000000, 0x10000), (0xa0000000, 0x200000)], "memory reservations")
+    check(t.reserve == [(0x80000000, 0x10000), (0xA0000000, 0x200000)], "memory reservations")
     check(fdt.diff(t, fdt.parse(padded)) == [], "padding changes nothing")
     check(fdt.identity(t) == fdt.identity(fdt.parse(padded)), "padding keeps the identity")
     check(mine(fdt.parse(bare)) == {"/": {}}, "an empty root")
     check(fdt.parse(rich + b"trailing junk").header["totalsize"] == len(rich), "bytes after the blob are not read")
 
     s = fdt.summary(t)
-    check(s["model"] == "kbuildlab,test" and s["compatible"] == ["kbuildlab,test", "linux,dummy"], "model and compatible")
+    check(
+        s["model"] == "kbuildlab,test" and s["compatible"] == ["kbuildlab,test", "linux,dummy"], "model and compatible"
+    )
     check((s["address_cells"], s["size_cells"]) == (2, 2), "root cells")
     mem = {m["path"]: m for m in s["memory"]}
     check(mem["/memory@40000000"]["reg"] == [(0x40000000, 0x100000000)], "a 4 GiB memory node")
-    check(mem["/memory@200000000"]["reg"] == [(0x200000000, 0x40000000), (0x300000000, 0x10000000)], "two ranges in one reg")
+    check(
+        mem["/memory@200000000"]["reg"] == [(0x200000000, 0x40000000), (0x300000000, 0x10000000)],
+        "two ranges in one reg",
+    )
     check(mem["/memory@200000000"]["usable"] == [(0x200000000, 0x20000000)], "linux,usable-memory")
-    check(mem["/memory@200000000"]["status"] == "disabled" and mem["/memory@40000000"]["numa"] == 0, "memory status and node id")
+    check(
+        mem["/memory@200000000"]["status"] == "disabled" and mem["/memory@40000000"]["numa"] == 0,
+        "memory status and node id",
+    )
     res = {r["path"]: r for r in s["reserved"]}
-    check(res["/reserved-memory/fw@80000000"]["reg"] == [(0x80000000, 0x40000)]
-          and res["/reserved-memory/fw@80000000"]["flags"] == ["no-map"], "a no-map reservation")
-    check(res["/reserved-memory/cma"]["size"] == 0x2000000 and res["/reserved-memory/cma"]["flags"] == ["reusable"]
-          and res["/reserved-memory/cma"]["compatible"] == "shared-dma-pool", "a reservation placed at boot")
-    check(s["cpus"] == {"count": 3, "models": {"arm,cortex-a710": 2, "arm,cortex-a53": 1},
-                        "enable_method": ["psci"], "disabled": 1}, "cpus")
-    check(s["chosen"]["stdout"] == "serial0:115200n8" and s["chosen"]["stdout_node"] == "/soc/uart@9000000",
-          "stdout-path through an alias")
+    check(
+        res["/reserved-memory/fw@80000000"]["reg"] == [(0x80000000, 0x40000)]
+        and res["/reserved-memory/fw@80000000"]["flags"] == ["no-map"],
+        "a no-map reservation",
+    )
+    check(
+        res["/reserved-memory/cma"]["size"] == 0x2000000
+        and res["/reserved-memory/cma"]["flags"] == ["reusable"]
+        and res["/reserved-memory/cma"]["compatible"] == "shared-dma-pool",
+        "a reservation placed at boot",
+    )
+    check(
+        s["cpus"]
+        == {
+            "count": 3,
+            "models": {"arm,cortex-a710": 2, "arm,cortex-a53": 1},
+            "enable_method": ["psci"],
+            "disabled": 1,
+        },
+        "cpus",
+    )
+    check(
+        s["chosen"]["stdout"] == "serial0:115200n8" and s["chosen"]["stdout_node"] == "/soc/uart@9000000",
+        "stdout-path through an alias",
+    )
     check(s["chosen"]["bootargs"] == "console=ttyAMA0", "bootargs")
     check([i["path"] for i in s["interrupt_controllers"]] == ["/intc@8000000"], "interrupt controllers")
     virt = [d for d in s["devices"] if d["compatible"] == "virtio,mmio"]
-    check(sorted((d["count"], d["status"]) for d in virt) == [(1, "disabled"), (2, None)], "siblings of one kind are grouped by status")
+    check(
+        sorted((d["count"], d["status"]) for d in virt) == [(1, "disabled"), (2, None)],
+        "siblings of one kind are grouped by status",
+    )
     check("/soc/virtio@a000400" in s["disabled"] and "/cpus/cpu@2" in s["disabled"], "disabled nodes")
     check(s["depth"] == 6 and s["nodes"] == len(list(t.root.walk())), "depth and node count")
     check(isinstance(fdt.show(s), str) and "4 GiB" in fdt.show(s), "the summary renders")
 
     n = fdt.summary(fdt.parse(nocells))
-    check((n["address_cells"], n["size_cells"]) == (2, 1) and n["memory"][0]["reg"] == [(0x80000000, 0x10000000)],
-          "a root that states no cells reads as 2 and 1")
-    check(fdt.summary(fdt.parse(bare))["memory"] == [] and fdt.show(fdt.summary(fdt.parse(bare))), "an empty tree summarises")
+    check(
+        (n["address_cells"], n["size_cells"]) == (2, 1) and n["memory"][0]["reg"] == [(0x80000000, 0x10000000)],
+        "a root that states no cells reads as 2 and 1",
+    )
+    check(
+        fdt.summary(fdt.parse(bare))["memory"] == [] and fdt.show(fdt.summary(fdt.parse(bare))),
+        "an empty tree summarises",
+    )
 
-    check(fdt.render(b"") == "" and fdt.render(b"a\0") == '"a"' and fdt.render(b"a\0b\0") == '"a", "b"', "strings render")
-    check(fdt.render(b"\0\0\0\x01") == "<0x1>" and fdt.render(b"\x01\x02\x03") == "[01 02 03]", "cells and bytes render")
+    check(
+        fdt.render(b"") == "" and fdt.render(b"a\0") == '"a"' and fdt.render(b"a\0b\0") == '"a", "b"', "strings render"
+    )
+    check(
+        fdt.render(b"\0\0\0\x01") == "<0x1>" and fdt.render(b"\x01\x02\x03") == "[01 02 03]", "cells and bytes render"
+    )
     check(fdt.render(b"\0") == "[00]" and fdt.render(b"a\0\0") == "[61 00 00]", "an empty string is not text")
     check(fdt.render(struct.pack(">20I", *range(20)), 4).endswith("... 20 cells>"), "long values are cut")
     check(fdt.human(1 << 30) == "1 GiB" and fdt.human(3 << 19) == "1.5 MiB" and fdt.human(12) == "12 bytes", "sizes")
@@ -240,44 +279,78 @@ def unit(tmp):
     seeds = variant("kaslr-seed = <0x11111111 0x22222222>;", "kaslr-seed = <0x33333333 0x44444444>;")
     check(fdt.diff(t, seeds) == [] and fdt.identity(t) == fdt.identity(seeds), "another seed is no difference")
     args = variant('bootargs = "console=ttyAMA0";', 'bootargs = "console=ttyS0";')
-    check(len(fdt.diff(t, args)) == 1 and fdt.identity(t) == fdt.identity(args), "/chosen is compared and not part of the identity")
+    check(
+        len(fdt.diff(t, args)) == 1 and fdt.identity(t) == fdt.identity(args),
+        "/chosen is compared and not part of the identity",
+    )
     gone = variant('uart@9000000 { compatible = "arm,pl011", "arm,primecell"; reg = <0x9000000 0x1000>; };', "")
     check(fdt.diff(t, gone) == ["- /soc/uart@9000000 (node)"], "a removed node")
     check(fdt.diff(gone, t) == ["+ /soc/uart@9000000 (node)"], "an added node")
     more = variant("empty-prop;", "empty-prop; added = <7>;")
-    check(fdt.diff(t, more) == ["+ / added: <0x7>"] and fdt.diff(more, t) == ["- / added"], "an added and a removed property")
+    check(
+        fdt.diff(t, more) == ["+ / added: <0x7>"] and fdt.diff(more, t) == ["- / added"],
+        "an added and a removed property",
+    )
     rsv = variant("/memreserve/ 0x00000000a0000000 0x0000000000200000;", "")
     check(len(fdt.diff(t, rsv)) == 1 and fdt.diff(t, rsv)[0].startswith("~ memreserve"), "a changed reservation")
     check(fdt.identity(t) != fdt.identity(rsv), "a reservation is part of the identity")
     moved = variant("    aliases {", "    zz-extra { };\n    aliases {")
     check(fdt.identity(moved) != fdt.identity(t), "another node is another identity")
-    swapped = fdt.parse(dtc(RICH.replace('    model = "kbuildlab,test";\n    compatible = "kbuildlab,test", "linux,dummy";',
-                                         '    compatible = "kbuildlab,test", "linux,dummy";\n    model = "kbuildlab,test";'),
-                            os.path.join(tmp, "s.dtb")))
-    check(fdt.identity(swapped) == fdt.identity(t) and fdt.diff(t, swapped) == [], "the order of properties is not a difference")
+    swapped = fdt.parse(
+        dtc(
+            RICH.replace(
+                '    model = "kbuildlab,test";\n    compatible = "kbuildlab,test", "linux,dummy";',
+                '    compatible = "kbuildlab,test", "linux,dummy";\n    model = "kbuildlab,test";',
+            ),
+            os.path.join(tmp, "s.dtb"),
+        )
+    )
+    check(
+        fdt.identity(swapped) == fdt.identity(t) and fdt.diff(t, swapped) == [],
+        "the order of properties is not a difference",
+    )
 
     nopped = fdt.parse(with_nops(rich))
-    check("kaslr-seed" not in nopped.node("/chosen").props and fdt.diff(t, nopped) == ["- /chosen kaslr-seed"],
-          "a property overwritten with NOPs is gone")
+    check(
+        "kaslr-seed" not in nopped.node("/chosen").props and fdt.diff(t, nopped) == ["- /chosen kaslr-seed"],
+        "a property overwritten with NOPs is gone",
+    )
 
     check(fdt.carried(t, t) == [], "a tree carries itself")
     check(fdt.carried(t, seeds) == [] and fdt.carried(t, nopped) == [], "a loader may replace or drop the seeds")
-    check(fdt.carried(t, args) == ['~ /chosen bootargs: "console=ttyAMA0" -> "console=ttyS0"'],
-          "a loader may not change what the tree states in /chosen")
+    check(
+        fdt.carried(t, args) == ['~ /chosen bootargs: "console=ttyAMA0" -> "console=ttyS0"'],
+        "a loader may not change what the tree states in /chosen",
+    )
     grown = variant("rng-seed = <0x1 0x2 0x3 0x4>;", 'rng-seed = <0x1 0x2 0x3 0x4>; u-boot,version = "x"; sub { p; };')
-    check(fdt.carried(t, grown) == [] and fdt.carried(grown, t) != [], "a loader may add to /chosen, and not take from it")
-    check(fdt.carried(t, half) != [] and fdt.carried(t, more) == ["+ / added: <0x7>"] and fdt.carried(t, gone) != [],
-          "a loader may not touch anything outside /chosen")
-    check(fdt.carried(rsv, t) == [] and len(fdt.carried(t, rsv)) == 1, "a loader may add a reservation, and not drop one")
+    check(
+        fdt.carried(t, grown) == [] and fdt.carried(grown, t) != [], "a loader may add to /chosen, and not take from it"
+    )
+    check(
+        fdt.carried(t, half) != [] and fdt.carried(t, more) == ["+ / added: <0x7>"] and fdt.carried(t, gone) != [],
+        "a loader may not touch anything outside /chosen",
+    )
+    check(
+        fdt.carried(rsv, t) == [] and len(fdt.carried(t, rsv)) == 1, "a loader may add a reservation, and not drop one"
+    )
     nochosen = variant("    chosen {", "    chosen-not {")
-    check(all(line.startswith("- /chosen-not") or line.startswith("+ /chosen-not") or "chosen" in line
-              for line in fdt.carried(nochosen, t)), "a tree without /chosen is given one")
+    check(
+        all(
+            line.startswith("- /chosen-not") or line.startswith("+ /chosen-not") or "chosen" in line
+            for line in fdt.carried(nochosen, t)
+        ),
+        "a tree without /chosen is given one",
+    )
 
     check(fdt.is_overlay(fdt.parse(overlay)) and not fdt.is_overlay(t), "an overlay is told from a tree")
 
     img = os.path.join(tmp, "Image")
-    for magic, size, want in ((b"ARM\x64", 0x3960000, 0x3960000), (b"RSC\x05", 0x2f75000, 0x2f75000),
-                              (b"ARM\x64", 0, None), (b"MZ\0\0", 0x1000, None)):
+    for magic, size, want in (
+        (b"ARM\x64", 0x3960000, 0x3960000),
+        (b"RSC\x05", 0x2F75000, 0x2F75000),
+        (b"ARM\x64", 0, None),
+        (b"MZ\0\0", 0x1000, None),
+    ):
         with open(img, "wb") as f:
             f.write(b"\0" * 16 + struct.pack("<Q", size) + b"\0" * 32 + magic + b"\0" * 4)
         check(fdt.image_size(img) == want, "the image size of a %r header stating %#x" % (magic, size))
@@ -285,8 +358,13 @@ def unit(tmp):
         f.write(b"short")
     check(fdt.image_size(img) is None, "a file shorter than an image header")
 
-    for bad, why in ((b"", "empty"), (rich[:39], "a cut header"), (b"\0" * 64, "no magic"),
-                     (rich[:len(rich) - 8], "a cut blob"), (rich[:8] + struct.pack(">I", 2 ** 31) + rich[12:], "a structure offset past the end")):
+    for bad, why in (
+        (b"", "empty"),
+        (rich[:39], "a cut header"),
+        (b"\0" * 64, "no magic"),
+        (rich[: len(rich) - 8], "a cut blob"),
+        (rich[:8] + struct.pack(">I", 2**31) + rich[12:], "a structure offset past the end"),
+    ):
         try:
             fdt.parse(bad)
             check(False, "%s is refused" % why)
@@ -298,17 +376,25 @@ def unit(tmp):
     to = twice.index(b"compatible\0", off_strings) - off_strings
     hit = twice.index(struct.pack(">I", to), off_struct)
     struct.pack_into(">I", twice, hit, at)
-    for bad, why in ((bytes(twice), "a property stated twice"),
-                     (dtc(RICH, os.path.join(tmp, "d.dtb")).replace(b"virtio@a000200", b"virtio@a000000"), "two nodes of one name")):
+    for bad, why in (
+        (bytes(twice), "a property stated twice"),
+        (dtc(RICH, os.path.join(tmp, "d.dtb")).replace(b"virtio@a000200", b"virtio@a000000"), "two nodes of one name"),
+    ):
         try:
             fdt.parse(bad)
             check(False, "%s is refused" % why)
         except fdt.FdtError:
             check(True, why)
-    first = fdt.parse(dtc(RICH.replace("    chosen {", "    chosen@1 { early; };\n    chosen {"), os.path.join(tmp, "c.dtb")))
-    check(first.node("/chosen").name == "chosen@1" and first.node("/chosen@1") is not None
-          and first.node("/soc/uart").name == "uart@9000000" and first.node("/nope") is None,
-          "a path finds the first node of that name, with or without its unit address, as libfdt does")
+    first = fdt.parse(
+        dtc(RICH.replace("    chosen {", "    chosen@1 { early; };\n    chosen {"), os.path.join(tmp, "c.dtb"))
+    )
+    check(
+        first.node("/chosen").name == "chosen@1"
+        and first.node("/chosen@1") is not None
+        and first.node("/soc/uart").name == "uart@9000000"
+        and first.node("/nope") is None,
+        "a path finds the first node of that name, with or without its unit address, as libfdt does",
+    )
     old = bytearray(rich)
     struct.pack_into(">I", old, 20, 16)
     try:
@@ -321,13 +407,20 @@ def unit(tmp):
 
 def deep(levels):
     name = b"n\0\0\0"
-    body = (struct.pack(">I", fdt.BEGIN_NODE) + b"\0\0\0\0"
-            + (struct.pack(">I", fdt.BEGIN_NODE) + name) * levels
-            + struct.pack(">I", fdt.END_NODE) * (levels + 1) + struct.pack(">I", fdt.END))
+    body = (
+        struct.pack(">I", fdt.BEGIN_NODE)
+        + b"\0\0\0\0"
+        + (struct.pack(">I", fdt.BEGIN_NODE) + name) * levels
+        + struct.pack(">I", fdt.END_NODE) * (levels + 1)
+        + struct.pack(">I", fdt.END)
+    )
     off_struct = fdt.HEADER + 16
     total = off_struct + len(body)
-    return struct.pack(">10I", fdt.MAGIC, total, off_struct, total, fdt.HEADER, 17, 16, 0, 0, len(body)) \
-        + b"\0" * 16 + body
+    return (
+        struct.pack(">10I", fdt.MAGIC, total, off_struct, total, fdt.HEADER, 17, 16, 0, 0, len(body))
+        + b"\0" * 16
+        + body
+    )
 
 
 def exercise(data):
@@ -355,25 +448,41 @@ def damage(rng, blob):
             data[rng.randrange(len(data))] ^= 1 << rng.randrange(8)
     elif kind == 1:
         at = rng.randrange(len(data))
-        data[at:at + rng.randint(1, 16)] = bytes(rng.randrange(256) for _ in range(rng.randint(1, 16)))
+        data[at : at + rng.randint(1, 16)] = bytes(rng.randrange(256) for _ in range(rng.randint(1, 16)))
     elif kind == 2:
-        del data[rng.randrange(len(data)):]
+        del data[rng.randrange(len(data)) :]
     elif kind == 3:
-        struct.pack_into(">I", data, 4 * rng.randrange(10), rng.choice(
-            [0, 1, 0x28, 0xffffffff, 0x7fffffff, len(data), len(data) + 1, rng.randrange(1 << 32), rng.randrange(len(data) + 1)]))
+        struct.pack_into(
+            ">I",
+            data,
+            4 * rng.randrange(10),
+            rng.choice(
+                [
+                    0,
+                    1,
+                    0x28,
+                    0xFFFFFFFF,
+                    0x7FFFFFFF,
+                    len(data),
+                    len(data) + 1,
+                    rng.randrange(1 << 32),
+                    rng.randrange(len(data) + 1),
+                ]
+            ),
+        )
     elif kind == 4:
         off_struct = min(struct.unpack_from(">I", data, 8)[0], len(data) - 4)
         at = min(len(data) - 4, off_struct + 4 * rng.randrange(max(1, (len(data) - off_struct) // 4)))
-        struct.pack_into(">I", data, at, rng.choice([1, 2, 3, 4, 9, 0, 5, 0xffffffff, rng.randrange(1 << 32)]))
+        struct.pack_into(">I", data, at, rng.choice([1, 2, 3, 4, 9, 0, 5, 0xFFFFFFFF, rng.randrange(1 << 32)]))
     elif kind == 5:
         at = rng.randrange(len(data))
         data[at:at] = bytes(rng.randrange(256) for _ in range(rng.randint(1, 64)))
     elif kind == 6:
         at = rng.randrange(len(data))
-        del data[at:at + rng.randint(1, 64)]
+        del data[at : at + rng.randint(1, 64)]
     elif kind == 7:
         at = rng.randrange(len(data))
-        data[at:at + 4] = struct.pack(">I", rng.choice([0xffffffff, 0x80000000, 0x7ffffffc, len(data) * 2]))
+        data[at : at + 4] = struct.pack(">I", rng.choice([0xFFFFFFFF, 0x80000000, 0x7FFFFFFC, len(data) * 2]))
     else:
         a, b = sorted((rng.randrange(len(data)), rng.randrange(len(data))))
         data[a:b] = data[a:b][::-1]
@@ -397,8 +506,10 @@ def fuzz(blobs, count, seed):
             check(False, "damaged blob %d of seed %d raised %s: %s (kept as %s)" % (i, seed, type(e).__name__, e, path))
             return
     check(True, "fuzz")
-    print("fuzz: %d damaged blobs from seed %d, %d still well formed, none raised anything but FdtError"
-          % (count, seed, accepted))
+    print(
+        "fuzz: %d damaged blobs from seed %d, %d still well formed, none raised anything but FdtError"
+        % (count, seed, accepted)
+    )
 
 
 def main(argv):

@@ -70,9 +70,11 @@ with tempfile.TemporaryDirectory() as k:
 
     for t in want:
         bo.forget(k, t)
-    check("forgotten with their records",
-          [os.path.exists(os.path.join(k, p)) for p in ("a/off.o", "a/.off.o.cmd", "a/live.o", "a/.live.o.cmd")],
-          [False, False, True, True])
+    check(
+        "forgotten with their records",
+        [os.path.exists(os.path.join(k, p)) for p in ("a/off.o", "a/.off.o.cmd", "a/live.o", "a/.live.o.cmd")],
+        [False, False, True, True],
+    )
     check("nothing else is stale", bo.stale_outputs(k), [])
 
     os.unlink(os.path.join(k, "vmlinux.a"))
@@ -105,7 +107,11 @@ make[2]: *** [scripts/Makefile.build:544: a] Error 2
 make[1]: *** No rule to make target 'a/old.h', needed by 'a/forced.o'.  Stop.
 /usr/bin/aarch64-linux-gnu-ld.bfd: vmlinux.a: member b/linked.o in archive is not an object
 """
-    check("what a failure names, generated only", bo.failed_outputs(k, log), ["a/bad.o", "b/linked.o", "include/generated/foo.h"])
+    check(
+        "what a failure names, generated only",
+        bo.failed_outputs(k, log),
+        ["a/bad.o", "b/linked.o", "include/generated/foo.h"],
+    )
     check("what lies beside it, recorded only", bo.failed_directories(k, log), ["a/bad.o", "a/beside.o"])
     record(k, "top.o", "gcc -c -o top.o top.c")
     os.makedirs(os.path.join(k, "a/sub"), exist_ok=True)
@@ -119,5 +125,9 @@ with tempfile.TemporaryDirectory() as k:
     log = "make[3]: *** [scripts/Makefile.build:287: a/bad.o] Error 1\n"
     check("no git, nothing given up", bo.failed_outputs(k, log), [])
 
-print("build-outputs: stale outputs and what a failure names are told apart" if not failed else f"build-outputs: {failed} failed")
+print(
+    "build-outputs: stale outputs and what a failure names are told apart"
+    if not failed
+    else f"build-outputs: {failed} failed"
+)
 sys.exit(1 if failed else 0)

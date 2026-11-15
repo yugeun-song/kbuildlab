@@ -7,6 +7,7 @@ TREE is a registered tree that boots through U-Boot; its kernel image and its
 firmware are borrowed, read-only, by a copy of the tree in a registry of this
 test's own.  Every call must end with kbuildlab's message before a guest starts.
 """
+
 import os
 import re
 import subprocess
@@ -16,8 +17,10 @@ import tempfile
 here = os.path.dirname(os.path.abspath(__file__))
 repo = os.path.dirname(here)
 KBL = os.path.join(repo, "bin", "kbuildlab")
-SHELL_ERROR = re.compile(r"unbound variable|syntax error|command not found|bad substitution|"
-                         r"ambiguous redirect|integer expression|Traceback")
+SHELL_ERROR = re.compile(
+    r"unbound variable|syntax error|command not found|bad substitution|"
+    r"ambiguous redirect|integer expression|Traceback"
+)
 ID = "e" * 16
 failed = 0
 checked = 0
@@ -48,8 +51,14 @@ def main(argv):
     firmware = re.search(r"^\s*image\s+(\S+)", real("firmware", tree), re.M).group(1)
     load, ramdisk = real("get", tree, "UBOOT_LOADADDR"), real("get", tree, "UBOOT_RDADDR")
     with tempfile.TemporaryDirectory() as root:
-        env = dict(os.environ, XDG_CONFIG_HOME=os.path.join(root, "config"), XDG_DATA_HOME=os.path.join(root, "data"),
-                   KBL_STATE_DIR=root, KBL_LAB=os.path.join(root, "lab"), NO_COLOR="1")
+        env = dict(
+            os.environ,
+            XDG_CONFIG_HOME=os.path.join(root, "config"),
+            XDG_DATA_HOME=os.path.join(root, "data"),
+            KBL_STATE_DIR=root,
+            KBL_LAB=os.path.join(root, "lab"),
+            NO_COLOR="1",
+        )
         env.pop("KBL_WORKSPACE", None)
         d = os.path.join(root, "config", "kbuildlab", "trees", ID)
         os.makedirs(d)
@@ -57,24 +66,37 @@ def main(argv):
         image = os.path.join(real("inspect", tree, "--format", "src"), real("get", tree, "KERNEL_IMAGE_REL"))
         with open(disk, "wb") as f:
             f.truncate(os.path.getsize(image) + (16 << 20))
-        subprocess.run(["sfdisk", disk], input=b"label: dos\nstart=2048, type=0c, bootable\n", check=True,
-                       capture_output=True)
+        subprocess.run(
+            ["sfdisk", disk], input=b"label: dos\nstart=2048, type=0c, bootable\n", check=True, capture_output=True
+        )
         subprocess.run(["mformat", "-i", disk + "@@1M", "-v", "KBLBOOT", "::"], check=True, capture_output=True)
         initrd = os.path.join(root, "initrd")
         with open(initrd, "wb") as f:
             f.write(b"\0" * 4096)
-        keep = [line for line in conf.splitlines()
-                if not re.match(r"\s*(UBOOT_FDTADDR|BOOTDISK|ROOT|PERSIST|INITRD|MEM|RAM_BASE)\s*=", line)]
+        keep = [
+            line
+            for line in conf.splitlines()
+            if not re.match(r"\s*(UBOOT_FDTADDR|BOOTDISK|ROOT|PERSIST|INITRD|MEM|RAM_BASE)\s*=", line)
+        ]
         machine, cpu = real("get", tree, "MACHINE"), real("get", tree, "CPU")
 
         def run(fdtaddr, *args, expect, extra=""):
             global failed, checked
             checked += 1
             with open(os.path.join(d, "tree.conf"), "w") as f:
-                f.write(extra + "\n".join(keep) + "\nBOOTDISK=%s\nMEM=1G\n%s" % (
-                    disk, ("UBOOT_FDTADDR=%s\n" % fdtaddr) if fdtaddr else ""))
-            r = subprocess.run([KBL, "run", ID, "--bios", firmware, "--no-initrd", *args], env=env,
-                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+                f.write(
+                    extra
+                    + "\n".join(keep)
+                    + "\nBOOTDISK=%s\nMEM=1G\n%s" % (disk, ("UBOOT_FDTADDR=%s\n" % fdtaddr) if fdtaddr else "")
+                )
+            r = subprocess.run(
+                [KBL, "run", ID, "--bios", firmware, "--no-initrd", *args],
+                env=env,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+            )
             out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.stdout + r.stderr)
             why = []
             if r.returncode == 0:
@@ -86,15 +108,17 @@ def main(argv):
                 why.append("a shell error (%s)" % m.group(0))
             if why:
                 failed += 1
-                print("FAIL UBOOT_FDTADDR=%s run %s: %s\n     %s" % (fdtaddr, " ".join(args), ", ".join(why),
-                                                                    out.strip().replace("\n", "\n     ")[-700:]))
+                print(
+                    "FAIL UBOOT_FDTADDR=%s run %s: %s\n     %s"
+                    % (fdtaddr, " ".join(args), ", ".join(why), out.strip().replace("\n", "\n     ")[-700:])
+                )
 
         good = dtc('/dts-v1/;\n/ { model = "t"; };\n', os.path.join(root, "good.dtb"))
         args = dtc('/dts-v1/;\n/ { chosen { bootargs = "x"; }; };\n', os.path.join(root, "args.dtb"))
         junk = os.path.join(root, "junk.dtb")
         with open(junk, "wb") as f:
             f.write(b"\xd0\x0d\xfe\xed" + b"\xff" * 60)
-        base = int(load, 16) & ~0xfffffff
+        base = int(load, 16) & ~0xFFFFFFF
         free = "%#x" % (base + (512 << 20))
 
         run(free, "--dtb", os.path.join(root, "missing.dtb"), expect="--dtb: no file")
@@ -117,8 +141,14 @@ def main(argv):
             checked += 1
             with open(os.path.join(d, "tree.conf"), "w") as f:
                 f.write("\n".join(keep) + "\nBOOTDISK=%s\nMEM=1G\nUBOOT_FDTADDR=%s\n" % (disk, fdtaddr))
-            r = subprocess.run([KBL, "run", ID, "--bios", firmware, "--initrd", initrd, "--dtb", good], env=env,
-                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+            r = subprocess.run(
+                [KBL, "run", ID, "--bios", firmware, "--initrd", initrd, "--dtb", good],
+                env=env,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+            )
             out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", r.stdout + r.stderr)
             if r.returncode == 0 or expect not in out or SHELL_ERROR.search(out):
                 failed += 1

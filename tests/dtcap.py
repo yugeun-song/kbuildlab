@@ -2,6 +2,7 @@
 """Hold lib/dtcap.py against a monitor that misbehaves: a stand-in QMP server
 serves `pmemsave` from a memory image that this test changes while dtcap polls.
 No guest is started."""
+
 import json
 import os
 import socket
@@ -73,7 +74,7 @@ class Monitor(threading.Thread):
                     continue
                 a = msg["arguments"]
                 with open(a["filename"], "wb") as f:
-                    f.write(bytes(self.memory[a["val"]:a["val"] + a["size"]]))
+                    f.write(bytes(self.memory[a["val"] : a["val"] + a["size"]]))
             conn.sendall(b'{"return": {}}\r\n')
 
     def close(self):
@@ -84,8 +85,13 @@ class Monitor(threading.Thread):
 def blob(tmp, bootargs=None, name="t.dtb"):
     chosen = ' chosen { bootargs = "%s"; };' % bootargs if bootargs is not None else ""
     path = os.path.join(tmp, name)
-    subprocess.run(["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", path, "-"], check=True,
-                   input=('/dts-v1/;\n/ { model = "t";%s memory@0 { device_type = "memory"; reg = <0 0x100>; }; };\n' % chosen).encode())
+    subprocess.run(
+        ["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", path, "-"],
+        check=True,
+        input=(
+            '/dts-v1/;\n/ { model = "t";%s memory@0 { device_type = "memory"; reg = <0 0x100>; }; };\n' % chosen
+        ).encode(),
+    )
     with open(path, "rb") as f:
         return f.read()
 
@@ -99,8 +105,27 @@ def capture(tmp, memory, *options, step=None, mode="", timeout="6"):
     mon = Monitor(sock, memory, step, mode)
     mon.start()
     try:
-        r = subprocess.run([sys.executable, "-I", DTCAP, "--qmp", sock, "--addr", hex(ADDR), "--limit", "65536",
-                            "--out", out, "--timeout", timeout, *options], capture_output=True, text=True, timeout=60)
+        r = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                DTCAP,
+                "--qmp",
+                sock,
+                "--addr",
+                hex(ADDR),
+                "--limit",
+                "65536",
+                "--out",
+                out,
+                "--timeout",
+                timeout,
+                *options,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
     finally:
         mon.close()
     data = None
@@ -113,7 +138,7 @@ def capture(tmp, memory, *options, step=None, mode="", timeout="6"):
 
 def image(data, size=1 << 16):
     m = bytearray(size)
-    m[ADDR:ADDR + len(data)] = data
+    m[ADDR : ADDR + len(data)] = data
     return m
 
 
@@ -122,7 +147,10 @@ def main():
         plain, args, other = blob(tmp), blob(tmp, "console=x root=y"), blob(tmp, "console=other")
 
         rc, data, reads, left, err = capture(tmp, image(plain))
-        check(rc == 0 and data == plain and not left, "a tree that stands still is copied whole, and nothing is left beside it: %s" % err)
+        check(
+            rc == 0 and data == plain and not left,
+            "a tree that stands still is copied whole, and nothing is left beside it: %s" % err,
+        )
         check(reads >= 4, "it is read twice before it is believed (%d reads)" % reads)
 
         rc, data, _, left, _ = capture(tmp, bytearray(1 << 16), timeout="1.5")
@@ -130,20 +158,23 @@ def main():
 
         def appear(n, memory):
             if n == 5:
-                memory[ADDR:ADDR + len(plain)] = plain
+                memory[ADDR : ADDR + len(plain)] = plain
+
         rc, data, _, _, _ = capture(tmp, bytearray(1 << 16), step=appear)
         check(rc == 0 and data == plain, "a tree that appears later is waited for")
 
         def growing(n, memory):
             if n <= 12:
-                part = plain[:max(40, len(plain) * n // 12)]
-                memory[ADDR:ADDR + len(plain)] = part + b"\0" * (len(plain) - len(part))
+                part = plain[: max(40, len(plain) * n // 12)]
+                memory[ADDR : ADDR + len(plain)] = part + b"\0" * (len(plain) - len(part))
+
         rc, data, _, _, _ = capture(tmp, bytearray(1 << 16), step=growing)
         check(rc == 0 and data == plain, "a tree still being written is not taken half-written")
 
         def rewritten(n, memory):
             if n == 7:
-                memory[ADDR:ADDR + len(args)] = args
+                memory[ADDR : ADDR + len(args)] = args
+
         rc, data, _, _, _ = capture(tmp, image(other), "--bootargs", "console=x root=y", step=rewritten)
         check(rc == 0 and data == args, "with --bootargs, the tree is taken only once its /chosen says that")
         rc, data, _, _, _ = capture(tmp, image(other), "--bootargs", "console=x root=y", timeout="1.5")
@@ -152,7 +183,8 @@ def main():
         check(rc == 1 and data is None, "a tree without /chosen is never taken when bootargs are asked for")
 
         def flicker(n, memory):
-            memory[ADDR + 8 + (n % 2)] ^= 0xff if n < 9 else 0
+            memory[ADDR + 8 + (n % 2)] ^= 0xFF if n < 9 else 0
+
         rc, data, _, _, _ = capture(tmp, image(plain), step=flicker)
         check(rc == 0 and data == plain, "a tree that keeps changing is taken only when two reads agree")
 
@@ -161,14 +193,20 @@ def main():
         rc, data, reads, _, _ = capture(tmp, image(bytes(huge)), timeout="1.5")
         check(rc == 1 and data is None, "a header that states more than the limit is not followed")
         bad = bytearray(plain)
-        struct.pack_into(">I", bad, 8, 0x7fffffff)
+        struct.pack_into(">I", bad, 8, 0x7FFFFFFF)
         rc, data, _, _, _ = capture(tmp, image(bytes(bad)), timeout="1.5")
         check(rc == 1 and data is None, "a blob that does not parse is not taken")
 
-        for mode, what in (("error", "a monitor that answers with an error"), ("hangup", "a monitor that hangs up"),
-                           ("silent", "a monitor that greets and says no more")):
+        for mode, what in (
+            ("error", "a monitor that answers with an error"),
+            ("hangup", "a monitor that hangs up"),
+            ("silent", "a monitor that greets and says no more"),
+        ):
             rc, data, _, left, err = capture(tmp, image(plain), mode=mode, timeout="2.5")
-            check(rc == 1 and data is None and not left and "Traceback" not in err, "%s ends in a timeout: %s" % (what, err[-200:]))
+            check(
+                rc == 1 and data is None and not left and "Traceback" not in err,
+                "%s ends in a timeout: %s" % (what, err[-200:]),
+            )
         rc, data, _, _, err = capture(tmp, image(plain), mode="events")
         check(rc == 0 and data == plain, "events between the replies are passed over: %s" % err[-200:])
 

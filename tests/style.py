@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Hold a checkout to its formatters: shfmt lays out the shell and ruff the
+Python, each by the settings the checkout carries (.editorconfig, ruff.toml).
+
+    style.py [DIR]
+
+DIR is the checkout to hold, this one when omitted.  Nothing is written: run
+`shfmt -w .` and `ruff format .` in the checkout to put right what this reports.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+failed = 0
+checked = 0
+
+
+def check(ok, what, detail=""):
+    global failed, checked
+    checked += 1
+    if not ok:
+        failed += 1
+        print("FAIL " + what + ("\n     " + detail.strip().replace("\n", "\n     ") if detail.strip() else ""))
+
+
+def run(root, *cmd):
+    r = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def formatted(root):
+    rc, out, err = run(root, "shfmt", "-f", ".")
+    shells = out.split()
+    check(rc == 0 and shells, "shfmt finds the shell files of %s" % root, err)
+    rc, out, err = run(root, "shfmt", "-l", ".")
+    check(rc == 0 and not out.strip() and not err.strip(), "shfmt would change no shell file", out + err)
+    rc, out, err = run(root, "ruff", "format", "--no-cache", "--check", "--output-format", "concise", ".")
+    check(rc == 0, "ruff would change no Python file", out + err)
+    return len(shells)
+
+
+def main(argv):
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    root = os.path.abspath(argv[0]) if argv else os.path.dirname(here)
+    for tool in ("shfmt", "ruff"):
+        if shutil.which(tool) is None:
+            print("style.py: %s is not installed" % tool, file=sys.stderr)
+            return 2
+    for name in (".editorconfig", "ruff.toml"):
+        check(os.path.isfile(os.path.join(root, name)), "%s carries %s" % (root, name))
+    shells = formatted(root)
+    print(
+        "%d checks on %s (%d shell files), %s"
+        % (checked, root, shells, "all hold" if not failed else "%d failed" % failed)
+    )
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

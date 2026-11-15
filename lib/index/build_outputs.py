@@ -6,6 +6,7 @@ config change or a sync keeps its .cmd, and whatever reads those records takes
 it for part of the build.  A wrong removal costs one recompile, because make
 rebuilds whatever it still needs; a source file is never touched.
 """
+
 from __future__ import annotations
 
 import os
@@ -56,9 +57,12 @@ def thin_members(ksrc: str, archive: str) -> list[str] | None:
     at = data.find(b"//")
     if at < 0:
         return []
-    names = data[at + 60:at + 60 + int(data[at + 48:at + 58])]
-    return [os.path.normpath(os.path.join(os.path.dirname(archive), n.decode("latin1")))
-            for n in names.split(b"/\n") if n.strip()]
+    names = data[at + 60 : at + 60 + int(data[at + 48 : at + 58])]
+    return [
+        os.path.normpath(os.path.join(os.path.dirname(archive), n.decode("latin1")))
+        for n in names.split(b"/\n")
+        if n.strip()
+    ]
 
 
 def words(text: str) -> list[str]:
@@ -135,8 +139,12 @@ def generated(ksrc: str, paths: set[str]) -> set[str]:
     a tree git cannot answer for gives up nothing."""
     if not paths:
         return set()
-    r = subprocess.run(["git", "-C", ksrc, "check-ignore", "--stdin", "-z"],
-                       input="\0".join(sorted(paths)) + "\0", capture_output=True, text=True)
+    r = subprocess.run(
+        ["git", "-C", ksrc, "check-ignore", "--stdin", "-z"],
+        input="\0".join(sorted(paths)) + "\0",
+        capture_output=True,
+        text=True,
+    )
     return {p for p in r.stdout.split("\0") if p} if r.returncode in (0, 1) else set()
 
 
@@ -150,15 +158,19 @@ def failed_outputs(ksrc: str, log: str) -> list[str]:
         if not PROGRESS.match(line) and "warning:" not in line:
             hits += OBJECT.findall(line)
         named |= {os.path.normpath(h) for h in hits}
-    files = {n for n in named if not os.path.isabs(n) and not n.startswith("..")
-             and os.path.isfile(os.path.join(ksrc, n))}
+    files = {
+        n for n in named if not os.path.isabs(n) and not n.startswith("..") and os.path.isfile(os.path.join(ksrc, n))
+    }
     return sorted(generated(ksrc, files))
 
 
 def failed_directories(ksrc: str, log: str) -> list[str]:
     """Every output kbuild recorded beside what a failed build could not make."""
-    dirs = {os.path.dirname(os.path.normpath(t)) for t in FAILED_TARGET.findall(log)
-            if not os.path.isdir(os.path.join(ksrc, t))}
+    dirs = {
+        os.path.dirname(os.path.normpath(t))
+        for t in FAILED_TARGET.findall(log)
+        if not os.path.isdir(os.path.join(ksrc, t))
+    }
     dirs.discard("")
     if not dirs:
         return []

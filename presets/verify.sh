@@ -11,13 +11,16 @@ set -uo pipefail
 
 CONFIG="${1:?usage: verify.sh <.config> <fragment> [fragment...]}"
 shift
-[[ -r "$CONFIG" ]] || { echo "verify: cannot read $CONFIG" >&2; exit 2; }
+[[ -r "$CONFIG" ]] || {
+    echo "verify: cannot read $CONFIG" >&2
+    exit 2
+}
 
 fail=0
 checked=0
 absent=0
 
-state() {   # state SYMBOL -> the line as .config has it, or ""
+state() { # state SYMBOL -> the line as .config has it, or ""
     grep -E "^(CONFIG_$1=|# CONFIG_$1 is not set)" "$CONFIG" | head -1
 }
 
@@ -35,17 +38,22 @@ state() {   # state SYMBOL -> the line as .config has it, or ""
 # the cost is a handful of greps rather than one per preset line.
 SRC="$(cd -P "$(dirname "$CONFIG")" && pwd)"
 symbol_exists() {
-    [ -d "$SRC/arch" ] || return 0        # not a kernel tree: cannot tell, assume it does
+    [ -d "$SRC/arch" ] || return 0 # not a kernel tree: cannot tell, assume it does
     grep -rlqE "^[[:space:]]*(menu)?config[[:space:]]+$1([[:space:]]|\$)" \
         --include='Kconfig*' "$SRC" 2>/dev/null
 }
 
 for frag in "$@"; do
-    [[ -r "$frag" ]] || { echo "verify: cannot read $frag" >&2; exit 2; }
+    [[ -r "$frag" ]] || {
+        echo "verify: cannot read $frag" >&2
+        exit 2
+    }
     while IFS= read -r line; do
         case "$line" in
             CONFIG_*=*)
-                sym="${line%%=*}"; sym="${sym#CONFIG_}"; want="${line#*=}"
+                sym="${line%%=*}"
+                sym="${sym#CONFIG_}"
+                want="${line#*=}"
                 checked=$((checked + 1))
                 got="$(state "$sym")"
                 if [[ -z "$got" ]]; then
@@ -65,7 +73,8 @@ for frag in "$@"; do
                 fi
                 ;;
             "# CONFIG_"*" is not set")
-                sym="${line#\# CONFIG_}"; sym="${sym% is not set}"
+                sym="${line#\# CONFIG_}"
+                sym="${sym% is not set}"
                 checked=$((checked + 1))
                 got="$(state "$sym")"
                 if [[ -n "$got" && "$got" != "# CONFIG_$sym is not set" ]]; then
@@ -77,7 +86,7 @@ for frag in "$@"; do
                 # this architecture at all, which is the same outcome as off
                 ;;
         esac
-    done < "$frag"
+    done <"$frag"
 done
 
 if [[ $fail -gt 0 ]]; then

@@ -136,9 +136,9 @@ USAGE
 }
 
 # ---------------------------------------------------------------- run / attach
-cmd_run()    { exec "${KBL_REPO}/lib/run-qemu.sh" "$@"; }
+cmd_run() { exec "${KBL_REPO}/lib/run-qemu.sh" "$@"; }
 cmd_attach() { exec "${KBL_REPO}/lib/run-gdb.sh" "$@"; }
-cmd_drgn()   { exec "${KBL_REPO}/lib/run-drgn.sh" "$@"; }
+cmd_drgn() { exec "${KBL_REPO}/lib/run-drgn.sh" "$@"; }
 cmd_resume() { exec "${KBL_REPO}/lib/resume.sh" "$@"; }
 
 # ---------------------------------------------------------------- help
@@ -155,9 +155,12 @@ _kbl_wants_help() {
     return 1
 }
 cmd_help() {
-    [[ $# -gt 0 ]] || { usage; return 0; }
+    [[ $# -gt 0 ]] || {
+        usage
+        return 0
+    }
     case "$1" in
-        run|attach|drgn|resume) "cmd_$1" --help ;;
+        run | attach | drgn | resume) "cmd_$1" --help ;;
         *) _kbl_cli help "$1" ;;
     esac
 }
@@ -173,10 +176,10 @@ _kbl_release() {
         for p in /proc/[0-9]*; do
             p="${p#/proc/}"
             [[ "$p" != "$$" && "$p" != "$BASHPID" ]] || continue
-            mapfile -d '' -t env 2>/dev/null < "/proc/$p/environ" || continue
+            mapfile -d '' -t env 2>/dev/null <"/proc/$p/environ" || continue
             [[ " ${env[*]-} " == *" KBL_RUN_ID=$KBL_RUN_ID "* ]] || continue
             case "$(cat "/proc/$p/comm" 2>/dev/null)" in
-                conmon|catatonit|pasta*|passt*|slirp4netns) ;;
+                conmon | catatonit | pasta* | passt* | slirp4netns) ;;
                 *) kill "$p" 2>/dev/null ;;
             esac
         done
@@ -210,7 +213,7 @@ _kbl_lock() {
         flock "$_kbl_lock_fd" &
         wait $! || die "cannot lock $lock"
     fi
-    printf 'kbuildlab %s (pid %s, since %s)\n' "$*" "$$" "$(date +%H:%M)" > "$lock"
+    printf 'kbuildlab %s (pid %s, since %s)\n' "$*" "$$" "$(date +%H:%M)" >"$lock"
     export _KBL_LOCKED=1
 }
 
@@ -218,56 +221,64 @@ _kbl_lock() {
 # Braced and ended with exit, so bash has read all of it before running any:
 # editing this file during a long update cannot change what runs after it.
 {
-cmd="${1:-help}"; shift || true
-case "$cmd" in
-    run|attach|drgn|resume|help|-h|--help|__complete) ;;
-    *) if _kbl_wants_help "$@"; then _kbl_cli help "$cmd"; exit; fi ;;
-esac
-_writes=0
-case "$cmd" in
-    sync|config|build|tags|update|image|rm|mv|prune) _writes=1 ;;
-    firmware) case " $* " in *" update "*|*" build "*|*" own "*) _writes=1 ;; esac ;;
-esac
-if [[ $_writes -eq 1 && -z ${_KBL_LOCKED-} ]]; then
-    # In the environment from the start, so that /proc shows it for every
-    # process of the run: a forked shell has only what its program began with.
-    [[ ${KBL_RUN_ID-} == "$$" ]] || KBL_RUN_ID=$$ exec bash "$0" "$cmd" "$@"
-    _kbl_hold
-    _kbl_lock "$cmd" "$@"
-    { : <&0; } 2>/dev/null || exec 0</dev/null
-    "cmd_$cmd" "$@" <&0 &
-    wait $!
+    cmd="${1:-help}"
+    shift || true
+    case "$cmd" in
+        run | attach | drgn | resume | help | -h | --help | __complete) ;;
+        *) if _kbl_wants_help "$@"; then
+            _kbl_cli help "$cmd"
+            exit
+        fi ;;
+    esac
+    _writes=0
+    case "$cmd" in
+        sync | config | build | tags | update | image | rm | mv | prune) _writes=1 ;;
+        firmware) case " $* " in *" update "* | *" build "* | *" own "*) _writes=1 ;; esac ;;
+    esac
+    if [[ $_writes -eq 1 && -z ${_KBL_LOCKED-} ]]; then
+        # In the environment from the start, so that /proc shows it for every
+        # process of the run: a forked shell has only what its program began with.
+        [[ ${KBL_RUN_ID-} == "$$" ]] || KBL_RUN_ID=$$ exec bash "$0" "$cmd" "$@"
+        _kbl_hold
+        _kbl_lock "$cmd" "$@"
+        { : <&0; } 2>/dev/null || exec 0</dev/null
+        "cmd_$cmd" "$@" <&0 &
+        wait $!
+        exit
+    fi
+    case "$cmd" in
+        init) cmd_init "$@" ;;
+        image) cmd_image "$@" ;;
+        sync) cmd_sync "$@" ;;
+        config) cmd_config "$@" ;;
+        build) cmd_build "$@" ;;
+        tags) cmd_tags "$@" ;;
+        update) cmd_update "$@" ;;
+        run) cmd_run "$@" ;;
+        attach) cmd_attach "$@" ;;
+        drgn) cmd_drgn "$@" ;;
+        resume) cmd_resume "$@" ;;
+        trees | ls) cmd_trees "$@" ;;
+        inspect) cmd_inspect "$@" ;;
+        add) cmd_add "$@" ;;
+        rm) cmd_rm "$@" ;;
+        mv) cmd_mv "$@" ;;
+        get) cmd_get "$@" ;;
+        set) cmd_set "$@" ;;
+        unset) cmd_unset "$@" ;;
+        edit) cmd_edit "$@" ;;
+        prune) cmd_prune "$@" ;;
+        firmware) cmd_firmware "$@" ;;
+        dt) cmd_dt "$@" ;;
+        containers) cmd_containers "$@" ;;
+        doctor) cmd_doctor ;;
+        help | -h | --help) cmd_help "$@" ;;
+        __complete) _kbl_cli complete "$@" ;;
+        *)
+            echo "kbuildlab: unknown command '$cmd'" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
     exit
-fi
-case "$cmd" in
-    init)   cmd_init "$@" ;;
-    image)  cmd_image "$@" ;;
-    sync)   cmd_sync "$@" ;;
-    config) cmd_config "$@" ;;
-    build)  cmd_build "$@" ;;
-    tags)   cmd_tags "$@" ;;
-    update) cmd_update "$@" ;;
-    run)    cmd_run "$@" ;;
-    attach) cmd_attach "$@" ;;
-    drgn)   cmd_drgn "$@" ;;
-    resume) cmd_resume "$@" ;;
-    trees|ls) cmd_trees "$@" ;;
-    inspect) cmd_inspect "$@" ;;
-    add)    cmd_add "$@" ;;
-    rm)     cmd_rm "$@" ;;
-    mv)     cmd_mv "$@" ;;
-    get)    cmd_get "$@" ;;
-    set)    cmd_set "$@" ;;
-    unset)  cmd_unset "$@" ;;
-    edit)   cmd_edit "$@" ;;
-    prune)  cmd_prune "$@" ;;
-    firmware) cmd_firmware "$@" ;;
-    dt)     cmd_dt "$@" ;;
-    containers) cmd_containers "$@" ;;
-    doctor) cmd_doctor ;;
-    help|-h|--help) cmd_help "$@" ;;
-    __complete) _kbl_cli complete "$@" ;;
-    *) echo "kbuildlab: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
-esac
-exit
 }

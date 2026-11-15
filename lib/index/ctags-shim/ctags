@@ -3,11 +3,17 @@ here=$(dirname "$(readlink -f "$0")")
 real=
 IFS=: read -ra dirs <<<"$PATH"
 for p in "${dirs[@]}"; do
-    [[ $(readlink -f "$p") != "$here" && -x $p/ctags ]] && { real=$p/ctags; break; }
+    [[ $(readlink -f "$p") != "$here" && -x $p/ctags ]] && {
+        real=$p/ctags
+        break
+    }
 done
-[[ -n $real ]] || { echo "ctags shim: no ctags on PATH" >&2; exit 127; }
+[[ -n $real ]] || {
+    echo "ctags shim: no ctags on PATH" >&2
+    exit 127
+}
 
-case "${1-}" in --version|--list-*|--help*) exec "$real" "$@" ;; esac
+case "${1-}" in --version | --list-* | --help*) exec "$real" "$@" ;; esac
 
 universal=0
 "$real" --version 2>/dev/null | grep -qi universal && universal=1
@@ -16,13 +22,13 @@ kconfig=0
 args=()
 for a in "$@"; do
     case "$a" in
-        --extra=*) (( universal )) && a="--extras=${a#--extra=}" ;;
-        --langdef=kconfig|--language-force=kconfig|--regex-kconfig=*) (( kconfig )) && continue ;;
+        --extra=*) ((universal)) && a="--extras=${a#--extra=}" ;;
+        --langdef=kconfig | --language-force=kconfig | --regex-kconfig=*) ((kconfig)) && continue ;;
     esac
     args+=("$a")
 done
 i=${#args[@]}
-while (( i > 0 )) && [[ ${args[i-1]} != -* && -f ${args[i-1]} ]]; do (( i-- )); done
+while ((i > 0)) && [[ ${args[i - 1]} != -* && -f ${args[i - 1]} ]]; do ((i--)); done
 opts=("${args[@]:0:i}")
 files=("${args[@]:i}")
 assembler='/^[ \t]*\.(macro|set|equ|equiv|eqv)[ \t]+\.?([[:alpha:]_][[:alnum:]_$.]*)/\2/A,assembler,assembler definitions/'
@@ -35,18 +41,18 @@ fi
 
 d=${KBL_TAGS_STATE:?ctags shim: KBL_TAGS_STATE is not set}
 if [[ -n ${KBL_TAGS_EMIT-} ]]; then
-    [[ -e $d/emitted ]] || { cat "$d/tags.new" > tags && : > "$d/emitted"; }
+    [[ -e $d/emitted ]] || { cat "$d/tags.new" >tags && : >"$d/emitted"; }
     exit
 fi
 record() {
     local key
     key=$(printf '%s\0' "$@" | md5sum | cut -c1-16)
     if [[ ! -e $d/opts.$key ]]; then
-        printf '%s\0' "$@" > "$d/opts.$key"
-        printf '%s\n' "$key" >> "$d/keys"
+        printf '%s\0' "$@" >"$d/opts.$key"
+        printf '%s\n' "$key" >>"$d/keys"
     fi
-    (( ${#files[@]} )) && printf '%s\n' "${files[@]}" >> "$d/files.$key"
+    ((${#files[@]})) && printf '%s\n' "${files[@]}" >>"$d/files.$key"
 }
 record "${opts[@]}"
 record "${macros[@]}"
-: >> tags
+: >>tags

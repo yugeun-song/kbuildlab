@@ -22,8 +22,11 @@ with tempfile.TemporaryDirectory() as d:
     for case in cases:
         with open(os.path.join(d, "tree.conf"), "w", newline="") as f:
             f.write(case["conf"])
-        sh = subprocess.run(["bash", "-c", 'source "$1/lib/common.sh"; kbl_tree_get "$2" "$3"',
-                             "-", repo, d, case["key"]], capture_output=True, text=True).stdout
+        sh = subprocess.run(
+            ["bash", "-c", 'source "$1/lib/common.sh"; kbl_tree_get "$2" "$3"', "-", repo, d, case["key"]],
+            capture_output=True,
+            text=True,
+        ).stdout
         sh = sh[:-1] if sh.endswith("\n") else sh
         py = clangd.tree_conf_get(d, case["key"])
         want = case["value"]
