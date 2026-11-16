@@ -691,6 +691,12 @@ nothing runs in the guest and nothing stops it; that takes python's drgn and a
 run without `--kaslr`. A guest started on another tree than the one now in force
 is named and passed over.
 
+A `no-map` region in `/reserved-memory` is how memory gets a hole: the machine
+keeps its RAM and the kernel leaves the range out. memblock then shows the range
+as `NOMAP` between two ranges of memory (7.4-rc2, 6.18), or drops it (4.6), and
+`/proc/iomem` has System RAM on either side. Two memory nodes are another matter:
+QEMU's `virt` makes them only as NUMA nodes.
+
 ## The tree.conf
 
 `init` and `add` write it from `templates/`. It states what the tree is (`ARCH`,
