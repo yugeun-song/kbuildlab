@@ -11,6 +11,9 @@ fdt.py agrees BASE OWN [--load NAME START SIZE]...
                                where OWN states other hardware than BASE, sets memory aside that
                                the machine lacks, or covers what is loaded at START; status 1 then
 fdt.py machine FILE            the machine FILE asks for: its memory in MiB and its CPUs
+fdt.py rebase OLD OWN NEW OUT  OWN was written on the machine's tree OLD; write as OUT the
+                               machine's tree NEW with what is OWN's own carried over; status 1
+                               and the reasons when OWN states hardware NEW does not have
 fdt.py prop FILE PATH NAME     one property's value; status 1 when it is not there
 fdt.py image-size IMAGE        the memory a Linux Image header says the kernel occupies
 """
@@ -516,7 +519,7 @@ def carried(want, got):
     return out
 
 
-def _merged(spans):
+def merged(spans):
     out = []
     for base, size in sorted(s for s in spans if s[1]):
         if out and base <= out[-1][0] + out[-1][1]:
@@ -526,18 +529,20 @@ def _merged(spans):
     return out
 
 
-def _inside(base, size, spans):
+def inside(base, size, spans):
     return any(b <= base and base + size <= b + s for b, s in spans)
 
 
-def _overlap(a, b):
+def overlap(a, b):
     return bool(a[1] and b[1]) and a[0] < b[0] + b[1] and b[0] < a[0] + a[1]
 
 
 def memory(tree):
-    return _merged(
-        r for n in tree.root.children if n.text("device_type") == "memory" and n.enabled() for r in ranges(n)
-    )
+    return merged(r for n in tree.root.children if n.text("device_type") == "memory" and n.enabled() for r in ranges(n))
+
+
+def cpus(tree):
+    return sum(1 for n in tree.root.walk() if n.text("device_type") == "cpu")
 
 
 def agrees(base, own, loads=()):
@@ -613,13 +618,13 @@ def agrees(base, own, loads=()):
             for b, s in ranges(n):
                 if s == 0:
                     out.append("! %s reg: an empty range at %#x" % (n.path, b))
-                elif not _inside(b, s, mem):
+                elif not inside(b, s, mem):
                     out.append("! %s reg: %s lies outside the machine's memory (%s)" % (n.path, span(b, s), held))
         elif "size" in n.props:
             if _join(n.cells("size")[:cells]) == 0:
                 out.append("! %s size: nothing to set aside" % n.path)
             for b, s in ranges(n, "alloc-ranges"):
-                if not _inside(b, s, mem):
+                if not inside(b, s, mem):
                     out.append(
                         "! %s alloc-ranges: %s lies outside the machine's memory (%s)" % (n.path, span(b, s), held)
                     )
@@ -627,7 +632,7 @@ def agrees(base, own, loads=()):
             out.append("! %s: neither reg nor size, so the kernel passes over it" % n.path)
     for i, a in enumerate(fixed):
         for b in fixed[i + 1 :]:
-            if a[0] != b[0] and (a[0] in new or b[0] in new) and _overlap(a[1:], b[1:]):
+            if a[0] != b[0] and (a[0] in new or b[0] in new) and overlap(a[1:], b[1:]):
                 out.append("! %s: %s overlaps %s of %s" % (a[0], span(*a[1:]), span(*b[1:]), b[0]))
 
     out.extend("- memreserve %s" % span(*r) for r in base.reserve if r not in own.reserve)
@@ -636,19 +641,19 @@ def agrees(base, own, loads=()):
             continue
         if r[1] == 0:
             out.append("! memreserve at %#x: an empty range" % r[0])
-        elif not _inside(r[0], r[1], mem):
+        elif not inside(r[0], r[1], mem):
             out.append("! memreserve %s lies outside the machine's memory (%s)" % (span(*r), held))
 
     for name, start, size in loads:
-        if not _inside(start, size, mem):
+        if not inside(start, size, mem):
             out.append(
                 "! the %s, loaded at %s, lies outside the machine's memory (%s)" % (name, span(start, size), held)
             )
         for path, b, s in fixed:
-            if _overlap((start, size), (b, s)):
+            if overlap((start, size), (b, s)):
                 out.append("! %s: %s covers the %s, loaded at %s" % (path, span(b, s), name, span(start, size)))
         for b, s in own.reserve:
-            if _overlap((start, size), (b, s)):
+            if overlap((start, size), (b, s)):
                 out.append("! memreserve %s covers the %s, loaded at %s" % (span(b, s), name, span(start, size)))
     return out
 
@@ -659,8 +664,171 @@ def machine(tree):
         raise FdtError("it states no memory")
     if total % (1 << 20):
         raise FdtError("its memory, %d bytes, is not whole MiB, which is how qemu sizes a machine" % total)
-    cpus = sum(1 for n in tree.root.walk() if n.text("device_type") == "cpu")
-    return ["mem %dM" % (total >> 20), "smp %d" % cpus]
+    if cpus(tree) == 0:
+        raise FdtError("it states no CPUs")
+    return ["mem %dM" % (total >> 20), "smp %d" % cpus(tree)]
+
+
+def write(tree):
+    strings, offsets, body = bytearray(), {}, bytearray()
+
+    def padded(data):
+        return data + b"\0" * (-len(data) % 4)
+
+    def emit(node):
+        body.extend(struct.pack(">I", BEGIN_NODE) + padded(node.name.encode("utf-8", "backslashreplace") + b"\0"))
+        for name, value in node.props.items():
+            if name not in offsets:
+                offsets[name] = len(strings)
+                strings.extend(name.encode("utf-8", "backslashreplace") + b"\0")
+            body.extend(struct.pack(">III", PROP, len(value), offsets[name]) + padded(value))
+        for child in node.children:
+            emit(child)
+        body.extend(struct.pack(">I", END_NODE))
+
+    emit(tree.root)
+    body.extend(struct.pack(">I", END))
+    reserve = b"".join(struct.pack(">QQ", a, n) for a, n in tree.reserve) + struct.pack(">QQ", 0, 0)
+    off_struct = HEADER + len(reserve)
+    off_strings = off_struct + len(body)
+    head = struct.pack(
+        ">10I",
+        MAGIC,
+        off_strings + len(strings),
+        off_struct,
+        off_strings,
+        HEADER,
+        17,
+        16,
+        tree.header.get("boot_cpuid_phys", 0),
+        len(strings),
+        len(body),
+    )
+    return head + reserve + bytes(body) + bytes(strings)
+
+
+def _copy(node, parent=None):
+    twin = Node(node.name, parent)
+    twin.props = dict(node.props)
+    twin.children = [_copy(child, twin) for child in node.children]
+    return twin
+
+
+def _top(tree, path):
+    return next((n for n in tree.root.children if n.path == path), None)
+
+
+def _handles(tree):
+    return {n.cell("phandle"): n.path for n in tree.root.walk() if n.cells("phandle")}
+
+
+def rebase(old, own, new):
+    out = []
+
+    def same(x, y):
+        path = x.path
+        for k, v in x.props.items():
+            if k == "phandle":
+                continue
+            if k not in y.props:
+                out.append("- %s %s" % (path, k))
+            elif y.props[k] != v and not renumbered(v, y.props[k]):
+                out.append(
+                    "~ %s %s: %s -> %s"
+                    % (path, k, render(v, SHOWN_CELLS) or "(empty)", render(y.props[k], SHOWN_CELLS) or "(empty)")
+                )
+        for k, v in y.props.items():
+            if k not in x.props and k != "phandle":
+                out.append("+ %s %s%s" % (path, k, (": " + render(v, SHOWN_CELLS)) if v else ""))
+
+    was, now = _handles(old), _handles(own)
+
+    def renumbered(a, b):
+        if len(a) != len(b) or len(a) % 4:
+            return False
+        for i in range(0, len(a), 4):
+            x, y = struct.unpack_from(">I", a, i)[0], struct.unpack_from(">I", b, i)[0]
+            if x != y and not (x in was and y in now and was[x] == now[y]):
+                return False
+        return True
+
+    def strict(x, y):
+        same(x, y)
+        theirs = {n.name: n for n in y.children}
+        for n in x.children:
+            if n.name in theirs:
+                strict(n, theirs.pop(n.name))
+            else:
+                out.append("- %s (node)" % n.path)
+        out.extend("+ %s (node)" % n.path for n in theirs.values())
+
+    def shared(x, y):
+        same(x, y)
+        theirs = {n.name: n for n in y.children}
+        for n in x.children:
+            if n.name in theirs:
+                shared(n, theirs[n.name])
+
+    same(old.root, own.root)
+    theirs = {n.name: n for n in own.root.children}
+    for n in old.root.children:
+        m = theirs.pop(n.name, None)
+        if n.path in OWN or n.path == RESERVED or n.text("device_type") == "memory":
+            continue
+        if m is None:
+            out.append("- %s (node)" % n.path)
+        elif n.path == "/cpus":
+            shared(n, m)
+        else:
+            strict(n, m)
+    for m in theirs.values():
+        if m.path not in OWN and m.path != RESERVED and m.text("device_type") != "memory":
+            out.append("+ %s (node)" % m.path)
+
+    if memory(own) != memory(new):
+        out.append(
+            "! it states memory at %s, and the machine qemu makes has it at %s"
+            % (", ".join(span(*m) for m in memory(own)) or "none", ", ".join(span(*m) for m in memory(new)) or "none")
+        )
+    count = [sum(1 for n in t.root.walk() if n.text("device_type") == "cpu") for t in (own, new)]
+    if count[0] != count[1]:
+        out.append("! it states %d CPUs, and the machine qemu makes has %d" % tuple(count))
+
+    root = _copy(new.root)
+    made = Tree(root, list(new.reserve), dict(new.header))
+    taken = _handles(new)
+    kept = []
+    for path in OWN:
+        mine = _top(own, path)
+        root.children = [n for n in root.children if n.path != path]
+        if mine is not None:
+            kept.append(_copy(mine, root))
+            root.children.append(kept[-1])
+    mine, had, has = _top(own, RESERVED), _top(old, RESERVED), _top(made, RESERVED)
+    if mine is not None:
+        before = {n.name for n in had.children} if had is not None else set()
+        for n in before - {n.name for n in mine.children}:
+            out.append("- %s/%s (node)" % (RESERVED, n))
+        if has is None:
+            has = Node(mine.name, root)
+            has.props = dict(mine.props)
+            root.children.append(has)
+        for n in mine.children:
+            if n.name not in before:
+                if any(c.name == n.name for c in has.children):
+                    out.append("! %s is set aside by the machine qemu makes too" % n.path)
+                    continue
+                kept.append(_copy(n, has))
+                has.children.append(kept[-1])
+    made.reserve.extend(r for r in own.reserve if r not in old.reserve and r not in made.reserve)
+    for top in kept:
+        for n in top.walk():
+            handle = n.cell("phandle")
+            if handle is not None and taken.get(handle, n.path) != n.path:
+                out.append(
+                    "! %s carries phandle %#x, which the machine qemu makes gives %s" % (n.path, handle, taken[handle])
+                )
+    return made, out
 
 
 def identity(tree):
@@ -736,6 +904,18 @@ def main(argv):
                 return 1 if lines else 0
         if cmd == "machine" and args:
             print("\n".join(machine(load(args[0]))))
+            return 0
+        if cmd == "rebase" and len(args) == 4:
+            made, lines = rebase(load(args[0]), load(args[1]), load(args[2]))
+            if lines:
+                print("\n".join(lines))
+                return 1
+            blob = write(made)
+            if diff(made, parse(blob)):
+                raise FdtError("what was written does not read back as the tree made")
+            with open(args[3] + ".part", "wb") as f:
+                f.write(blob)
+            os.replace(args[3] + ".part", args[3])
             return 0
         if cmd == "prop" and len(args) == 3:
             node = load(args[0]).node(args[1])

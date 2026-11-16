@@ -78,6 +78,15 @@ def main():
         subprocess.run(
             ["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", blob, "-"], input=b"/dts-v1/;\n/ { a = <1>; };\n", check=True
         )
+        memory = b'memory@40000000 { device_type = "memory"; reg = <0 0x40000000 0 0x40000000>; };'
+        cpu = b'cpus { #address-cells = <1>; #size-cells = <0>; cpu@0 { device_type = "cpu"; reg = <0>; }; };'
+        sized, cpuless = os.path.join(root, "sized.dtb"), os.path.join(root, "cpuless.dtb")
+        for path, nodes in ((sized, memory + cpu), (cpuless, memory)):
+            subprocess.run(
+                ["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", path, "-"],
+                input=b"/dts-v1/;\n/ { #address-cells = <2>; #size-cells = <2>; " + nodes + b" };\n",
+                check=True,
+            )
         junk = os.path.join(root, "junk.bin")
         with open(junk, "wb") as f:
             f.write(b"\xd0\x0d\xfe\xed" + os.urandom(64))
@@ -115,7 +124,19 @@ def main():
         expect(env, ["dt", "detach", X86], 0, "nothing was attached")
         expect(env, ["dt", "reset", X86], 0, "has no device tree of its own")
         expect(env, ["dt", ARM], 1, "did not hand over its device tree")
-        expect(env, ["dt", "apply", ARM, blob], 1, "did not hand over its device tree")
+        expect(env, ["dt", "apply", ARM, blob], 1, "it states no memory", "cannot be held against a machine")
+        expect(env, ["dt", "apply", ARM, cpuless], 1, "it states no CPUs", "cannot be held against a machine")
+        with open(os.path.join(arm, "tree.conf"), "a") as f:
+            f.write("SMP=sockets=2,cores=2\n")
+        expect(env, ["dt", "apply", ARM, sized], 1, "does not begin with the number of CPUs")
+        with open(os.path.join(arm, "tree.conf")) as f:
+            conf = f.read()
+        with open(os.path.join(arm, "tree.conf"), "w") as f:
+            f.write(conf.replace("SMP=sockets=2,cores=2\n", "SMP=cpus=1,maxcpus=2\n"))
+        expect(env, ["dt", "apply", ARM, sized], 1, "did not hand over its device tree")
+        expect(env, ["dt", "rebase", ARM, sized], 1, "did not hand over its device tree")
+        expect(env, ["dt", "rebase", ARM], 1, "has no device tree source of its own")
+        expect(env, ["dt", "rebase", ARM, "a", "b"], 1, "one file at a time")
         expect(env, ["dt", "diff", ARM], 1, "did not hand over its device tree")
         expect(env, ["dt", "check", ARM], 1, "did not hand over its device tree")
         expect(env, ["dt", OLD], 1, "states UBOOT, which is no longer read")

@@ -266,6 +266,7 @@ KBL_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/kbuildlab"
 KBL_IMAGE="${KBL_IMAGE:-kbuildlab:latest}"
 KBL_LEGACY_IMAGE="${KBL_LEGACY_IMAGE:-kbuildlab-legacy:latest}"
 KBL_DEFAULT_MEM=1G
+KBL_DEFAULT_SMP=2
 
 kbl_mem_bytes() { # kbl_mem_bytes VALUE: the leading size of a -m value, as qemu reads it
     local m="${1#size=}"
@@ -277,6 +278,11 @@ kbl_mem_bytes() { # kbl_mem_bytes VALUE: the leading size of a -m value, as qemu
         else if (u == "T") n *= 1024 ^ 4; else n *= 1024 ^ 2
         printf "%.0f\n", n
     }'
+}
+kbl_smp_count() { # kbl_smp_count VALUE: the number of CPUs at the head of a -smp value, as qemu reads it
+    local n="${1%%,*}"
+    n="${n#cpus=}"
+    [[ "$n" =~ ^[0-9]+$ ]] && printf '%s\n' "$n"
 }
 KBL_TREES="$KBL_CONFIG_HOME/trees"
 

@@ -641,6 +641,7 @@ handed on the last boot with `custom`).
 kbuildlab dt [TREE] [--stage S] [--source|--json]   what is in force, where each stage is, what it describes
 kbuildlab dt edit [TREE]                 edit the tree's own source (made from the base the first time), build, attach
 kbuildlab dt apply [TREE] [FILE]         the same for a source, a blob or an overlay
+kbuildlab dt rebase [TREE] [FILE]        write it again onto the machine it asks for, keeping what is its own
 kbuildlab dt diff [TREE] [A [B]]         two stages or blobs, property by property
 kbuildlab dt detach|reset|probe|check [TREE]
 ```
@@ -655,15 +656,24 @@ The tree's own source is the whole tree: `custom.dts` in the data directory, or
 your workspace; what is built from it stays in the data directory.
 
 The tree, the machine and what is loaded into it agree, or nothing boots. The
-machine takes the size of its memory from the tree: `dt apply` reads it, asks
-QEMU and the firmware for the tree they hand on with that much memory, and holds
-the tree's own against it; while that tree is attached, `run` starts QEMU so.
-Whatever else the two state differently is hardware QEMU has no machine for (its
-CPUs follow `SMP`), and is refused. A tree of its own adds to `/chosen`,
-`/aliases` and `/reserved-memory`, and makes memory reservations; it is refused
-where it sets aside memory the machine lacks or that is taken already (by another
-region, or by the kernel, the initramfs and the tree itself where the firmware
-loads them), or writes `/reserved-memory` in a form the kernel passes over.
+machine takes the size of its memory and the number of its CPUs from the tree:
+`dt apply` reads them, asks QEMU and the firmware for the tree they hand on for
+that machine, and holds the tree's own against it; while that tree is attached,
+`run` starts QEMU so. Whatever else the two state differently is hardware QEMU has
+no machine for, and is refused. A tree of its own adds to `/chosen`, `/aliases`
+and `/reserved-memory`, and makes memory reservations; it is refused where it sets
+aside memory the machine lacks or that is taken already (by another region, or by
+the kernel, the initramfs and the tree itself where the firmware loads them), or
+writes `/reserved-memory` in a form the kernel passes over.
+
+Another number of CPUs is another machine throughout: QEMU numbers its phandles
+anew and describes its interrupt controller and CPU map otherwise, so a tree
+written on the old one no longer agrees. `dt rebase` writes it again onto the
+machine it asks for (or onto one that `tree.conf`, QEMU or the firmware changed):
+the hardware is taken from that machine, what is the tree's own is carried over,
+and the text as you wrote it is kept beside the source with a `~`. It refuses a
+tree that changed a device or a CPU's own description, or that states memory
+where that machine has none.
 
 A run also refuses whatever would make the kernel see a tree other than the one
 attached: a source edited since its build, a `--mem`, `--smp` or `--bios` that
@@ -944,8 +954,8 @@ lib/lab.sh             init and the lab/ records (lib/english.py tells which fil
 lib/tags.sh            tags: ctags, cscope, gtags and the clangd index
 lib/update.sh          update
 lib/firmware.sh        firmware: the global one and a tree's own
-lib/dt.sh              dt (lib/fdt.py reads blobs, lib/dtcap.py copies one out of
-                       a guest's memory, lib/gdb-firmware.py follows a firmware in gdb)
+lib/dt.sh              dt (lib/fdt.py reads and writes blobs, lib/dtcap.py copies one
+                       out of a guest's memory, lib/gdb-firmware.py follows a firmware in gdb)
 lib/host.sh            doctor, image, containers
 lib/run-qemu.sh        run; run-gdb.sh, run-drgn.sh and resume.sh are attach, drgn
                        and resume, each a program of its own (lib/qmp.py talks QMP)
@@ -957,7 +967,8 @@ completions/           the bash and zsh completions install.sh puts in place
 tests/                 tree.conf grammar, cli.py against the parsers, the tag view, build outputs,
                        fdt.py against fdtget and damaged blobs, the refusals of dt and
                        firmware, guest.py, which boots a tree and runs commands in it,
-                       dt-guest.py, which holds a booted kernel's memory to its tree,
+                       dt-guest.py, which holds a booted kernel's memory and CPUs to
+                       its tree,
                        and style.py, which holds a checkout to its formatters and to
                        English
 ```

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Hold a tree's own device tree to the machine, end to end: the machine takes
-its memory from the tree, a tree that states hardware qemu has no machine for is
-refused, and what the booted kernel reports is held against the tree.  The tree
-is put back as it was.
+its memory and its CPUs from the tree, a tree that states hardware qemu has no
+machine for is refused, and what the booted kernel reports is held against the
+tree.  The tree is put back as it was.
 
     dt-guest.py TREE [RUN-OPTION...]
 
-The overlays are made from what `kbuildlab dt --json` reports, so nothing here
-knows a machine: one moves the first memory range and one sets aside a page past
-the end of memory (both refused); one halves the first memory range and one sets
-aside a region in the middle of what is left (both attached, one on the other).
-Refuses a tree that already has a device tree of its own.  The guest is driven
-as tests/guest.py drives it, and the same environment variables apply.
+The trees are made from what `kbuildlab dt --json` reports, so nothing here knows
+a machine: one moves the first memory range and one sets aside a page past the
+end of memory (both refused); one halves the first memory range and one sets
+aside a region in the middle of what is left (both attached, one on the other);
+the last leaves out a CPU, which is refused as it stands and attached once it is
+rebased.  Refuses a tree that already has a device tree of its own.  The guest is
+driven as tests/guest.py drives it, and the same environment variables apply.
 """
 
 import base64
@@ -206,6 +207,28 @@ def main(argv):
                 out,
             ):
                 return 1
+            cpus = s["cpus"]["count"]
+            if cpus > 1:
+                fewer = fdt.load(os.path.join(d, "custom.dtb"))
+                last = [n for n in fewer.root.walk() if n.text("device_type") == "cpu"][-1]
+                last.parent.children.remove(last)
+                blob = os.path.join(tmp, "fewer.dtb")
+                with open(blob, "wb") as f:
+                    f.write(fdt.write(fewer))
+                rc, out = kbl("dt", "apply", tree, blob)
+                check(
+                    rc != 0 and "does not agree with the machine" in out and "dt rebase" in out,
+                    "the same tree without %s is refused as it stands, and rebase is named" % last.path,
+                    out,
+                )
+                rc, out = kbl("dt", "rebase", tree, blob)
+                if not check(
+                    rc == 0 and "attached" in out and "smp %d" % (cpus - 1) in out,
+                    "rebased, it is attached, and qemu is to be started with %d CPU(s)" % (cpus - 1),
+                    out,
+                ):
+                    return 1
+                cpus -= 1
         rc, out = kbl("dt", "check", tree)
         check(rc == 0 and "agrees" in out, "dt check holds before the boot", out)
         rc, out = kbl("dt", "diff", tree)
@@ -231,8 +254,8 @@ def main(argv):
         smp = str(s["cpus"]["count"] + 1)
         rc, out = kbl("run", tree, "--run", "--smp", smp, *options, timeout=300)
         check(
-            rc != 0 and "is not the one" in out,
-            "a run with %s CPUs, which is not the machine tree.conf states, is refused" % smp,
+            rc != 0 and ("is not the one" in out or "is not the number of CPUs" in out),
+            "a run with %s CPUs, which is not the machine the tree states, is refused" % smp,
             out,
         )
         rc, out = kbl("run", tree, "--run", "--mem", "%dM" % (sum(n for _, n in whole) >> 20), *options, timeout=120)
@@ -248,6 +271,8 @@ def main(argv):
             _, text = g.run(0, "base64 /sys/firmware/fdt | tr -d '\\n'; echo")
             _, iomem = g.run(1, "grep -i 'system ram' /proc/iomem")
             _, total = g.run(2, "grep MemTotal /proc/meminfo")
+            _, possible = g.run(3, "cat /sys/devices/system/cpu/possible")
+            _, online = g.run(4, "nproc")
             status = g.off()
         except RuntimeError as e:
             check(False, "the guest boots on the attached tree", "%s\n%s" % (e, "\n".join(g.text.splitlines()[-30:])))
@@ -268,6 +293,20 @@ def main(argv):
         check(lost == [], "the kernel's /sys/firmware/fdt carries the attached tree whole", "\n".join(lost))
         check(hole in unmapped(got), "it sets %#x aside, unmapped" % hole[0], spans(unmapped(got)))
         check(fdt.memory(got) == left, "its memory is the halved one", spans(fdt.memory(got)))
+        stated = sum(1 for n in got.root.walk() if n.text("device_type") == "cpu")
+        known = sum(
+            int(hi or lo) - int(lo) + 1 for lo, hi in re.findall(r"(\d+)(?:-(\d+))?", possible.strip().splitlines()[-1])
+        )
+        check(
+            stated == cpus and known == cpus and online.strip().splitlines()[-1] == str(cpus),
+            "the tree states %d CPU(s), and the kernel knows and runs as many" % cpus,
+            "tree %d, possible %r, nproc %r" % (stated, possible, online),
+        )
+        if cpus != s["cpus"]["count"]:
+            check(
+                "the number the tree's own device tree states" in g.text,
+                "the launcher says it took the CPUs from the tree",
+            )
         ram = joined(
             (int(lo, 16), int(hi, 16) + 1 - int(lo, 16))
             for lo, hi in re.findall(r"^([0-9a-f]+)-([0-9a-f]+) : System RAM\s*$", iomem, re.M | re.I)

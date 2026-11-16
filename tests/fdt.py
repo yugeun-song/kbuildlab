@@ -346,6 +346,93 @@ def agreement(tmp, t, variant, made):
     check(wrong == 0, "300 sets of regions are agreed to or refused as plain interval arithmetic says")
 
 
+THIRD = (
+    'cpu@2 { device_type = "cpu"; compatible = "arm,cortex-a53"; reg = <2>; enable-method = "psci"; status = "fail"; };'
+)
+UART = 'uart@9000000 { compatible = "arm,pl011", "arm,primecell"; reg = <0x9000000 0x1000>; };'
+
+
+def moving(tmp, t, variant):
+    path = os.path.join(tmp, "written.dtb")
+    with open(path, "wb") as f:
+        f.write(fdt.write(t))
+    back = fdt.load(path)
+    check(
+        mine(back) == reference(path) and mine(back) == mine(t) and back.reserve == t.reserve,
+        "a tree that is written reads back as it was, here and through fdtget",
+    )
+    check(fdt.write(back) == fdt.write(t), "and is written the same again")
+
+    def made(text):
+        return fdt.parse(dtc(text, os.path.join(tmp, "m.dtb")))
+
+    def machine(text):
+        return text.replace("gic: intc@8000000 {", "gic: intc@8000000 { phandle = <5>;").replace(THIRD, "")
+
+    mine_ = (
+        RICH.replace(THIRD, "")
+        .replace("rng-seed = <0x1 0x2 0x3 0x4>;", "rng-seed = <0x1 0x2 0x3 0x4>; mine = <7>;")
+        .replace(CMA, "kept@50000000 { reg = <0x0 0x50000000 0x0 0x100000>; no-map; };\n        " + CMA)
+    )
+    old, new = t, made(machine(RICH))
+    tree, lines = fdt.rebase(old, made(mine_), new)
+    check(lines == [], "a tree written on one machine goes onto another that has a CPU less and other phandles")
+    check(fdt.agrees(new, tree) == [], "and then states that machine's hardware")
+    check(
+        tree.node("/reserved-memory/kept@50000000") is not None
+        and tree.node("/chosen").cell("mine") == 7
+        and tree.root.cell("interrupt-parent") == 5
+        and tree.node("/cpus/cpu@2") is None,
+        "with what was its own carried over, and the machine's references as the machine has them",
+    )
+    check(fdt.diff(fdt.parse(fdt.write(tree)), tree) == [], "and can be written")
+
+    def problems(text, onto=new):
+        return fdt.rebase(old, made(text), onto)[1]
+
+    lines = problems(mine_.replace(UART, UART.replace("0x9000000 0x1000", "0x9100000 0x1000")))
+    check(len(lines) == 1 and lines[0].startswith("~ /soc/uart@9000000 reg:"), "a device it moved is not carried")
+    lines = problems(
+        mine_.replace('compatible = "arm,cortex-a710"; reg = <0>', 'compatible = "arm,cortex-a53"; reg = <0>')
+    )
+    check(len(lines) == 1 and lines[0].startswith("~ /cpus/cpu@0 compatible:"), "nor a CPU it describes otherwise")
+    lines = problems(mine_.replace("virtio@a000200 {", "virtio@a000200 { added;"))
+    check(lines == ["+ /soc/virtio@a000200 added"], "nor a property it gave a device")
+    lines = problems(RICH)
+    check(len(lines) == 1 and "it states 3 CPUs" in lines[0], "a tree that states more CPUs than the machine has")
+    lines = problems(mine_.replace("reg = <0x0 0x40000000 0x1 0x00000000>;", "reg = <0x0 0x50000000 0x1 0x00000000>;"))
+    check(len(lines) == 1 and "it states memory at" in lines[0], "or memory where the machine has none")
+    lines = problems(mine_.replace("fw@80000000 { reg = <0x0 0x80000000 0x0 0x40000>; no-map; };", ""))
+    check(lines == ["- /reserved-memory/fw@80000000 (node)"], "or drops what the machine sets aside")
+    lines = problems(mine_.replace("kept@50000000 {", "kept@50000000 { phandle = <5>;"))
+    check(
+        len(lines) == 1 and "carries phandle 0x5" in lines[0],
+        "a node of its own may not take a phandle the machine uses",
+    )
+    check(
+        problems(mine_.replace("mine = <7>;", "mine = <7 0x1>;")) == [],
+        "a number of its own that equals a phandle of the machine is still its number",
+    )
+    check(
+        fdt.rebase(old, old, old)[1] == [] and fdt.diff(fdt.rebase(old, old, old)[0], old) == [],
+        "a tree goes onto itself",
+    )
+
+
+def stated(tmp, t):
+    check(fdt.cpus(t) == 3 and fdt.machine(t) == ["mem 4096M", "smp 3"], "the machine a tree states")
+    lone = dtc(
+        "/dts-v1/;\n/ { #address-cells = <2>; #size-cells = <2>;\n"
+        '  memory@0 { device_type = "memory"; reg = <0 0 0 0x100000>; }; };\n',
+        os.path.join(tmp, "lone.dtb"),
+    )
+    try:
+        fdt.machine(fdt.parse(lone))
+        check(False, "a tree without CPUs states no machine")
+    except fdt.FdtError as e:
+        check("no CPUs" in str(e), "a tree without CPUs states no machine")
+
+
 def unit(tmp):
     rich_path = os.path.join(tmp, "rich.dtb")
     rich = dtc(RICH, rich_path)
@@ -518,6 +605,9 @@ def unit(tmp):
         "a reservation the base makes may not be dropped",
     )
 
+    moving(tmp, t, variant)
+    stated(tmp, t)
+
     check(fdt.is_overlay(fdt.parse(overlay)) and not fdt.is_overlay(t), "an overlay is told from a tree")
 
     img = os.path.join(tmp, "Image")
@@ -609,12 +699,21 @@ def exercise(data, others=()):
     fdt.identity(tree)
     fdt.is_overlay(tree)
     fdt.memory(tree)
+    try:
+        assert fdt.machine(tree)[1] == "smp %d" % fdt.cpus(tree)
+    except fdt.FdtError:
+        pass
     assert fdt.diff(tree, tree) == []
     assert fdt.carried(tree, tree) == []
     assert fdt.agrees(tree, tree) == []
+    back = fdt.parse(fdt.write(tree))
+    assert fdt.diff(tree, back) == [] and back.reserve == tree.reserve and mine(back) == mine(tree)
+    fdt.rebase(tree, tree, tree)
     for other in others:
         fdt.agrees(other, tree, [("kernel", 0x40200000, 0x2000000), ("initramfs", 0, 1)])
         fdt.agrees(tree, other)
+        fdt.rebase(other, tree, other)
+        fdt.rebase(tree, other, tree)
     for node in tree.root.walk():
         for value in node.props.values():
             fdt.render(value, 4)

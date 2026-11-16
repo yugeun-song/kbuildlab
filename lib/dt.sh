@@ -1,8 +1,8 @@
-_DT_ACTIONS="show edit apply detach reset diff probe check"
+_DT_ACTIONS="show edit apply rebase detach reset diff probe check"
 _DT_STAGES="machine firmware base custom booted"
-_DT_OWN="the machine takes the size of its memory from the tree, and qemu is asked for the tree it then makes:
-       whatever else the two state differently is hardware qemu has no machine for (its CPUs follow SMP in
-       tree.conf); a tree of its own adds to /chosen, /aliases and /reserved-memory"
+_DT_OWN="the machine takes the size of its memory and the number of its CPUs from the tree, and qemu is asked
+       for the tree it then makes: whatever else the two state differently is hardware qemu has no machine
+       for; a tree of its own adds to /chosen, /aliases and /reserved-memory"
 _DT_ROOM="what a tree sets aside lies in the machine's memory, clear of what is set aside or loaded there already"
 
 _dt_rule() { # _dt_rule LINES
@@ -118,6 +118,8 @@ _dt_probe() {
     if [[ -n "$_dt_board" ]]; then args+=(--board "$_dt_board"); else args+=(--boot "$_dt_boot"); fi
     s="$(_dt_machine | sed -n 's/^mem //p' | head -1)"
     [[ -z "$s" ]] || args+=(--mem "$s")
+    s="$(_dt_machine | sed -n 's/^smp //p' | head -1)"
+    [[ -z "$s" ]] || args+=(--smp "$s")
     say "asking       the machine$([[ "$_dt_boot" == uboot ]] && echo ' and its firmware') for the device tree" >&2
     KBL_DT_PROBE="$tmp" "$KBL_REPO/lib/run-qemu.sh" "${args[@]}" </dev/null >"$tmp/log" 2>&1 {_dt_lock_fd}>&-
     rc=$?
@@ -274,10 +276,13 @@ _dt_backup_source() {
 
 _dt_apply() { # _dt_apply [FILE]
     local file="${1:-}" src="$_dt_src" out="$_dt_dir/custom.dtb" new="$_dt_dir/.custom.new.dtb"
-    local log="$_dt_dir/custom.log" kind="" inc="" onto ovl n label lost take="" want stated
+    local log="$_dt_dir/custom.log" kind="" inc="" onto ovl n label lost take="" want hint
     label="$(kbl_tree_label "$_dt_tree")"
     _dt_need dtc
-    _dt_ensure_base || _dt_no_tree
+    [[ "$_dt_boot" != uefi ]] || {
+        _dt_ensure_base
+        _dt_no_tree
+    }
     _dt_lock
     mkdir -p "$(dirname "$src")" || die "dt: cannot create $(dirname "$src") (DT_DIR in $_dt_tree/tree.conf)"
     rm -f "$new"
@@ -293,6 +298,7 @@ _dt_apply() { # _dt_apply [FILE]
                 ;;
             overlay | overlay-source)
                 _dt_need fdtoverlay
+                _dt_ensure_base || _dt_no_tree
                 onto="$_dt_dir/$_dt_base.dtb"
                 if [[ -f "$src" ]]; then
                     [[ -f "$out" && "$(sed -n 's/^source //p' "$_dt_dir/custom.id" 2>/dev/null)" == "$(sha256sum <"$src" | cut -c1-64)" ]] \
@@ -340,24 +346,34 @@ _dt_apply() { # _dt_apply [FILE]
         rm -f "$new"
         die "dt: the build left no well-formed tree"
     }
-    want="$(_dt_fdt machine "$new" | grep '^mem ')" || {
+    want="$(_dt_asks "$new")" || {
         rm -f "$new"
-        die "dt: ${file:-$src} states no machine qemu can be asked for (above)"
+        die "dt: ${file:-$src} cannot be held against a machine of qemu's (above)"
     }
-    stated="$(kbl_tree_get "$_dt_tree" MEM)"
-    [[ "$(kbl_mem_bytes "${want#mem }")" != "$(kbl_mem_bytes "${stated:-$KBL_DEFAULT_MEM}")" ]] || want=""
     _dt_want="$want"
-    _dt_ensure_base || _dt_no_tree
+    (_dt_ensure_base)
+    case $? in
+        0) ;;
+        3)
+            rm -f "$new"
+            _dt_no_tree
+            ;;
+        *)
+            rm -f "$new"
+            exit 1
+            ;;
+    esac
     lost="$(_dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$new")"
     case $? in
         0) ;;
         1)
             rm -f "$new"
+            hint="$(_dt_rebase_hint "$label")"
             unset _dt_want
-            die "dt: ${file:-$src} does not agree with the machine qemu makes${want:+ for ${want#mem } of memory}, in $(wc -l <<<"$lost") place(s):
+            die "dt: ${file:-$src} does not agree with the machine qemu makes${want:+ for $(tr '\n' ' ' <<<"$want" | sed 's/ $//')}, in $(wc -l <<<"$lost") place(s):
 $(head -12 <<<"$lost" | sed 's/^/         /')
 $(_dt_rule "$lost")
-       nothing was built or attached"
+${hint:+$hint$'\n'}       nothing was built or attached"
             ;;
         *)
             rm -f "$new"
@@ -380,20 +396,115 @@ $(_dt_rule "$lost")
     {
         printf 'built %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
         printf 'source %s\n' "$(sha256sum <"$src" | cut -c1-64)"
-        [[ -n "$file" ]] && printf 'from %s %s\n' "$kind" "$file"
+        [[ -n "$file" ]] && printf 'from %s\n' "${_dt_from:-$kind $file}"
         [[ -n "$inc" ]] && printf 'include %s\n' "$inc"
         printf 'base %s\n' "$_dt_base"
     } >"$_dt_dir/custom.id"
     printf '%s' "${want:+$want$'\n'}" >"$_dt_dir/custom.machine"
+    cp -f "$_dt_dir/$_dt_base.dtb" "$_dt_dir/custom.base.dtb" || die "dt: cannot write $_dt_dir/custom.base.dtb"
     date '+%Y-%m-%d %H:%M:%S' >"$_dt_dir/attached"
     unset _dt_want
     n="$(grep -c 'Warning' "$log" 2>/dev/null)" || n=0
     ok "built        $out ($(stat -c%s "$out") bytes$([[ $n -gt 0 ]] && echo ", $n dtc warning(s) in $log"))"
     say "source       $src"
-    [[ -z "$want" ]] || say "memory       ${want#mem }, as the tree states (tree.conf states ${stated:-$KBL_DEFAULT_MEM}): qemu is started so"
+    [[ -z "$want" ]] || say "machine      $(tr '\n' ' ' <<<"$want" | sed 's/ $//'), as the tree states and tree.conf does not: qemu is started so"
     n="$(_dt_fdt diff "$_dt_dir/$_dt_base.dtb" "$out" | wc -l)"
     say "differs      in $n place(s) from the $_dt_base's (kbuildlab dt diff $label)"
     say "attached     $label boots on it from its next $_dt_ctx boot (kbuildlab dt detach $label undoes that)"
+}
+
+_dt_asks() { # _dt_asks BLOB: what of the machine BLOB states otherwise than tree.conf does
+    local asked mem smp stated
+    asked="$(_dt_fdt machine "$1")" || return 1
+    mem="$(sed -n 's/^mem //p' <<<"$asked")"
+    smp="$(sed -n 's/^smp //p' <<<"$asked")"
+    stated="$(kbl_tree_get "$_dt_tree" MEM)"
+    [[ "$(kbl_mem_bytes "$mem")" == "$(kbl_mem_bytes "${stated:-$KBL_DEFAULT_MEM}")" ]] || printf 'mem %s\n' "$mem"
+    stated="$(kbl_tree_get "$_dt_tree" SMP)"
+    stated="${stated:-$KBL_DEFAULT_SMP}"
+    [[ "$smp" == "$(kbl_smp_count "$stated")" ]] || {
+        kbl_smp_count "$stated" >/dev/null || die "dt: SMP in $_dt_tree/tree.conf is '$stated', which does not begin with the number of CPUs
+       a device tree of the tree's own is held against that number: write it first, as in 4,sockets=2"
+        printf 'smp %s\n' "$smp"
+    }
+    return 0
+}
+
+_dt_rebase_hint() { # _dt_rebase_hint LABEL
+    [[ -f "$_dt_dir/custom.base.dtb" ]] || return 0
+    [[ "$(_dt_fdt id "$_dt_dir/custom.base.dtb")" != "$(_dt_fdt id "$_dt_dir/$_dt_base.dtb")" ]] || return 0
+    printf '       that machine is not the one the tree was written on: kbuildlab dt rebase %s writes the tree\n' "$1"
+    printf '       again onto it, keeping what is the tree'"'"'s own\n'
+}
+
+_dt_rebase() { # _dt_rebase [FILE]
+    local file="${1:-}" label cand="$_dt_dir/.rebase.own.dtb" old="$_dt_dir/.rebase.old.dtb" made="$_dt_dir/.rebase.made.dtb"
+    local log="$_dt_dir/custom.log" kind want lost
+    label="$(kbl_tree_label "$_dt_tree")"
+    _dt_need dtc
+    if [[ -n "$file" ]]; then
+        [[ -f "$file" && -r "$file" && -s "$file" ]] || die "dt rebase: no readable file '$file'"
+        file="$(realpath -- "$file")"
+        kind="$(_dt_kind "$file")" || exit 1
+    else
+        file="$_dt_src"
+        [[ -f "$file" ]] || die "dt rebase: $label has no device tree source of its own for the $_dt_ctx boot"
+        kind=source
+    fi
+    [[ -f "$_dt_dir/custom.base.dtb" ]] || _dt_ensure_base || _dt_no_tree
+    _dt_lock
+    rm -f "$cand" "$old" "$made"
+    case "$kind" in
+        tree) cp -f "$file" "$cand" || die "dt: cannot write $cand" ;;
+        source) _dt_compile "$file" "$cand" "$log" "$(dirname "$file")" || _dt_failed "$log" "$file does not compile" ;;
+        *) die "dt rebase: $file is an overlay, which is applied onto a tree (kbuildlab dt apply $label $file)" ;;
+    esac
+    if [[ -f "$_dt_dir/custom.base.dtb" ]]; then
+        cp -f "$_dt_dir/custom.base.dtb" "$old" || die "dt: cannot write $old"
+    else
+        cp -f "$_dt_dir/$_dt_base.dtb" "$old" || die "dt: cannot write $old"
+    fi
+    want="$(_dt_asks "$cand")" || {
+        rm -f "$cand" "$old"
+        die "dt: $file cannot be held against a machine of qemu's (above)"
+    }
+    _dt_want="$want"
+    (_dt_ensure_base)
+    case $? in
+        0) ;;
+        3)
+            rm -f "$cand" "$old"
+            _dt_no_tree
+            ;;
+        *)
+            rm -f "$cand" "$old"
+            exit 1
+            ;;
+    esac
+    lost="$(_dt_fdt rebase "$old" "$cand" "$_dt_dir/$_dt_base.dtb" "$made")"
+    case $? in
+        0) ;;
+        1)
+            rm -f "$cand" "$old" "$made"
+            unset _dt_want
+            die "dt: $file cannot be written onto the machine qemu makes${want:+ for $(tr '\n' ' ' <<<"$want" | sed 's/ $//')}, for $(wc -l <<<"$lost") reason(s):
+$(head -12 <<<"$lost" | sed 's/^/         /')
+$(_dt_rule "$lost")
+       nothing was written, built or attached"
+            ;;
+        *)
+            rm -f "$cand" "$old" "$made"
+            unset _dt_want
+            die "dt: cannot write $file onto $_dt_dir/$_dt_base.dtb"
+            ;;
+    esac
+    unset _dt_want
+    say "rebased      $file onto the machine qemu makes${want:+ for $(tr '\n' ' ' <<<"$want" | sed 's/ $//')}: its hardware reads as that machine states it"
+    rm -f "$cand" "$old"
+    _dt_from="rebase $file"
+    _dt_apply "$made"
+    unset _dt_from
+    rm -f "$made"
 }
 
 _dt_edit() {
@@ -404,6 +515,7 @@ _dt_edit() {
     if [[ ! -f "$src" ]]; then
         mkdir -p "$(dirname "$src")" || die "dt: cannot create $(dirname "$src") (DT_DIR in $_dt_tree/tree.conf)"
         _dt_decompile "$_dt_dir/$_dt_base.dtb" "$src"
+        cp -f "$_dt_dir/$_dt_base.dtb" "$_dt_dir/custom.base.dtb" || die "dt: cannot write $_dt_dir/custom.base.dtb"
         say "source       $src, made from the $_dt_base's tree"
     fi
     ed="${VISUAL:-${EDITOR:-}}"
@@ -523,8 +635,8 @@ EOF
             _dt_fdt agrees "$_dt_dir/$_dt_base.dtb" "$_dt_dir/custom.dtb" >/dev/null 2>&1 \
                 || note="$note; it does not agree with the machine as it is now (kbuildlab dt check $label)"
             say "custom       $_dt_src, built as $_dt_dir/custom.dtb  $(date -r "$_dt_dir/custom.dtb" '+%Y-%m-%d %H:%M')  $note"
-            note="$(sed -n 's/^mem //p' "$_dt_dir/custom.machine" 2>/dev/null | head -1)"
-            [[ -z "$note" ]] || say "memory       $note, as the tree states: qemu is started so while it is attached"
+            note="$(tr '\n' ' ' <"$_dt_dir/custom.machine" 2>/dev/null | sed 's/ $//')"
+            [[ -z "$note" ]] || say "asks for     $note, as the tree states and tree.conf does not: qemu is started so while it is attached"
         fi
     fi
     if [[ -f "$_dt_dir/booted.dtb" ]]; then
@@ -593,11 +705,11 @@ _dt_check() {
         head -8 <<<"$n" | sed 's/^/       /'
         rc=1
     fi
-    n="$(sed -n 's/^mem //p' "$_dt_dir/custom.machine" 2>/dev/null | head -1)"
-    if [[ "$(_dt_fdt machine "$f" 2>/dev/null | sed -n 's/^mem //p')" == "${n:-$(_dt_fdt machine "$_dt_dir/machine.dtb" 2>/dev/null | sed -n 's/^mem //p')}" ]]; then
-        ok "memory       qemu is started with the memory the tree states${n:+, $n}"
+    n="$(_dt_fdt machine "$f" 2>/dev/null)"
+    if [[ -n "$n" && "$n" == "$(_dt_fdt machine "$_dt_dir/machine.dtb" 2>/dev/null)" && "$(_dt_asks "$f")" == "$(cat "$_dt_dir/custom.machine" 2>/dev/null)" ]]; then
+        ok "qemu         is started with what the tree states: $(tr '\n' ' ' <<<"$n" | sed 's/ $//; s/mem \([^ ]*\)/\1 of memory,/; s/smp \([^ ]*\)/\1 CPU(s)/')"
     else
-        bad "memory       the tree states other memory than qemu is started with (kbuildlab dt apply $label)"
+        bad "qemu         is started with another machine than the tree states (kbuildlab dt apply $label)"
         rc=1
     fi
     if [[ -f "$_dt_dir/attached" ]]; then
@@ -669,8 +781,8 @@ cmd_dt() {
         show | detach | reset | probe | edit | check)
             [[ ${#words[@]} -eq 0 ]] || die "dt $action: '${words[0]}' is neither a registered tree nor expected here"
             ;;
-        apply)
-            [[ ${#words[@]} -le 1 ]] || die "dt apply: one file at a time (kbuildlab dt apply [TREE] [FILE])"
+        apply | rebase)
+            [[ ${#words[@]} -le 1 ]] || die "dt $action: one file at a time (kbuildlab dt $action [TREE] [FILE])"
             ;;
         diff)
             [[ ${#words[@]} -le 2 ]] || die "dt diff: two stages or blobs at most (stages: $_DT_STAGES)"
@@ -688,6 +800,7 @@ cmd_dt() {
         show) _dt_show "$stage" "$source" "$json" ;;
         edit) _dt_edit ;;
         apply) _dt_apply "${words[@]+"${words[@]}"}" ;;
+        rebase) _dt_rebase "${words[@]+"${words[@]}"}" ;;
         detach) _dt_detach ;;
         reset) _dt_reset "$yes" ;;
         diff) _dt_diff "${words[@]+"${words[@]}"}" ;;

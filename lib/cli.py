@@ -29,7 +29,7 @@ TREE_NOTE = (
 )
 ID_NOTE = "TREE is a tree's ID or a unique prefix of it; a path is not accepted here."
 FW_ACTIONS = ("show", "update", "build", "check", "own", "global")
-DT_ACTIONS = ("show", "edit", "apply", "detach", "reset", "diff", "probe", "check")
+DT_ACTIONS = ("show", "edit", "apply", "rebase", "detach", "reset", "diff", "probe", "check")
 DT_STAGES = ("machine", "firmware", "base", "custom", "booted")
 
 
@@ -292,7 +292,7 @@ COMMANDS = [
     Cmd(
         "dt",
         "the device tree a tree boots on: show it, edit it, build one and attach it",
-        "[show|edit|apply|detach|reset|diff|probe|check] [TREE] [FILE|STAGE...] [options]",
+        "[show|edit|apply|rebase|detach|reset|diff|probe|check] [TREE] [FILE|STAGE...] [options]",
         args=["dtarg*"],
         notes=[
             TREE_NOTE,
@@ -300,12 +300,17 @@ COMMANDS = [
             "machine (as QEMU holds it), firmware (as U-Boot holds it when it starts the kernel), "
             "custom (the tree's own) and booted (what the kernel was handed on the last boot with "
             "custom). base is the stage custom starts from: firmware in a uboot boot, else machine.",
-            "edit opens custom.dts, made from base the first time, then builds and attaches it. "
-            "apply does that for a FILE: a source replaces custom.dts, a blob is taken as it is, an "
-            "overlay is applied to the tree's own or to base. detach boots without it and keeps it; "
-            "reset deletes it. diff compares two stages or blobs (default: base custom).",
+            "edit opens the tree's own source, made from base the first time, then builds and "
+            "attaches it. apply does that for a FILE: a source replaces the tree's own, a blob is "
+            "taken as it is, an overlay is applied to the tree's own or to base. detach boots without "
+            "it and keeps it; reset deletes it. diff compares two stages or blobs (default: base "
+            "custom).",
+            "The machine takes the size of its memory and the number of its CPUs from the tree's own "
+            "device tree; whatever else it states otherwise than QEMU does for that machine is "
+            "refused. rebase writes the tree again onto the machine it asks for, or onto one that "
+            "changed, keeping what is the tree's own: /chosen, /aliases, what it set aside.",
             "A run refuses a tree that is not the one attached: a source edited after its build, a "
-            "machine other than the one it was built for, a loader that rewrites it. check tells.",
+            "machine other than the one it states, a loader that rewrites it. check tells.",
         ],
         opts=[
             Opt(
@@ -403,7 +408,13 @@ COMMANDS = [
                 "SIZE",
                 "text:a size, e.g. 2G",
             ),
-            Opt("--smp", "guest CPUs", "N", "number:a CPU count"),
+            Opt(
+                "--smp",
+                "guest CPUs, as qemu's -smp takes them; with the tree's own device tree attached, the "
+                "machine takes their number from that tree, and another here is refused",
+                "N",
+                "number:a CPU count",
+            ),
             Opt("--bios", "firmware image", "PATH", "file"),
             Opt("--dtb", "boot on this device tree blob instead of the one kbuildlab dt attached", "PATH", "file"),
             Opt("--no-dtb", "boot without the tree's own device tree"),

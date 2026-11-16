@@ -100,6 +100,8 @@ Firmware and device tree:
   kbuildlab dt edit|apply [TREE] [FILE]     edit the tree's own source, or take FILE
                                             (.dts, .dtb, an overlay); build it and
                                             attach it to the tree's boots
+  kbuildlab dt rebase [TREE] [FILE]         write it again onto the machine it asks
+                                            for, keeping what is the tree's own
   kbuildlab dt detach|reset|diff|probe|check [TREE]
                                             boot without it; delete it; compare two
                                             stages; ask the machine again; verify

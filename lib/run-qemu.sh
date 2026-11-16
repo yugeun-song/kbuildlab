@@ -16,6 +16,7 @@ source "${KBL_REPO}/lib/common.sh"
     MEM=""
     MEM_GIVEN=0
     SMP=""
+    SMP_GIVEN=0
     KVM=0
     KASLR=""
     NET=1
@@ -96,7 +97,7 @@ kbuildlab run [TREE] [options] [-- QEMU ARGS]
   --no-qmp           no QMP monitor and no vmcoreinfo device
   --mem|-m SIZE  --smp N   (default: the tree's MEM and SMP, else 1G and 2;
                      handed to qemu's -m and -smp as written; with the tree's
-                     own device tree attached the memory is the one it states)
+                     own device tree attached, both are what that tree states)
   --bios PATH        a relative PATH here is from the current directory; in
                      tree.conf it is from the tree's data directory
   The console is the guest's serial line: Ctrl-C goes to the guest, Ctrl-A X
@@ -139,6 +140,7 @@ USAGE
                 ;;
             --smp)
                 SMP="${2:?}"
+                SMP_GIVEN=1
                 shift 2
                 ;;
             --kvm)
@@ -363,21 +365,29 @@ USAGE
     # What the tree states for its runs; a flag wins over it, and the values after
     # :- are the defaults when neither says.
     _owned=""
+    _ownedsmp=""
     if [[ $NO_DTB -eq 0 && -z "$DTB" ]]; then
         _own="${BOOT:-$(kbl_tree_get "$tree" BOOT)}"
         _own="$(kbl_tree_data "$tree")/dt/$([[ -n "$board" ]] && echo "board-$board" || echo "${_own:-direct}")"
-        [[ -f "$_own/attached" && -s "$_own/custom.machine" ]] \
-            && _owned="$(sed -n 's/^mem //p' "$_own/custom.machine" | head -1)"
+        if [[ -f "$_own/attached" && -s "$_own/custom.machine" ]]; then
+            _owned="$(sed -n 's/^mem //p' "$_own/custom.machine" | head -1)"
+            _ownedsmp="$(sed -n 's/^smp //p' "$_own/custom.machine" | head -1)"
+        fi
     fi
     if [[ -n "$_owned" ]]; then
         [[ $MEM_GIVEN -eq 0 || "$MEM" == "$_owned" ]] || die "--mem $MEM is not the memory $(kbl_tree_label "$tree")'s own device tree states, $_owned
        the machine takes its memory from that tree: kbuildlab dt edit changes it, and --no-dtb boots without the tree"
         MEM="$_owned"
     fi
+    if [[ -n "$_ownedsmp" ]]; then
+        [[ $SMP_GIVEN -eq 0 || "$SMP" == "$_ownedsmp" ]] || die "--smp $SMP is not the number of CPUs $(kbl_tree_label "$tree")'s own device tree states, $_ownedsmp
+       the machine takes its CPUs from that tree: kbuildlab dt edit changes them, and --no-dtb boots without the tree"
+        SMP="$_ownedsmp"
+    fi
     [[ -n "$MEM" ]] || MEM="$(kbl_tree_get "$tree" MEM)"
     MEM="${MEM:-$KBL_DEFAULT_MEM}"
     [[ -n "$SMP" ]] || SMP="$(kbl_tree_get "$tree" SMP)"
-    SMP="${SMP:-2}"
+    SMP="${SMP:-$KBL_DEFAULT_SMP}"
     [[ -n "$KASLR" ]] || KASLR="$(kbl_tree_get "$tree" KASLR)"
     KASLR="${KASLR:-0}"
     [[ "$KASLR" == 0 || "$KASLR" == 1 ]] || die "KASLR in $tree/tree.conf is '$KASLR'; it is 0 or 1"
@@ -1609,10 +1619,10 @@ $((need / 1048576)) MiB for the boot-disk copy. Free some, or point \$KBL_STATE_
         _dt_ensure_base || die "$_dtl has no device tree in a $_dtctx boot to hold $_dtb against: $(_dt_why_none)"
         _dt_unlock
         [[ "$(_dt id "$_dtmp")" == "$(_dt id "$_dt_dir/machine.dtb")" ]] \
-            || die "this run's machine is not the one $_dtl's tree.conf states:
+            || die "this run's machine is not the one $_dtl's device tree was held against:
 $(_dt diff "$_dt_dir/machine.dtb" "$_dtmp" | head -8 | sed 's/^/         /')
        an option of this run that changes the machine does not go with a device tree of the tree's own:
-       state it in tree.conf, or pass --no-dtb"
+       state it in tree.conf or in the tree, or pass --no-dtb"
         _lost="$(_dt agrees "$_dt_dir/$_dt_base.dtb" "$_dtb" ${_loads[@]+"${_loads[@]}"})"
         case $? in
             0) ;;
@@ -1712,6 +1722,7 @@ $(head -12 <<<"$_lost" | sed 's/^/         /')
     fi
     [[ "$ROOT" == disk ]] && say "root         disk $_sdboot (PARTUUID $_puuid)"
     [[ -z "$_owned" ]] || say "memory       $MEM, the size the tree's own device tree states"
+    [[ -z "$_ownedsmp" ]] || say "cpus         $SMP, the number the tree's own device tree states"
     if [[ -n "$_dtb" && "$BOOT" == uboot ]]; then
         say "dt           $_dtb, which the firmware loads to $_fa"
     elif [[ -n "$_dtb" ]]; then say "dt           $_dtb, which qemu hands to the kernel"; fi
