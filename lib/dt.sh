@@ -657,6 +657,59 @@ EOF
     _dt_fdt summary "$f"
 }
 
+_dt_live() { # _dt_live LABEL: hold each running guest of the tree against the tree it was started on
+    local label="$1" row dtb qmp port tree want="" vmlinux scratch out line st rc=0 n=0
+    tree="$_dt_dir/$_dt_base.dtb"
+    if [[ "$(_dt_in_force)" == custom ]]; then
+        tree="$_dt_dir/custom.dtb"
+        want="$tree"
+    fi
+    vmlinux="$(kbl_tree_src "$_dt_tree")/vmlinux"
+    while IFS= read -r row; do
+        kbl_row_fields "$row"
+        [[ -n "$_r_sf" && "$_r_tree" -ef "$_dt_tree" && "$_r_boot" == "$_dt_boot" ]] || continue
+        [[ "$(kbl_state_get "$_r_sf" KBL_BOARD)" == "$_dt_board" ]] || continue
+        n=$((n + 1))
+        dtb="$(kbl_state_get "$_r_sf" KBL_DTB)"
+        qmp="$(kbl_state_get "$_r_sf" KBL_QMP_SOCK)"
+        port="$(kbl_state_get "$_r_sf" KBL_QMP_PORT)"
+        if [[ "$dtb" != "$want" && ! (-n "$dtb" && -n "$want" && "$dtb" -ef "$want") ]]; then
+            [[ -n "$dtb" ]] || dtb="the $_dt_base's own tree"
+            say "running      the guest on :$_r_port was started on $dtb, not on the tree now in force: not held against it"
+        elif [[ "$_r_kaslr" == 1 ]]; then
+            say "running      the guest on :$_r_port randomises its kernel's addresses (--kaslr), so vmlinux does not tell where to read"
+        elif [[ -z "$qmp$port" ]]; then
+            say "running      the guest on :$_r_port has no monitor (--no-qmp), so its kernel is not read"
+        elif [[ ! -f "$vmlinux" ]]; then
+            say "running      the guest on :$_r_port is not read: no $vmlinux (kbuildlab build $label)"
+        else
+            scratch="$(kbl_statedir)/kbl-tmp-${_r_port}.live.$$"
+            out="$(python3 "$KBL_REPO/lib/live.py" ${qmp:+--qmp "$qmp"} ${port:+--qmp-port "$port"} \
+                --vmlinux "$vmlinux" --tree "$tree" --scratch "$scratch" --guest "the guest on :$_r_port" </dev/null)"
+            st=$?
+            rm -f "$scratch"
+            while IFS= read -r line; do
+                case "$line" in
+                    "+ "*) ok "${line#+ }" ;;
+                    "! "*) bad "${line#! }" ;;
+                    "? "*) say "${line#\? }" ;;
+                    "| "*) printf '       %s\n' "${line#| }" ;;
+                esac
+            done <<<"$out"
+            case $st in
+                0 | 2) ;;
+                1) rc=1 ;;
+                *)
+                    bad "running      the guest on :$_r_port could not be held against the tree (above)"
+                    rc=1
+                    ;;
+            esac
+        fi
+    done < <(kbl_instances)
+    [[ $n -gt 0 ]] || say "running      no guest: what a kernel recognises is held against the tree while one runs"
+    return $rc
+}
+
 _dt_check() {
     local label rc=0 n f="$_dt_dir/custom.dtb"
     label="$(kbl_tree_label "$_dt_tree")"
@@ -680,6 +733,7 @@ _dt_check() {
             bad "attached     a tree is marked attached and there is none (kbuildlab dt detach $label)"
             rc=1
         }
+        _dt_live "$label" || rc=1
         return $rc
     fi
     if [[ ! -f "$f" ]]; then
@@ -730,6 +784,7 @@ _dt_check() {
     else
         say "booted       not yet: no boot with this tree has been captured"
     fi
+    _dt_live "$label" || rc=1
     return $rc
 }
 

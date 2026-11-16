@@ -683,6 +683,14 @@ The last is found in the guest's memory as the kernel starts, and stops the gues
 additions to `/chosen`, memory reservations and the random seeds are the loader's
 to make. `dt check` says the same without booting.
 
+While a guest of the tree runs, `dt check` also holds what its kernel recognises
+against the tree: the tree the kernel holds, its CPUs, its System RAM and what its
+memblock sets aside, each beside what the tree states and what QEMU runs. The
+kernel is read from outside, through QEMU's monitor and the tree's `vmlinux`, so
+nothing runs in the guest and nothing stops it; that takes python's drgn and a
+run without `--kaslr`. A guest started on another tree than the one now in force
+is named and passed over.
+
 ## The tree.conf
 
 `init` and `add` write it from `templates/`. It states what the tree is (`ARCH`,
@@ -955,7 +963,8 @@ lib/tags.sh            tags: ctags, cscope, gtags and the clangd index
 lib/update.sh          update
 lib/firmware.sh        firmware: the global one and a tree's own
 lib/dt.sh              dt (lib/fdt.py reads and writes blobs, lib/dtcap.py copies one
-                       out of a guest's memory, lib/gdb-firmware.py follows a firmware in gdb)
+                       out of a guest's memory, lib/live.py reads a running kernel
+                       through the monitor, lib/gdb-firmware.py follows a firmware in gdb)
 lib/host.sh            doctor, image, containers
 lib/run-qemu.sh        run; run-gdb.sh, run-drgn.sh and resume.sh are attach, drgn
                        and resume, each a program of its own (lib/qmp.py talks QMP)
@@ -968,7 +977,7 @@ tests/                 tree.conf grammar, cli.py against the parsers, the tag vi
                        fdt.py against fdtget and damaged blobs, the refusals of dt and
                        firmware, guest.py, which boots a tree and runs commands in it,
                        dt-guest.py, which holds a booted kernel's memory and CPUs to
-                       its tree,
+                       its tree from inside the guest and from outside,
                        and style.py, which holds a checkout to its formatters and to
                        English
 ```
@@ -984,7 +993,8 @@ Optional: [gdbtools](https://github.com/yugeun-song/gdbtools), which makes symbo
 resolve before the MMU is on; `kbuildlab attach` finds it if it is installed and
 says so if it is not. `clangd` and `python3` on the host, for the clangd index;
 absent, `kbuildlab tags` says so and builds the other three. `sgdisk`, `sfdisk` and
-mtools, for a `ROOT=disk` guest. `dtc`, for `kbuildlab dt`.
+mtools, for a `ROOT=disk` guest. `dtc`, for `kbuildlab dt`; python's `drgn`, for
+`kbuildlab drgn` and for what `dt check` reads from a running guest.
 
 To work on kbuildlab: `shfmt` lays out the shell and `ruff` the Python, by
 `.editorconfig` and `ruff.toml`. `shfmt -w .` and `ruff format .` format a

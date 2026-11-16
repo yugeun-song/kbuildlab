@@ -2,7 +2,8 @@
 """Hold a tree's own device tree to the machine, end to end: the machine takes
 its memory and its CPUs from the tree, a tree that states hardware qemu has no
 machine for is refused, and what the booted kernel reports is held against the
-tree.  The tree is put back as it was.
+tree, from inside the guest and by `kbuildlab dt check` from outside.  The tree
+is put back as it was.
 
     dt-guest.py TREE [RUN-OPTION...]
 
@@ -20,6 +21,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -273,6 +275,13 @@ def main(argv):
             _, total = g.run(2, "grep MemTotal /proc/meminfo")
             _, possible = g.run(3, "cat /sys/devices/system/cpu/possible")
             _, online = g.run(4, "nproc")
+            live = kbl("dt", "check", tree)
+            with tempfile.TemporaryDirectory() as tmp:
+                shutil.copy(os.path.join(d, "custom.dtb"), os.path.join(tmp, "kept.dtb"))
+                other = kbl("dt", "apply", tree, aside(tmp, "kbl-other", hole[0] + HOLE, HOLE))
+                stale = kbl("dt", "check", tree)
+                back = kbl("dt", "apply", tree, os.path.join(tmp, "kept.dtb"))
+            again = kbl("dt", "check", tree)
             status = g.off()
         except RuntimeError as e:
             check(False, "the guest boots on the attached tree", "%s\n%s" % (e, "\n".join(g.text.splitlines()[-30:])))
@@ -324,6 +333,41 @@ def main(argv):
             usable * 0.8 < kb * 1024 <= usable,
             "MemTotal is %d kB, within the %d MiB that leaves" % (kb, usable >> 20),
             total,
+        )
+        rows = re.findall(r"^\s*(\S+) (running|live \w+) ", live[1], re.M)
+        gone = fdt.human(sum(n for _, n in fdt.aside(custom)[0]))
+        check(
+            live[0] == 0
+            and [name for _, name in rows] == ["running", "live tree", "live cpus", "live memory", "live aside"]
+            and len({mark for mark, _ in rows}) == 1,
+            "with the guest up, dt check reads its kernel from outside, and every row holds",
+            live[1],
+        )
+        check(
+            "the tree states %d, qemu runs %d, the kernel knows %d and has %d online" % (cpus, cpus, cpus, cpus)
+            in live[1],
+            "it finds the tree, qemu and the kernel at %d CPU(s)" % cpus,
+            live[1],
+        )
+        size = fdt.human(sum(n for _, n in left))
+        check(
+            "the tree states %s, qemu has %s, and the kernel's System RAM is that without the %s the tree leaves unmapped"
+            % (size, size, gone)
+            in live[1],
+            "and at %s of memory, with %s of it unmapped" % (size, gone),
+            live[1],
+        )
+        check(
+            other[0] == 0
+            and stale[0] != 0
+            and "the kernel holds another tree" in stale[1]
+            and "is mapped, and the tree leaves it unmapped" in stale[1]
+            and "the tree leaves it  " in stale[1],
+            "once the tree sets aside more than the running kernel was handed, dt check tells in three rows",
+            other[1] + stale[1],
+        )
+        check(
+            back[0] == 0 and again[0] == 0, "and holds again with the tree the guest was started on", back[1] + again[1]
         )
         booted = os.path.join(d, "booted.dtb")
         if check(os.path.isfile(booted), "the launcher kept what the kernel was handed (booted.dtb)"):

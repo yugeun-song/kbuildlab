@@ -419,7 +419,7 @@ def moving(tmp, t, variant):
     )
 
 
-def stated(tmp, t):
+def stated(tmp, t, variant):
     check(fdt.cpus(t) == 3 and fdt.machine(t) == ["mem 4096M", "smp 3"], "the machine a tree states")
     lone = dtc(
         "/dts-v1/;\n/ { #address-cells = <2>; #size-cells = <2>;\n"
@@ -431,6 +431,37 @@ def stated(tmp, t):
         check(False, "a tree without CPUs states no machine")
     except fdt.FdtError as e:
         check("no CPUs" in str(e), "a tree without CPUs states no machine")
+    check(
+        fdt.aside(t) == ([FIRMWARE], [(0x80000000, 0x10000), (0xA0000000, 0x200000)], [(0x2000000, False)]),
+        "what a tree sets aside: unmapped, reserved, and left to the kernel to place",
+    )
+    more = variant(
+        CMA,
+        "a@50000000 { reg = <0x0 0x50000000 0x0 0x100000 0x0 0x50100000 0x0 0x100000>; no-map; };\n"
+        "        b@60000000 { reg = <0x0 0x60000000 0x0 0x200000>; };\n"
+        '        c@70000000 { reg = <0x0 0x70000000 0x0 0x100000>; no-map; status = "disabled"; };\n'
+        "        pool { size = <0x0 0x400000>; no-map; };\n        " + CMA,
+    )
+    check(
+        fdt.aside(more)
+        == (
+            [(0x50000000, 0x200000), FIRMWARE],
+            [(0x60000000, 0x200000), (0x80000000, 0x10000), (0xA0000000, 0x200000)],
+            [(0x400000, True), (0x2000000, False)],
+        ),
+        "ranges that touch are one, a disabled region sets nothing aside",
+    )
+    check(fdt.aside(fdt.parse(lone)) == ([], [], []), "a tree may set nothing aside")
+    rng = random.Random(20261116)
+    wrong = 0
+    for _ in range(300):
+        spans = [(rng.randrange(40), rng.randrange(9)) for _ in range(rng.randrange(5))]
+        holes = [(rng.randrange(40), rng.randrange(9)) for _ in range(rng.randrange(5))]
+        want = {x for b, n in spans for x in range(b, b + n)} - {x for b, n in holes for x in range(b, b + n)}
+        got = fdt.without(spans, holes)
+        cells = [x for b, n in got for x in range(b, b + n)]
+        wrong += not (set(cells) == want and len(cells) == len(want) and got == fdt.merged(got))
+    check(wrong == 0, "ranges without others, against a model of single cells (300 cases)")
 
 
 def unit(tmp):
@@ -606,7 +637,7 @@ def unit(tmp):
     )
 
     moving(tmp, t, variant)
-    stated(tmp, t)
+    stated(tmp, t, variant)
 
     check(fdt.is_overlay(fdt.parse(overlay)) and not fdt.is_overlay(t), "an overlay is told from a tree")
 
@@ -699,6 +730,8 @@ def exercise(data, others=()):
     fdt.identity(tree)
     fdt.is_overlay(tree)
     fdt.memory(tree)
+    unmapped, kept, _ = fdt.aside(tree)
+    assert fdt.without(fdt.memory(tree), unmapped + kept) == fdt.without(fdt.without(fdt.memory(tree), unmapped), kept)
     try:
         assert fdt.machine(tree)[1] == "smp %d" % fdt.cpus(tree)
     except fdt.FdtError:

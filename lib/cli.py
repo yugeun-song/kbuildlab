@@ -310,7 +310,9 @@ COMMANDS = [
             "refused. rebase writes the tree again onto the machine it asks for, or onto one that "
             "changed, keeping what is the tree's own: /chosen, /aliases, what it set aside.",
             "A run refuses a tree that is not the one attached: a source edited after its build, a "
-            "machine other than the one it states, a loader that rewrites it. check tells.",
+            "machine other than the one it states, a loader that rewrites it. check tells, and "
+            "while a guest of the tree runs it reads that guest's kernel through QEMU's monitor and "
+            "holds its tree, CPUs, System RAM and memblock against the tree and against QEMU.",
         ],
         opts=[
             Opt(

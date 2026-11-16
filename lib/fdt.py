@@ -537,12 +537,41 @@ def overlap(a, b):
     return bool(a[1] and b[1]) and a[0] < b[0] + b[1] and b[0] < a[0] + a[1]
 
 
+def without(spans, holes):
+    out, holes = [], merged(holes)
+    for base, size in merged(spans):
+        at = base
+        for start, length in holes:
+            if start >= base + size or start + length <= at:
+                continue
+            if start > at:
+                out.append((at, start - at))
+            at = start + length
+        if at < base + size:
+            out.append((at, base + size - at))
+    return out
+
+
 def memory(tree):
     return merged(r for n in tree.root.children if n.text("device_type") == "memory" and n.enabled() for r in ranges(n))
 
 
 def cpus(tree):
     return sum(1 for n in tree.root.walk() if n.text("device_type") == "cpu")
+
+
+def aside(tree):
+    unmapped, kept, placed = [], [], []
+    node = tree.node(RESERVED)
+    for child in node.children if node is not None else ():
+        if not child.enabled():
+            continue
+        if "reg" in child.props:
+            (unmapped if "no-map" in child.props else kept).extend(ranges(child))
+        elif "size" in child.props:
+            placed.append((_join(child.cells("size")[: node.cell("#size-cells", 1)]), "no-map" in child.props))
+    kept.extend(tree.reserve)
+    return merged(unmapped), merged(kept), placed
 
 
 def agrees(base, own, loads=()):
